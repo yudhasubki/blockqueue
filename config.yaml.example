@@ -1,0 +1,10 @@
+http:
+  port: 8080
+logging:
+  level: "debug"
+  type:  "json"
+sqlite:
+  db_name: "queuestream"
+  busy_timeout: 5000
+etcd:
+  path: "etcdb"

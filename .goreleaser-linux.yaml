@@ -1,0 +1,56 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+version: 1
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: blockqueue
+    env:
+      - CGO_ENABLED=1
+      - GO_VERSION="1.21.3"
+      - >-
+        {{- if eq .Os "linux" }}
+          {{- if eq .Arch "amd64" }}CC=gcc{{- end }}
+          {{- if eq .Arch "arm64" }}CC=aarch64-linux-gnu-gcc{{- end }}
+          {{- if eq .Arch "arm" }}
+            {{- if eq .Arm "6" }}CC=arm-linux-gnueabi-gcc{{- end }}
+            {{- if eq .Arm "7" }}CC=arm-linux-gnueabihf-gcc{{- end }}
+          {{- end }}
+        {{- end }}
+    goos:
+      - linux
+    flags:
+      - -tags=json
+    goarch:
+      - amd64
+      - arm
+      - arm64
+    goarm:
+      - 6
+      - 7
+    main: ./cmd/queuestream
+archives:
+  - id: blockqueue
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end -}}
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_linux_checksums.txt"
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

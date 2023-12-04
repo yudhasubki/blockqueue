@@ -1,0 +1,44 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+version: 1
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: blockqueue
+    env:
+      - CGO_ENABLED=1
+      - GO_VERSION="1.21.3"
+    goos:
+      - darwin
+    flags:
+      - -tags=json
+    goarch:
+      - amd64
+      - arm
+      - arm64
+    main: ./cmd/queuestream
+archives:
+  - id: blockqueue
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end -}}
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_checksums.txt"
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"

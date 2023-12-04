@@ -1,0 +1,4 @@
+config.yaml
+/tmp
+/.vscode
+dist/
