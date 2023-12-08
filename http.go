@@ -38,13 +38,8 @@ func (h *Http) Router() http.Handler {
 			r.Get("/{topicName}/subscribers", h.GetSubscribers)
 			r.Post("/{topicName}/subscribers", h.CreateSubscriber)
 			r.Delete("/{topicName}/subscribers/{subscriberName}", h.DeleteSubscriber)
-
-			r.Get("/{topicName}/subscribers/{subscriberName}/{partitionId}", h.ReadPartition)
-			r.Post("/{topicName}/subscribers/{subscriberName}/{partitionId}", h.CreatePartition)
-			r.Delete("/{topicName}/subscribers/{subscriberName}/{partitionId}", h.DeletePartition)
-
-			r.Post("/{topicName}/subscribers/{subscriberName}/messages/claims", h.Claim)
-			r.Delete("/{topicName}/subscribers/{subscriberName}/{partitionId}/messages/{messageId}", h.DeleteMessagePartition)
+			r.Get("/{topicName}/subscribers/{subscriberName}", h.ReadSubscriber)
+			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/{messageId}", h.AckMessage)
 		})
 	})
 
@@ -138,10 +133,6 @@ func (h *Http) DeleteSubscriber(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) Claim(w http.ResponseWriter, r *http.Request) {
-
-}
-
 func (h *Http) Publish(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic   = h.getTopic(r.Context())
@@ -218,55 +209,7 @@ func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) CreatePartition(w http.ResponseWriter, r *http.Request) {
-	var (
-		topic       = h.getTopic(r.Context())
-		subscriber  = chi.URLParam(r, "subscriberName")
-		partitionId = chi.URLParam(r, "partitionId")
-	)
-
-	err := h.Stream.CreateSubscriberPartition(r.Context(), topic, io.RequestCreateSubscriberPartition{
-		Subscriber:  subscriber,
-		PartitionId: partitionId,
-	})
-	if err != nil {
-		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
-			Error:   err.Error(),
-			Message: httpresponse.MessageFailure,
-		})
-		return
-	}
-
-	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
-		Message: httpresponse.MessageSuccess,
-	})
-}
-
-func (h *Http) DeletePartition(w http.ResponseWriter, r *http.Request) {
-	var (
-		topic       = h.getTopic(r.Context())
-		subscriber  = chi.URLParam(r, "subscriberName")
-		partitionId = chi.URLParam(r, "partitionId")
-	)
-
-	err := h.Stream.DeleteSubscriberPartition(r.Context(), topic, io.RequestCreateSubscriberPartition{
-		Subscriber:  subscriber,
-		PartitionId: partitionId,
-	})
-	if err != nil {
-		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
-			Error:   err.Error(),
-			Message: httpresponse.MessageFailure,
-		})
-		return
-	}
-
-	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
-		Message: httpresponse.MessageSuccess,
-	})
-}
-
-func (h *Http) ReadPartition(w http.ResponseWriter, r *http.Request) {
+func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic       = h.getTopic(r.Context())
 		subscriber  = chi.URLParam(r, "subscriberName")
@@ -285,7 +228,7 @@ func (h *Http) ReadPartition(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), duration)
 	defer cancel()
 
-	messages, err := h.Stream.ReadSubscriberPartition(ctx, topic, subscriber, partitionId)
+	messages, err := h.Stream.ReadSubscriber(ctx, topic, subscriber, partitionId)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -300,31 +243,8 @@ func (h *Http) ReadPartition(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) DeleteMessagePartition(w http.ResponseWriter, r *http.Request) {
-	var (
-		topic       = h.getTopic(r.Context())
-		subscriber  = chi.URLParam(r, "subscriberName")
-		partitionId = chi.URLParam(r, "partitionId")
-		messageId   = chi.URLParam(r, "messageId")
-		request     = io.RequestDeletePartitionMessage{
-			Subscriber:  subscriber,
-			PartitionId: partitionId,
-			MessageId:   messageId,
-		}
-	)
+func (h *Http) AckMessage(w http.ResponseWriter, r *http.Request) {
 
-	err := h.Stream.DeletePartitionMessage(r.Context(), topic, request)
-	if err != nil {
-		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
-			Error:   err.Error(),
-			Message: httpresponse.MessageFailure,
-		})
-		return
-	}
-
-	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
-		Message: httpresponse.MessageSuccess,
-	})
 }
 
 func (h *Http) topicExist(next http.Handler) http.Handler {

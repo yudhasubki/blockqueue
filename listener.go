@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/google/uuid"
 	"github.com/nutsdb/nutsdb"
 	"github.com/yudhasubki/queuestream/pkg/bucket"
 	"github.com/yudhasubki/queuestream/pkg/core"
@@ -19,361 +19,260 @@ import (
 )
 
 var (
-	ErrListenerShutdown  = errors.New("listener going to shutdown")
-	ErrPartitionConflict = errors.New("partition was exist")
-	ErrPartitionNotFound = errors.New("partition not found")
+	ErrListenerShutdown = errors.New("listener shutdown")
+	ErrListenerNotFound = errors.New("listener not found")
+	ErrListenerDeleted  = errors.New("listener was deleted")
+)
+
+type ListenerStatus string
+
+const (
+	ShutdownListenerStatus       ListenerStatus = "shutdown"
+	RemovedListenerStatus        ListenerStatus = "remove"
+	FailedDeliveryListenerStatus ListenerStatus = "failed_delivery"
+	DeliveryListenerStatus       ListenerStatus = "delivery"
 )
 
 type Listener[V chan blockio.ResponseMessages] struct {
 	Id            string
 	JobId         string
-	Partitions    map[string]*Partition
-	ServerCtx     context.Context
 	PriorityQueue *pqueue.PriorityQueue[V]
-	mtx           *sync.RWMutex
-	shutdown      bool
-	deleted       chan bool
-	message       chan bool
+	ServerCtx     context.Context
+
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	shutdown   bool
+	remove     bool
+	response   chan chan ListenerStatus
 }
 
 func NewListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber) *Listener[V] {
+	ctx, cancel := context.WithCancel(serverCtx)
 	listener := &Listener[V]{
+		ctx:           ctx,
+		cancelFunc:    cancel,
 		Id:            subscriber.Name,
 		JobId:         jobId,
-		ServerCtx:     serverCtx,
 		PriorityQueue: pqueue.New[V](),
-		Partitions:    make(map[string]*Partition),
 		shutdown:      false,
-		deleted:       make(chan bool, 1),
-		mtx:           new(sync.RWMutex),
-		message:       make(chan bool, 20000),
+		remove:        false,
+		response:      make(chan chan ListenerStatus),
 	}
 
-	go listener.claim()
+	go listener.watcher()
+	go listener.dispatcher()
 
 	return listener
 }
 
-func (listener Listener[V]) createBucket() error {
-	return BucketTx(func(tx *nutsdb.Tx) error {
-		err := CreateTxBucket(tx, listener.Bucket())
-		if err != nil {
-			return err
-		}
-
-		return CreateTxBucket(tx, listener.BucketPartitionLog())
-	})
-}
-
-func (listener Listener[V]) Bucket() string {
-	return fmt.Sprintf("%s:%s", listener.JobId, listener.Id)
-}
-
-func (listener Listener[V]) BucketPartitionLog() string {
-	return fmt.Sprintf("%s:%s:partition_log", listener.JobId, listener.Id)
-}
-
-func (listener *Listener[V]) Close() {
-	listener.shutdown = true
-	listener.PriorityQueue.Cond.Broadcast()
-}
-
-func (listener *Listener[V]) CreatePartition(partitionId string) error {
-	listener.mtx.Lock()
-	defer listener.mtx.Unlock()
-
-	_, exist := listener.Partitions[partitionId]
-	if exist {
-		return ErrPartitionConflict
-	}
-
-	listener.Partitions[partitionId] = NewPartition(
-		partitionId,
-		listener.JobId,
-		listener.Id,
-	)
-
-	err := BucketTx(func(tx *nutsdb.Tx) error {
-		return tx.Put(listener.BucketPartitionLog(), []byte(partitionId), []byte(partitionId), nutsdb.Persistent)
-	})
-	if err != nil {
-		return err
-	}
-
-	return listener.Partitions[partitionId].createBucket()
-}
-
-func (listener *Listener[V]) DeletePartitionMessage(ctx context.Context, partitionId, messageId string) error {
-	listener.mtx.Lock()
-	defer listener.mtx.Unlock()
-
-	partition, ok := listener.Partitions[partitionId]
-	if !ok {
-		return ErrPartitionNotFound
-	}
-
-	return partition.deleteMessage(messageId)
-}
-
-func (listener *Listener[V]) ReadPartition(ctx context.Context, partitionId string) (blockio.ResponseMessages, error) {
-	partition, ok := listener.Partitions[partitionId]
-	if !ok {
-		return blockio.ResponseMessages{}, ErrPartitionNotFound
-	}
-
-	bucketMessages, err := partition.read(ctx)
-	if err != nil {
-		slog.Error(
-			"error read partition messages",
-			LogPrefixErr, err,
-		)
-		return blockio.ResponseMessages{}, err
-	}
-
-	messages := make(blockio.ResponseMessages, 0)
-	if len(bucketMessages) > 0 {
-		for _, message := range bucketMessages {
-			messages = append(messages, blockio.ResponseMessage{
-				Id:      message.Id,
-				Message: message.Message,
-			})
-		}
-
-		return messages, nil
-	}
-
-	messagesChan := make(chan blockio.ResponseMessages, 1)
-	listener.Enqueue(partitionId, messagesChan)
-
-	select {
-	case <-ctx.Done():
-		listener.Dequeue(partitionId)
-	case msgsChan := <-messagesChan:
-		messages = msgsChan
-	}
-
-	return messages, nil
-}
-
-func (listener *Listener[V]) Enqueue(partitionId string, messages chan blockio.ResponseMessages) {
+func (listener *Listener[V]) Shutdown() {
 	listener.PriorityQueue.Cond.L.Lock()
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
+	listener.shutdown = true
+	listener.cancelFunc()
+	listener.PriorityQueue.Cond.Broadcast()
+}
+
+func (listener *Listener[V]) Remove() {
+	listener.PriorityQueue.Cond.L.Lock()
+	defer listener.PriorityQueue.Cond.L.Unlock()
+
+	listener.remove = true
+	listener.cancelFunc()
+	listener.PriorityQueue.Cond.Broadcast()
+}
+
+func (listener Listener[V]) Bucket() []byte {
+	return []byte(fmt.Sprintf("%s:%s", listener.JobId, listener.Id))
+}
+
+func (listener *Listener[V]) Enqueue(messages chan blockio.ResponseMessages) string {
+	listener.PriorityQueue.Cond.L.Lock()
+	defer listener.PriorityQueue.Cond.L.Unlock()
+
+	id := uuid.New().String()
 	listener.PriorityQueue.Push(&pqueue.Item[V]{
-		Id:    partitionId,
+		Id:    id,
 		Value: messages,
 	})
 
-	listener.PriorityQueue.Cond.Signal()
+	listener.PriorityQueue.Cond.Broadcast()
+
+	return id
 }
 
-func (listener *Listener[V]) Dequeue(partitionId string) {
+func (listener *Listener[V]) Dequeue(id string) {
 	listener.PriorityQueue.Cond.L.Lock()
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
 	for i := 0; i < listener.PriorityQueue.Len(); i++ {
-		if listener.PriorityQueue.At(i).Id == partitionId {
+		if listener.PriorityQueue.At(i).Id == id {
 			listener.PriorityQueue.At(i).Value <- blockio.ResponseMessages{}
 			listener.PriorityQueue.Remove(i)
 			break
 		}
 	}
 
-	listener.PriorityQueue.Cond.Signal()
-}
-func (listener *Listener[V]) DeletePartition(partitionId string) error {
-	listener.mtx.Lock()
-	defer listener.mtx.Unlock()
-
-	partition, exist := listener.Partitions[partitionId]
-	if !exist {
-		return ErrPartitionNotFound
-	}
-
-	delete(listener.Partitions, partitionId)
-	DeleteMessageBucket(listener.BucketPartitionLog(), partitionId)
-	partition.delete()
-
-	return nil
-}
-
-func (listener *Listener[V]) claim() {
-	for {
-		select {
-		case <-listener.ServerCtx.Done():
-			slog.Info(
-				"[claim] watcher entering to shutdown state",
-				"listener", listener.Bucket(),
-			)
-			return
-		case <-listener.deleted:
-			slog.Info(
-				"[claim] watcher entering to delete state",
-				"listener", listener.Bucket(),
-			)
-
-			for _, partition := range listener.Partitions {
-				partition.delete()
-			}
-
-			DeleteBuckets(
-				listener.Bucket(),
-				listener.BucketPartitionLog(),
-			)
-
-			return
-		case <-listener.message:
-			err := listener.read()
-			if err != nil {
-				if errors.Is(err, ErrListenerShutdown) {
-					break
-				}
-				slog.Debug(
-					"error read",
-					LogPrefixErr, err,
-				)
-			}
-		}
-	}
-}
-
-func (listener *Listener[V]) count() int {
-	total, err := CountBucketMessage(listener.Bucket())
-	if err != nil {
-		slog.Error(
-			"error count bucket message",
-			"error", err,
-			"bucket", listener.Bucket(),
-		)
-		return 0
-	}
-
-	return total
-}
-
-func (listener *Listener[V]) read() error {
-	listener.PriorityQueue.Cond.L.Lock()
-	defer listener.PriorityQueue.Cond.L.Unlock()
-
-	for listener.PriorityQueue.Len() == 0 && !listener.shutdown && listener.count() >= 0 {
-		slog.Debug(
-			"waiting priority queue from request",
-			"total_request", listener.PriorityQueue.Len(),
-			"listener", listener.Id,
-		)
-		listener.PriorityQueue.Cond.Wait()
-	}
-
-	if listener.shutdown {
-		return ErrListenerShutdown
-	}
-
-	bucketMessages := make(bucket.Messages, 0)
-	err := GetBucketMessage(listener.Bucket(), func(position int, val []byte) error {
-		message := bucket.Message{}
-
-		err := json.Unmarshal(val, &message)
-		if err != nil {
-			return err
-		}
-
-		bucketMessages = append(bucketMessages, message)
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	if len(bucketMessages) == 0 {
-		return nil
-	}
-
-	messages := make(blockio.ResponseMessages, 0)
-	for _, message := range bucketMessages {
-		messages = append(messages, blockio.ResponseMessage{
-			Id:      message.Id,
-			Message: message.Message,
-		})
-	}
-
-	err = BucketTx(func(tx *nutsdb.Tx) error {
-		_, exist := listener.Partitions[listener.PriorityQueue.Peek().Id]
-		if !exist {
-			return ErrPartitionNotFound
-		}
-		return listener.Partitions[listener.PriorityQueue.Peek().Id].storeTxBucketMessage(tx, bucketMessages)
-	})
-	if err != nil {
-		slog.Debug(
-			"error store tx bucket message",
-			LogPrefixErr, err,
-		)
-		return err
-	}
-
-	err = BucketTx(func(tx *nutsdb.Tx) error {
-		return listener.deleteTxBucketMessage(tx, bucketMessages)
-	})
-	if err != nil {
-		slog.Debug(
-			"error store tx bucket message",
-			LogPrefixErr, err,
-		)
-		return err
-	}
-
-	listener.PriorityQueue.Peek().Value <- messages
-	listener.PriorityQueue.Pop()
-
-	return nil
-}
-
-func (listener *Listener[V]) deleteTxBucketMessage(tx *nutsdb.Tx, messages bucket.Messages) error {
-	for _, message := range messages {
-		err := tx.Delete(listener.Bucket(), []byte(message.Id))
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (listener *Listener[V]) partitionBucketLog() error {
-	ids := make([]string, 0)
-	err := GetBucketMessage(listener.BucketPartitionLog(), func(position int, val []byte) error {
-		ids = append(ids, string(val))
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	slog.Debug(
-		"current partition buckets",
-		LogPrefixBucket, ids,
-		LogPrefixConsumer, listener.Id,
-	)
-
-	for _, id := range ids {
-		err := listener.CreatePartition(id)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (listener *Listener[V]) delete() {
-	listener.shutdown = true
-	listener.deleted <- true
 	listener.PriorityQueue.Cond.Broadcast()
 }
 
+func (listener *Listener[V]) dispatcher() {
+	for response := range listener.response {
+		listener.PriorityQueue.Cond.L.Lock()
+
+		for listener.PriorityQueue.Len() == 0 && !listener.shutdown && !listener.remove {
+			slog.Info(
+				"wait priority queue",
+				"size", listener.PriorityQueue.Len(),
+			)
+			listener.PriorityQueue.Cond.Wait()
+		}
+
+		var (
+			err      error
+			messages = make(blockio.ResponseMessages, 0)
+		)
+
+		if listener.shutdown {
+			response <- ShutdownListenerStatus
+			goto Unlock
+		}
+
+		if listener.remove {
+			response <- RemovedListenerStatus
+			goto Unlock
+		}
+
+		err = ReadBucketTx(func(tx *nutsdb.Tx) error {
+			items, err := tx.LRange(listener.JobId, listener.Bucket(), 0, 10)
+			if err != nil {
+				return err
+			}
+
+			for _, item := range items {
+				message := bucket.Message{}
+				err := json.Unmarshal(item, &message)
+				if err != nil {
+					return err
+				}
+
+				messages = append(messages, blockio.ResponseMessage{
+					Id:      message.Id,
+					Message: message.Message,
+				})
+			}
+
+			return nil
+		})
+		if err != nil {
+			slog.Error(
+				"[watcher] error reading the unclaimed message on the bucket",
+				LogPrefixErr, err,
+				LogPrefixBucket, listener.JobId,
+				LogPrefixConsumer, string(listener.Bucket()),
+			)
+
+			response <- FailedDeliveryListenerStatus
+			goto Unlock
+		}
+
+		err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+			for i := 0; i < len(messages); i++ {
+				_, err := tx.LPop(listener.JobId, listener.Bucket())
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+		if err != nil {
+			slog.Error(
+				"[watcher] error remove the claimed message on the bucket",
+				LogPrefixErr, err,
+				LogPrefixBucket, listener.JobId,
+				LogPrefixConsumer, string(listener.Bucket()),
+			)
+			response <- FailedDeliveryListenerStatus
+			goto Unlock
+		}
+
+		listener.PriorityQueue.Peek().Value <- messages
+		listener.PriorityQueue.Pop()
+
+		response <- DeliveryListenerStatus
+
+	Unlock:
+		listener.PriorityQueue.Cond.L.Unlock()
+	}
+}
+
+func (listener *Listener[V]) watcher() {
+	for {
+		ticker := time.NewTicker(500 * time.Microsecond)
+		select {
+		case <-listener.ctx.Done():
+			slog.Debug(
+				"listener entering shutdown status",
+				"removed", listener.remove,
+				"shutdown", listener.shutdown,
+			)
+			return
+		case <-ticker.C:
+			messageLength := 0
+			err := UpdateBucketTx(func(tx *nutsdb.Tx) error {
+				size, err := tx.LSize(listener.JobId, listener.Bucket())
+				if err != nil {
+					return err
+				}
+
+				messageLength = size
+
+				return nil
+			})
+			if err != nil {
+				continue
+			}
+
+			if messageLength > 0 {
+				kind := make(chan ListenerStatus)
+				listener.response <- kind
+
+				k := <-kind
+				switch k {
+				case RemovedListenerStatus:
+					slog.Debug(
+						"[watcher] listener entering shutdown status, listener removed",
+						LogPrefixConsumer, listener.Id,
+					)
+					return
+				case ShutdownListenerStatus:
+					slog.Debug(
+						"[watcher] listener entering shutdown status, server receive signal shutdown",
+						LogPrefixConsumer, listener.Id,
+					)
+					return
+				case FailedDeliveryListenerStatus:
+					slog.Error(
+						"[watcher] error sent to the incoming request",
+					)
+				case DeliveryListenerStatus:
+					slog.Debug(
+						"[watcher] success deliver message to the client",
+						LogPrefixConsumer, listener.Id,
+					)
+				}
+			}
+		}
+	}
+}
+
 func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
-	var messages core.Messages
+	var (
+		messages core.Messages
+		prefix   = time.Now().UnixNano()
+	)
 
 	err := json.NewDecoder(message).Decode(&messages)
 	if err != nil {
@@ -385,15 +284,9 @@ func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
 		return err
 	}
 
-	var (
-		prefix = time.Now().UnixNano()
-	)
-
-	listener.PriorityQueue.Cond.L.Lock()
-	defer listener.PriorityQueue.Cond.L.Unlock()
-
 	err = backoff.Retry(func() error {
-		return BucketTx(func(tx *nutsdb.Tx) error {
+		return UpdateBucketTx(func(tx *nutsdb.Tx) error {
+			messageBytes := make([][]byte, 0)
 			for idx, message := range messages {
 				var (
 					id = fmt.Sprintf("%d_%d", prefix, idx)
@@ -407,10 +300,12 @@ func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
 					return err
 				}
 
-				err = tx.Put(listener.Bucket(), []byte(id), b, nutsdb.Persistent)
-				if err != nil {
-					return err
-				}
+				messageBytes = append(messageBytes, b)
+			}
+
+			err = tx.RPush(listener.JobId, []byte(listener.Bucket()), messageBytes...)
+			if err != nil {
+				return err
 			}
 
 			return nil
@@ -424,8 +319,6 @@ func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
 		)
 		return err
 	}
-
-	listener.message <- true
 
 	return nil
 }

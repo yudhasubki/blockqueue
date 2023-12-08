@@ -54,12 +54,12 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	blockqueue.Etcd = etcd
 
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	stream := blockqueue.New()
 
 	err = stream.Run(ctx)
 	if err != nil {
+		cancel()
 		return err
 	}
 
@@ -79,10 +79,12 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 
 	err = engine.Start()
 	if err != nil {
+		cancel()
 		return err
 	}
 	<-shutdown
 
+	cancel()
 	engine.Stop()
 	sqlite.Close()
 	etcd.Close()

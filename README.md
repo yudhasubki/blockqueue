@@ -30,13 +30,27 @@ curl --location 'http://your-host/topics' \
 }'
 ```
 
+### Create New Subscribers
+```bash
+curl --location 'http://your-host/topics/{topic_name}/subscribers' \
+--header 'Content-Type: application/json' \
+--data '{
+    "subscribers": ["{subscriber_name_1}", "{subscriber_name-1}"]
+}'
+```
+
+### Delete Subscriber
+```bash
+curl --location --request DELETE ''http://your-host/topics/{topic_name}/subscribers/{subscriber_name}'
+```
+
 ### Publish Message 
 
 ```bash
-curl --location 'http://localhost:8080/topics/{topic_name}/messages' \
+curl --location 'http://your-host/topics/{topic_name}/messages' \
 --header 'Content-Type: application/json' \
 --data '{
-    "message": "hi message from topic"
+    "message": "hi message from topic {topic_name}"
 }'
 ```
 
@@ -45,25 +59,17 @@ curl --location 'http://localhost:8080/topics/{topic_name}/messages' \
 To read a message, you need to create a unique consumer identifier. This ensures horizontal scalability and guarantees that the message is sent only once.
 
 ```bash
-curl --location 'http://localhost:8080/topics/{topic_name}/subscribers/{subscriber_name}/{identifier}?timeout={5s/20s/30s}'
+curl --location 'http://your-host/topics/{topic_name}/subscribers/{subscriber_name}?timeout=5s'
 ```
 
-> Note: A message is only processed by one consumer, claimed by its unique identifier.
+> Note: A message at-least-once message delivery.
 
 ### Delete Message
 
-After reading and successfully processing a message, you must delete it, as the message will persist indefinitely if not removed.
+After reading and successfully processing a message, you must delete it, as the message will persist based on queue retry policy on config.yaml
 
 ```bash
-curl --location --request DELETE 'http://localhost:8080/topics/{topic_name}/subscribers/{subscriber_name}/{identifier}/messages/{message_id}'
-```
-
-### Check Unclaimed Message
-
-If you want to check how many messages have not been claimed by a consumer
-
-```bash
-curl --location 'localhost:8080/topics/cart/subscribers'
+curl --location --request DELETE 'http://your-host/topics/{topic_name}/subscribers/{subscriber_name}/messages/{message_id}'
 ```
 
 ## Roadmap

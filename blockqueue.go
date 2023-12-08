@@ -17,14 +17,14 @@ var (
 )
 
 type BlockQueue[V chan io.ResponseMessages] struct {
-	mtx       *sync.Mutex
+	mtx       *sync.RWMutex
 	serverCtx context.Context
 	jobs      map[string]*Job[V]
 }
 
 func New[V chan io.ResponseMessages]() *BlockQueue[V] {
 	return &BlockQueue[V]{
-		mtx:  new(sync.Mutex),
+		mtx:  new(sync.RWMutex),
 		jobs: make(map[string]*Job[V]),
 	}
 }
@@ -48,9 +48,6 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 }
 
 func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
 	err := Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		err := CreateTxTopic(ctx, tx, topic)
 		if err != nil {
@@ -72,6 +69,9 @@ func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscriber
 		)
 		return err
 	}
+
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 
 	job, err := NewJob[V](q.serverCtx, topic)
 	if err != nil {
@@ -96,8 +96,20 @@ func (q *BlockQueue[V]) DeleteJob(topic core.Topic) error {
 	return nil
 }
 
-func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request io.Publish) error {
+func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
+	q.mtx.RLock()
+	defer q.mtx.RUnlock()
+
 	job, exist := q.jobs[topic.Name]
+	if !exist {
+		return &Job[V]{}, false
+	}
+
+	return job, true
+}
+
+func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request io.Publish) error {
+	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
@@ -120,10 +132,7 @@ func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request i
 }
 
 func (q *BlockQueue[V]) AddSubscribers(ctx context.Context, topic core.Topic) error {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
-	job, exist := q.jobs[topic.Name]
+	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
@@ -137,10 +146,7 @@ func (q *BlockQueue[V]) AddSubscribers(ctx context.Context, topic core.Topic) er
 }
 
 func (q *BlockQueue[V]) DeleteSubscriber(ctx context.Context, topic core.Topic, subcriber string) error {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
-	job, exist := q.jobs[topic.Name]
+	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
@@ -148,44 +154,11 @@ func (q *BlockQueue[V]) DeleteSubscriber(ctx context.Context, topic core.Topic, 
 	return job.DeleteListener(ctx, topic, subcriber)
 }
 
-func (q *BlockQueue[V]) CreateSubscriberPartition(ctx context.Context, topic core.Topic, request io.RequestCreateSubscriberPartition) error {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
-	job, exist := q.jobs[topic.Name]
-	if !exist {
-		return ErrJobNotFound
-	}
-
-	return job.CreateListenerPartition(ctx, topic, request.Subscriber, request.PartitionId)
-}
-
-func (q *BlockQueue[V]) DeleteSubscriberPartition(ctx context.Context, topic core.Topic, request io.RequestCreateSubscriberPartition) error {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
-	job, exist := q.jobs[topic.Name]
-	if !exist {
-		return ErrJobNotFound
-	}
-
-	return job.DeleteListenerPartition(ctx, topic, request.Subscriber, request.PartitionId)
-}
-
-func (q *BlockQueue[V]) ReadSubscriberPartition(ctx context.Context, topic core.Topic, subscriber, partitionId string) (io.ResponseMessages, error) {
+func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, subscriber, partitionId string) (io.ResponseMessages, error) {
 	job, exist := q.jobs[topic.Name]
 	if !exist {
 		return io.ResponseMessages{}, ErrJobNotFound
 	}
 
-	return job.ReadListenerPartition(ctx, topic, subscriber, partitionId)
-}
-
-func (q *BlockQueue[V]) DeletePartitionMessage(ctx context.Context, topic core.Topic, request io.RequestDeletePartitionMessage) error {
-	job, exist := q.jobs[topic.Name]
-	if !exist {
-		return ErrJobNotFound
-	}
-
-	return job.DeleteListenerPartitionMessage(ctx, topic, request)
+	return job.Enqueue(ctx, topic, subscriber)
 }

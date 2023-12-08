@@ -2,21 +2,17 @@ package blockqueue
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/nutsdb/nutsdb"
 	"github.com/yudhasubki/eventpool"
 	"github.com/yudhasubki/queuestream/pkg/core"
 	"github.com/yudhasubki/queuestream/pkg/io"
 	"gopkg.in/guregu/null.v4"
-)
-
-var (
-	ErrListenerNotFound = errors.New("listener not found")
 )
 
 type Job[V chan io.ResponseMessages] struct {
@@ -25,10 +21,9 @@ type Job[V chan io.ResponseMessages] struct {
 	ServerCtx context.Context
 	Pool      *eventpool.Eventpool
 
-	mtx       *sync.Mutex
+	mtx       *sync.RWMutex
 	listeners map[uuid.UUID]*Listener[V]
 	message   chan bool
-	shutdown  chan bool
 	deleted   chan bool
 }
 
@@ -52,16 +47,6 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 			Subscriber: listener.storeJob,
 			Opts:       []eventpool.SubscriberConfigFunc{},
 		})
-
-		err := listener.createBucket()
-		if err != nil {
-			return &Job[V]{}, err
-		}
-
-		err = listener.partitionBucketLog()
-		if err != nil {
-			return &Job[V]{}, err
-		}
 	}
 
 	pool := eventpool.New()
@@ -73,15 +58,25 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		Pool:      pool,
 		ServerCtx: serverCtx,
 		message:   make(chan bool, 500),
-		shutdown:  make(chan bool, 1),
 		deleted:   make(chan bool, 1),
-		mtx:       new(sync.Mutex),
+		mtx:       new(sync.RWMutex),
 		listeners: listeners,
+	}
+
+	err = job.createBucket()
+	if err != nil {
+		return nil, err
 	}
 
 	go job.fetchWaitingJob()
 
 	return job, nil
+}
+
+func (job *Job[V]) createBucket() error {
+	return UpdateBucketTx(func(tx *nutsdb.Tx) error {
+		return CreateTxBucket(tx, nutsdb.DataStructureList, job.Name)
+	})
 }
 
 func (job *Job[V]) Trigger() {
@@ -121,74 +116,67 @@ func (job *Job[V]) DeleteListener(ctx context.Context, topic core.Topic, subscri
 		return err
 	}
 
-	listener, exist := job.listeners[subscriber.Id]
+	listener, exist := job.getListeners(subscriber.Id)
 	if !exist {
-		return ErrListenerNotFound
+		return nil
 	}
 
-	listener.delete()
-	job.Pool.CloseBy(listener.Id)
+	job.mtx.Lock()
+	defer job.mtx.Unlock()
 
-	return Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		subscriber.DeletedAt = null.StringFrom(time.Now().Format("2006-01-02 15:04:05"))
-		return DeleteTxSubscribers(ctx, tx, subscriber)
+	err = Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return DeleteTxSubscribers(ctx, tx, core.Subscriber{
+			Name:      listener.Id,
+			TopicId:   job.Id,
+			DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),
+		})
 	})
-}
-
-func (job *Job[V]) CreateListenerPartition(ctx context.Context, topic core.Topic, subscriberName, partitionId string) error {
-	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {
 		return err
 	}
 
-	listener, exist := job.listeners[subscriber.Id]
-	if !exist {
-		return ErrListenerNotFound
-	}
+	listener.Remove()
+	delete(job.listeners, subscriber.Id)
 
-	return listener.CreatePartition(partitionId)
+	return nil
 }
 
-func (job *Job[V]) DeleteListenerPartition(ctx context.Context, topic core.Topic, subscriberName, partitionId string) error {
-	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
-	if err != nil {
-		return err
-	}
-
-	listener, exist := job.listeners[subscriber.Id]
-	if !exist {
-		return ErrListenerNotFound
-	}
-
-	return listener.DeletePartition(partitionId)
-}
-
-func (job *Job[V]) ReadListenerPartition(ctx context.Context, topic core.Topic, subscriberName, partitionId string) (io.ResponseMessages, error) {
+func (job *Job[V]) Enqueue(ctx context.Context, topic core.Topic, subscriberName string) (io.ResponseMessages, error) {
 	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {
 		return io.ResponseMessages{}, err
 	}
 
-	listener, exist := job.listeners[subscriber.Id]
+	listener, exist := job.getListeners(subscriber.Id)
 	if !exist {
 		return io.ResponseMessages{}, ErrListenerNotFound
 	}
 
-	return listener.ReadPartition(ctx, partitionId)
+	response := make(chan io.ResponseMessages, 1)
+	id := listener.Enqueue(response)
+
+	select {
+	case <-ctx.Done():
+		listener.Dequeue(id)
+		return io.ResponseMessages{}, nil
+	case <-listener.ctx.Done():
+		listener.Dequeue(id)
+		return io.ResponseMessages{}, ErrListenerDeleted
+	case resp := <-response:
+		return resp, nil
+	}
 }
 
-func (job *Job[V]) DeleteListenerPartitionMessage(ctx context.Context, topic core.Topic, request io.RequestDeletePartitionMessage) error {
-	subscriber, err := job.getSubscribers(ctx, topic, request.Subscriber)
-	if err != nil {
-		return err
-	}
+func (job *Job[V]) getListeners(subscriberId uuid.UUID) (*Listener[V], bool) {
+	job.mtx.RLock()
+	defer job.mtx.RUnlock()
 
-	listener, exist := job.listeners[subscriber.Id]
+	listener, exist := job.listeners[subscriberId]
 	if !exist {
-		return ErrListenerNotFound
+		return listener, false
 	}
 
-	return listener.DeletePartitionMessage(ctx, request.PartitionId, request.MessageId)
+	return listener, true
 }
 
 func (job *Job[V]) getSubscribers(ctx context.Context, topic core.Topic, subscriberName string) (core.Subscriber, error) {
@@ -208,11 +196,11 @@ func (job *Job[V]) getSubscribers(ctx context.Context, topic core.Topic, subscri
 }
 
 func (job *Job[V]) Close() {
-	job.shutdown <- true
-
-	for idx := range job.listeners {
-		job.listeners[idx].Close()
+	job.mtx.Lock()
+	for _, listener := range job.listeners {
+		listener.Shutdown()
 	}
+	job.mtx.Unlock()
 }
 
 func (job *Job[V]) Remove() {
@@ -227,32 +215,28 @@ func (job *Job[V]) fetchWaitingJob() {
 				"signal cancel received. dispatcher waiting job entered shutdown status.",
 				LogPrefixTopic, job.Name,
 			)
-
 			job.Close()
 
 			return
 		case <-job.deleted:
 			slog.Info(
-				"topic is delete. dispatcher waiting job entered shutdown status",
+				"topic is deleted. dispatcher waiting job entered shutdown status",
 				LogPrefixTopic, job.Name,
 			)
+
+			for _, listener := range job.listeners {
+				listener.Remove()
+			}
 
 			err := job.remove()
 			if err != nil {
 				slog.Error(
-					"error removing a topic",
-					LogPrefixTopic, job.Name,
+					"error remove topic and his subscribers",
 					LogPrefixErr, err,
 				)
 			}
 
 			return
-		case <-job.shutdown:
-			slog.Info(
-				"job entered shutdown status",
-				LogPrefixTopic, job.Name,
-			)
-
 		case <-job.message:
 			slog.Debug(
 				"push job to the consumer bucket",
@@ -311,12 +295,6 @@ func (job *Job[V]) dispatchJob() error {
 }
 
 func (job *Job[V]) remove() error {
-	job.Pool.Close()
-
-	for _, listener := range job.listeners {
-		listener.delete()
-	}
-
 	return Tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
 		err := DeleteTxTopic(ctx, tx, core.Topic{
 			Id:        job.Id,
