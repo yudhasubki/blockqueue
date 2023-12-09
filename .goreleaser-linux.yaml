@@ -44,6 +44,8 @@ archives:
       {{- else if eq .Arch "arm64" }}arm64
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end -}}
+    files:
+      - migration/*
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_linux_checksums.txt"
 snapshot:

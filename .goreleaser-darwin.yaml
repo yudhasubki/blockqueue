@@ -32,6 +32,8 @@ archives:
       {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end -}}
+    files:
+      - migration/*
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_darwin_checksums.txt"
 snapshot:

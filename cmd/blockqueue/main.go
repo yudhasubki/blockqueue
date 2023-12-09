@@ -61,7 +61,8 @@ Usage:
 
 The commands are:
 
-	http    running blockqueue with http-based
+	http    	running blockqueue with http-based
+	migrate 	running migration blockqueue
 `[1:])
 }
 
