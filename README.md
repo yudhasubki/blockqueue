@@ -4,14 +4,6 @@
 
 Crafted atop the robust foundations of [SQLite3](https://www.sqlite.org/index.html) and [NutsDB](https://github.com/nutsdb/nutsdb), Block Queue prioritizes efficiency by minimizing network latency and ensuring cost-effectiveness.
 
-## Architecture
-
-![Publish Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/publisher_architecture.png)
-
-![Consumer Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/consumer_architecture.png)
-
-![Failed Redelivery Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/failed_redelivery_architecture.png)
-
 ## Why BlockQueue
 
 While Kafka, Redis, or SQS is an excellent product, it is quite complex and requires a lot of resources. My purpose is to build this BlockQueue for simplicity, low resources, and cheap.
@@ -21,6 +13,14 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 - 📢 Pub/Sub Mechanism: The inclusion of a publish/subscribe mechanism allows for easy communication and real-time updates.
 - 📦 Consumer Group: Block Queue facilitates message consumer group, enabling efficient data distribution similar to Kafka or Redis Stream for improved scalability.
 - 📶 Less Network Latency: Prioritizing efficiency, Block Queue minimizes network latency to persistence to enhance overall performance.
+
+## Architecture
+
+![Publish Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/publisher_architecture.png)
+
+![Consumer Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/consumer_architecture.png)
+
+![Failed Redelivery Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/failed_redelivery_architecture.png)
 
 ## How it works
 ### Create Topic
@@ -88,7 +88,7 @@ curl --location 'http://your-host/topics/{topic_name}/messages' \
 
 ### Read Message
 
-To read a message, you need to create a unique consumer identifier. This ensures horizontal scalability and guarantees that the message is sent only once.
+To read a message, you just need to pass the subscriber name into URL Path and with timeout. This ensures horizontal scalability and guarantees that the message is sent once.
 
 ```bash
 curl --location 'http://your-host/topics/{topic_name}/subscribers/{subscriber_name}?timeout=5s'
@@ -98,7 +98,7 @@ curl --location 'http://your-host/topics/{topic_name}/subscribers/{subscriber_na
 
 ### Delete Message
 
-After reading and successfully processing a message, you must delete it, as the message will persist based on queue retry policy on config.yaml
+After reading and successfully processing a message, you must delete it, as the message will persist based on queue retry policy on subscriber option.
 
 ```bash
 curl --location --request DELETE 'http://your-host/topics/{topic_name}/subscribers/{subscriber_name}/messages/{message_id}'
