@@ -9,14 +9,14 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/nutsdb/nutsdb"
+	"github.com/yudhasubki/blockqueue/pkg/core"
+	"github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/eventpool"
-	"github.com/yudhasubki/queuestream/pkg/core"
-	"github.com/yudhasubki/queuestream/pkg/io"
 	"gopkg.in/guregu/null.v4"
 )
 
 const (
-	BufferSizeJob = 100
+	BufferSizeJob = 5000
 )
 
 type Job[V chan io.ResponseMessages] struct {
@@ -65,7 +65,7 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		Name:      topic.Name,
 		pool:      eventpool.New(),
 		ServerCtx: serverCtx,
-		message:   make(chan bool, 500),
+		message:   make(chan bool, 20000),
 		deleted:   make(chan bool, 1),
 		mtx:       new(sync.RWMutex),
 		listeners: listeners,

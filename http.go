@@ -9,9 +9,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
-	"github.com/yudhasubki/queuestream/pkg/core"
-	httpresponse "github.com/yudhasubki/queuestream/pkg/http"
-	"github.com/yudhasubki/queuestream/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/core"
+	httpresponse "github.com/yudhasubki/blockqueue/pkg/http"
+	"github.com/yudhasubki/blockqueue/pkg/io"
 )
 
 type Http struct {

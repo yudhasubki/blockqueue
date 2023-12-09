@@ -13,11 +13,11 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
 	"github.com/nutsdb/nutsdb"
+	"github.com/yudhasubki/blockqueue/pkg/bucket"
+	"github.com/yudhasubki/blockqueue/pkg/core"
+	blockio "github.com/yudhasubki/blockqueue/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/pqueue"
 	"github.com/yudhasubki/eventpool"
-	"github.com/yudhasubki/queuestream/pkg/bucket"
-	"github.com/yudhasubki/queuestream/pkg/core"
-	blockio "github.com/yudhasubki/queuestream/pkg/io"
-	"github.com/yudhasubki/queuestream/pkg/pqueue"
 )
 
 var (
@@ -259,6 +259,7 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 				Message: message.Message.Message,
 			})
 
+			message.RetryPolicy.NextIter = message.RetryPolicy.NextIter.Add(listener.option.VisibilityDuration)
 			listener.pool.Publish(eventpool.SendJson(message))
 		}
 
@@ -460,8 +461,6 @@ func (listener *Listener[V]) retryWatcher() {
 		message.RetryPolicy.MaxAttempts++
 		if !skipRetry {
 			err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
-				message.RetryPolicy.NextIter = message.RetryPolicy.NextIter.Add(listener.option.VisibilityDuration)
-
 				b, _ := json.Marshal(message)
 				err := tx.RPush(listener.JobId, listener.Bucket(), b)
 				if err != nil {

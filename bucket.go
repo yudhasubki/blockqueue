@@ -5,7 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/nutsdb/nutsdb"
-	"github.com/yudhasubki/queuestream/pkg/etcd"
+	"github.com/yudhasubki/blockqueue/pkg/etcd"
 )
 
 var Etcd *etcd.Etcd

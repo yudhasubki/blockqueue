@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/yudhasubki/queuestream/pkg/core"
-	"github.com/yudhasubki/queuestream/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/core"
+	"github.com/yudhasubki/blockqueue/pkg/io"
 )
 
 var (

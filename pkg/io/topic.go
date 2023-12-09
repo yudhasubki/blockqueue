@@ -2,7 +2,7 @@ package io
 
 import (
 	"github.com/google/uuid"
-	"github.com/yudhasubki/queuestream/pkg/core"
+	"github.com/yudhasubki/blockqueue/pkg/core"
 )
 
 type Topic struct {

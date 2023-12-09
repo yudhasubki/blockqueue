@@ -10,13 +10,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yudhasubki/queuestream/pkg/sqlite"
+	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
 type Migrate struct{}
 
 func (m *Migrate) Run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("queuestream-http", flag.ContinueOnError)
+	fs := flag.NewFlagSet("blockqueue-http", flag.ContinueOnError)
 	path := register(fs)
 	fs.Usage = m.Usage
 
@@ -82,7 +82,7 @@ func (m *Migrate) Usage() {
 The migrate command to migrate to the database.
 
 Usage:
-	queuestream migrate [arguments]
+	blockqueue migrate [arguments]
 
 Arguments:
 	-config PATH

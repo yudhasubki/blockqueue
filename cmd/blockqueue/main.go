@@ -53,15 +53,15 @@ func (m *Main) Run(ctx context.Context, args []string) error {
 
 func (m *Main) Usage() {
 	fmt.Println(`
-queuestream is a tool for send a jobs with consumer groups
+blockqueue is a tool for send a jobs with consumer groups
 
 Usage:
 
-	queuestream <command> [arguments]
+	blockqueue <command> [arguments]
 
 The commands are:
 
-	http    running queuestream with http-based
+	http    running blockqueue with http-based
 `[1:])
 }
 

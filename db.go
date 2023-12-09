@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/yudhasubki/queuestream/pkg/core"
-	"github.com/yudhasubki/queuestream/pkg/sqlite"
+	"github.com/yudhasubki/blockqueue/pkg/core"
+	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
 var Conn *sqlite.SQLite

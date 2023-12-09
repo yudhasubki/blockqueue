@@ -10,15 +10,15 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lesismal/nbio/nbhttp"
-	blockqueue "github.com/yudhasubki/queuestream"
-	"github.com/yudhasubki/queuestream/pkg/etcd"
-	"github.com/yudhasubki/queuestream/pkg/sqlite"
+	blockqueue "github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/pkg/etcd"
+	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
 type Http struct{}
 
 func (h *Http) Run(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("queuestream-http", flag.ContinueOnError)
+	fs := flag.NewFlagSet("blockqueue-http", flag.ContinueOnError)
 	path := register(fs)
 	fs.Usage = h.Usage
 
@@ -97,7 +97,7 @@ func (h *Http) Usage() {
 The HTTP command lists all protocol needed in the configuration file.
 
 Usage:
-	queuestream http [arguments]
+	blockqueue http [arguments]
 
 Arguments:
 	-config PATH
