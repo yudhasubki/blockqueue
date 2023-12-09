@@ -11,7 +11,6 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 ## Features
 - 💸 Cost-Effective: Designed with affordability in mind, Block Queue provides a budget-friendly solution for messaging needs.
 - 📢 Pub/Sub Mechanism: The inclusion of a publish/subscribe mechanism allows for easy communication and real-time updates.
-- 📦 Consumer Group: Block Queue facilitates message consumer group, enabling efficient data distribution similar to Kafka or Redis Stream for improved scalability.
 - 📶 Less Network Latency: Prioritizing efficiency, Block Queue minimizes network latency to persistence to enhance overall performance.
 
 ## Architecture
