@@ -1,16 +1,20 @@
 # Block Queue
 
-**Block Queue** is a lightweight and cost-effective queue with pub/sub and consumer groups mechanism for a cheap, robust, reliable, and durable messaging system.
+**Block Queue** is a lightweight and cost-effective queue messaging system with pub/sub mechanism for a cheap, robust, reliable, and durable messaging system.
 
 Crafted atop the robust foundations of [SQLite3](https://www.sqlite.org/index.html) and [NutsDB](https://github.com/nutsdb/nutsdb), Block Queue prioritizes efficiency by minimizing network latency and ensuring cost-effectiveness.
 
 ## Architecture
 
-![Alt text](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/publisher_architecture.png)
+![Publish Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/publisher_architecture.png)
 
-![Alt text](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/consumer_architecture.png)
+![Consumer Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/consumer_architecture.png)
 
-![Alt text](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/consumer_architecture_partition.png)
+![Failed Redelivery Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/failed_redelivery_architecture.png)
+
+## Why BlockQueue
+
+While Kafka, Redis, or SQS is an excellent product, it is quite complex and requires a lot of resources. My purpose is to build this BlockQueue for simplicity, low resources, and cheap.
 
 ## Features
 - 💸 Cost-Effective: Designed with affordability in mind, Block Queue provides a budget-friendly solution for messaging needs.
@@ -25,18 +29,46 @@ Crafted atop the robust foundations of [SQLite3](https://www.sqlite.org/index.ht
 curl --location 'http://your-host/topics' \
 --header 'Content-Type: application/json' \
 --data '{
-    "name": "{topic_name}",
-    "subscribers": ["{subscriber_name}", "{subscriber_name}"]
+    "name": "cart",
+    "subscribers": [
+        {
+            "name": "counter",
+            "option": {
+                "max_attempts": 5,
+                "visibility_duration": "5m"
+            }
+        },
+        {
+            "name": "created",
+            "option": {
+                "max_attempts": 5,
+                "visibility_duration": "5m"
+            }
+        }
+    ]
 }'
 ```
 
+### Subscriber Options
+| Key  | Value | Description |
+| ------------------------ | ---------- | --------------------- |
+| **max_attempts**         | 1, 2, 3    | max redeliver message |
+| **visibility_duration**  | 5m, 6m, 1h | if message not ack yet message, will send **now() + visibility_duration** |
+
 ### Create New Subscribers
 ```bash
-curl --location 'http://your-host/topics/{topic_name}/subscribers' \
+curl --location 'http://your-host/topics/cart/subscribers' \
 --header 'Content-Type: application/json' \
---data '{
-    "subscribers": ["{subscriber_name_1}", "{subscriber_name-1}"]
-}'
+--data '[
+    {
+        "name": "counter",
+        "option": {
+            "max_attempts": 5,
+            "visibility_duration": "5m"
+        }
+    }
+]
+'
 ```
 
 ### Delete Subscriber
@@ -76,10 +108,11 @@ curl --location --request DELETE 'http://your-host/topics/{topic_name}/subscribe
 - [ ] Protocol
     - [x] HTTP
     - [ ] TCP
+- [ ] Metrics
 - [ ] SDK
     - [ ] Go
     - [ ] PHP
-- [ ] Metrics
+- [ ] Perfomance Test
 
 ## Acknowledgment
 This package is inspired by the following:
