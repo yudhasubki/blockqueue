@@ -349,6 +349,17 @@ func (job *Job[V]) dispatchJob() error {
 }
 
 func (job *Job[V]) remove() error {
+	err := UpdateBucketTx(func(tx *nutsdb.Tx) error {
+		return tx.DeleteBucket(nutsdb.DataStructureList, job.Name)
+	})
+	if err != nil {
+		slog.Error(
+			"error remove bucket",
+			LogPrefixBucket, job.Name,
+		)
+		return err
+	}
+
 	return Tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
 		err := DeleteTxTopic(ctx, tx, core.Topic{
 			Id:        job.Id,

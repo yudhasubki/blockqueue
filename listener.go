@@ -234,6 +234,9 @@ func (listener *Listener[V]) GetMessages() (bucket.MessageCounter, error) {
 	err := ReadBucketTx(func(tx *nutsdb.Tx) error {
 		size, err := tx.LSize(listener.JobId, listener.Bucket())
 		if err != nil {
+			if errors.Is(err, nutsdb.ErrListNotFound) {
+				return nil
+			}
 			return err
 		}
 
@@ -247,6 +250,10 @@ func (listener *Listener[V]) GetMessages() (bucket.MessageCounter, error) {
 	err = ReadBucketTx(func(tx *nutsdb.Tx) error {
 		size, err := tx.LSize(listener.JobId, listener.RetryBucket())
 		if err != nil {
+			if errors.Is(err, nutsdb.ErrListNotFound) {
+				return nil
+			}
+
 			return err
 		}
 
@@ -402,6 +409,9 @@ func (listener *Listener[V]) watcher() {
 			err := UpdateBucketTx(func(tx *nutsdb.Tx) error {
 				size, err := tx.LSize(listener.JobId, listener.Bucket())
 				if err != nil {
+					if errors.Is(err, nutsdb.ErrListNotFound) {
+						return nil
+					}
 					return err
 				}
 
@@ -584,6 +594,7 @@ func (listener *Listener[V]) retryWatcher() {
 		if err != nil {
 			slog.Error(
 				"[retryWatcher] error LPop retry message on bucket",
+				LogPrefixErr, err,
 				LogPrefixConsumer, string(listener.Bucket()),
 				LogPrefixConsumer, string(listener.RetryBucket()),
 			)
