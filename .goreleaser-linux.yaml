@@ -46,6 +46,9 @@ archives:
       {{- if .Arm }}v{{ .Arm }}{{ end -}}
     files:
       - migration/*
+      - README.md
+      - config.yaml.example
+      - LICENSE
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_linux_checksums.txt"
 snapshot:

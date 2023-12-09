@@ -4,7 +4,7 @@ logging:
   level: "debug"
   type:  "json"
 sqlite:
-  db_name: "queuestream"
+  db_name: "blockqueue"
   busy_timeout: 5000
 etcd:
   path: "etcdb"
