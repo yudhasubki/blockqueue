@@ -124,8 +124,55 @@ func (listener *Listener[V]) Remove() {
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
 	listener.remove = true
+	go listener.reset()
 	listener.cancelFunc()
 	listener.PriorityQueue.Cond.Broadcast()
+}
+
+func (listener *Listener[V]) reset() {
+	go UpdateBucketTx(func(tx *nutsdb.Tx) error {
+		size, err := tx.LSize(listener.JobId, listener.Bucket())
+		if err != nil {
+			return err
+		}
+
+		for i := 0; i < size; i++ {
+			item, err := tx.LPop(listener.JobId, listener.Bucket())
+			if err != nil {
+				return err
+			}
+
+			slog.Debug(
+				"reset bucket",
+				LogPrefixBucket, listener.Bucket(),
+				LogPrefixMessage, string(item),
+			)
+		}
+
+		return nil
+	})
+
+	go UpdateBucketTx(func(tx *nutsdb.Tx) error {
+		size, err := tx.LSize(listener.JobId, listener.RetryBucket())
+		if err != nil {
+			return err
+		}
+
+		for i := 0; i < size; i++ {
+			item, err := tx.LPop(listener.JobId, listener.RetryBucket())
+			if err != nil {
+				return err
+			}
+
+			slog.Debug(
+				"reset bucket",
+				LogPrefixBucket, listener.Bucket(),
+				LogPrefixMessage, string(item),
+			)
+		}
+
+		return nil
+	})
 }
 
 func (listener Listener[V]) Bucket() []byte {
