@@ -10,7 +10,7 @@ require (
 	github.com/lesismal/nbio v1.3.20
 	github.com/mattn/go-sqlite3 v1.14.18
 	github.com/nutsdb/nutsdb v1.0.1
-	github.com/yudhasubki/eventpool v0.1.4
+	github.com/yudhasubki/eventpool v0.1.5
 	gopkg.in/guregu/null.v4 v4.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )

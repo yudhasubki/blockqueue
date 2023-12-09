@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS topic_subscribers (
     `id` VARCHAR(36) PRIMARY KEY,
     `topic_id` VARCHAR(36) NOT NULL,
     `name` VARCHAR(150) NOT NULL,
+    `option` JSON DEFAULT NULL,
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
     `deleted_at` DATETIME DEFAULT NULL,
     FOREIGN KEY (`topic_id`) 

@@ -54,6 +54,8 @@ github.com/yudhasubki/eventpool v0.0.0-20231129222008-14a754e43d80 h1:NWyLb0LDzc
 github.com/yudhasubki/eventpool v0.0.0-20231129222008-14a754e43d80/go.mod h1:ERx2mvZkxwn1uPNYpXs8U8Rz19lgv5+z8urPjkbxNRI=
 github.com/yudhasubki/eventpool v0.1.4 h1:n5v9HhLzqL87ksaNhT6PEesMIsfg9iyYDSIlpHLmyug=
 github.com/yudhasubki/eventpool v0.1.4/go.mod h1:ERx2mvZkxwn1uPNYpXs8U8Rz19lgv5+z8urPjkbxNRI=
+github.com/yudhasubki/eventpool v0.1.5 h1:9yVcQq7X76D+OMgEEA3By8TktJa6NQRg2K3anRVppZ8=
+github.com/yudhasubki/eventpool v0.1.5/go.mod h1:ERx2mvZkxwn1uPNYpXs8U8Rz19lgv5+z8urPjkbxNRI=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/crypto v0.0.0-20210513122933-cd7d49e622d5/go.mod h1:P+XmwS30IXTQdn5tA2iutPOUgjI07+tq3H3K9MVA1s8=

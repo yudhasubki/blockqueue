@@ -15,12 +15,16 @@ import (
 	"gopkg.in/guregu/null.v4"
 )
 
+const (
+	BufferSizeJob = 100
+)
+
 type Job[V chan io.ResponseMessages] struct {
 	Id        uuid.UUID
 	Name      string
 	ServerCtx context.Context
-	Pool      *eventpool.Eventpool
 
+	pool      *eventpool.Eventpool
 	mtx       *sync.RWMutex
 	listeners map[uuid.UUID]*Listener[V]
 	message   chan bool
@@ -37,31 +41,37 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 
 	listeners := make(map[uuid.UUID]*Listener[V])
 	for _, subscriber := range subscribers {
-		listeners[subscriber.Id] = NewListener[V](serverCtx, topic.Name, subscriber)
+		listener, err := NewListener[V](serverCtx, topic.Name, subscriber)
+		if err != nil {
+			return &Job[V]{}, err
+		}
+
+		listeners[subscriber.Id] = listener
 	}
 
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0, len(listeners))
 	for _, listener := range listeners {
 		eventpoolListeners = append(eventpoolListeners, eventpool.EventpoolListener{
 			Name:       listener.Id,
-			Subscriber: listener.storeJob,
-			Opts:       []eventpool.SubscriberConfigFunc{},
+			Subscriber: listener.jobCatcher,
+			Opts: []eventpool.SubscriberConfigFunc{
+				eventpool.BufferSize(BufferSizeJob),
+			},
 		})
 	}
-
-	pool := eventpool.New()
-	pool.Submit(eventpoolListeners...)
 
 	job := &Job[V]{
 		Id:        topic.Id,
 		Name:      topic.Name,
-		Pool:      pool,
+		pool:      eventpool.New(),
 		ServerCtx: serverCtx,
 		message:   make(chan bool, 500),
 		deleted:   make(chan bool, 1),
 		mtx:       new(sync.RWMutex),
 		listeners: listeners,
 	}
+	job.pool.Submit(eventpoolListeners...)
+	job.pool.Run()
 
 	err = job.createBucket()
 	if err != nil {
@@ -83,6 +93,20 @@ func (job *Job[V]) Trigger() {
 	job.message <- true
 }
 
+func (job *Job[V]) AckMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
+	if err != nil {
+		return err
+	}
+
+	listener, exist := job.getListeners(subscriber.Id)
+	if !exist {
+		return ErrListenerNotFound
+	}
+
+	return listener.DeleteRetryMessage(messageId)
+}
+
 func (job *Job[V]) AddListener(ctx context.Context, topic core.Topic) error {
 	subscribers, err := GetSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
@@ -94,18 +118,21 @@ func (job *Job[V]) AddListener(ctx context.Context, topic core.Topic) error {
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0)
 	for _, subscriber := range subscribers {
 		if _, exist := job.listeners[subscriber.Id]; !exist {
-			listener := NewListener[V](job.ServerCtx, topic.Name, subscriber)
+			listener, err := NewListener[V](job.ServerCtx, topic.Name, subscriber)
+			if err != nil {
+				return err
+			}
 			job.listeners[subscriber.Id] = listener
 
 			eventpoolListeners = append(eventpoolListeners, eventpool.EventpoolListener{
 				Name:       listener.Id,
-				Subscriber: listener.storeJob,
+				Subscriber: listener.jobCatcher,
 				Opts:       []eventpool.SubscriberConfigFunc{},
 			})
 		}
 	}
 
-	job.Pool.SubmitOnFlight(eventpoolListeners...)
+	job.pool.SubmitOnFlight(eventpoolListeners...)
 
 	return nil
 }
@@ -215,6 +242,7 @@ func (job *Job[V]) fetchWaitingJob() {
 				"signal cancel received. dispatcher waiting job entered shutdown status.",
 				LogPrefixTopic, job.Name,
 			)
+			job.pool.Close()
 			job.Close()
 
 			return
@@ -223,6 +251,8 @@ func (job *Job[V]) fetchWaitingJob() {
 				"topic is deleted. dispatcher waiting job entered shutdown status",
 				LogPrefixTopic, job.Name,
 			)
+
+			job.pool.Close()
 
 			for _, listener := range job.listeners {
 				listener.Remove()
@@ -288,7 +318,7 @@ func (job *Job[V]) dispatchJob() error {
 			return nil
 		}
 
-		job.Pool.Publish(eventpool.SendJson(messages))
+		job.pool.Publish(eventpool.SendJson(messages))
 	}
 
 	return nil

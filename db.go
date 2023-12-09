@@ -117,7 +117,7 @@ func DeleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber
 }
 
 func CreateTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
-	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (`id`, `topic_id`, `name`) VALUES (:id, :topic_id, :name)", subscribers)
+	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (`id`, `topic_id`, `name`, `option`) VALUES (:id, :topic_id, :name, :option)", subscribers)
 	if err != nil {
 		return err
 	}

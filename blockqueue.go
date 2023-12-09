@@ -96,6 +96,15 @@ func (q *BlockQueue[V]) DeleteJob(topic core.Topic) error {
 	return nil
 }
 
+func (q *BlockQueue[V]) AckMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return ErrJobNotFound
+	}
+
+	return job.AckMessage(ctx, topic, subscriberName, messageId)
+}
+
 func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 	q.mtx.RLock()
 	defer q.mtx.RUnlock()
@@ -154,7 +163,7 @@ func (q *BlockQueue[V]) DeleteSubscriber(ctx context.Context, topic core.Topic, 
 	return job.DeleteListener(ctx, topic, subcriber)
 }
 
-func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, subscriber, partitionId string) (io.ResponseMessages, error) {
+func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, subscriber string) (io.ResponseMessages, error) {
 	job, exist := q.jobs[topic.Name]
 	if !exist {
 		return io.ResponseMessages{}, ErrJobNotFound

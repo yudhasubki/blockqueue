@@ -6,8 +6,8 @@ import (
 )
 
 type Topic struct {
-	Name        string   `json:"name"`
-	Subscribers []string `json:"subscribers"`
+	Name        string      `json:"name"`
+	Subscribers Subscribers `json:"subscribers"`
 }
 
 func (t Topic) Topic() core.Topic {
@@ -23,7 +23,8 @@ func (t Topic) Subscriber(topicId uuid.UUID) core.Subscribers {
 		subscribers = append(subscribers, core.Subscriber{
 			Id:      uuid.New(),
 			TopicId: topicId,
-			Name:    subscriber,
+			Name:    subscriber.Name,
+			Option:  subscriber.Option.Marshal(),
 		})
 	}
 

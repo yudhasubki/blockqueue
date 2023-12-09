@@ -170,7 +170,7 @@ func (h *Http) GetSubscribers(w http.ResponseWriter, r *http.Request) {
 
 func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
-		request io.Subscriber
+		request io.Subscribers
 		topic   = h.getTopic(r.Context())
 	)
 
@@ -211,10 +211,9 @@ func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 
 func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
-		topic       = h.getTopic(r.Context())
-		subscriber  = chi.URLParam(r, "subscriberName")
-		partitionId = chi.URLParam(r, "partitionId")
-		timeout     = r.URL.Query().Get("timeout")
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+		timeout    = r.URL.Query().Get("timeout")
 	)
 
 	duration, err := time.ParseDuration(timeout)
@@ -228,7 +227,7 @@ func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), duration)
 	defer cancel()
 
-	messages, err := h.Stream.ReadSubscriber(ctx, topic, subscriber, partitionId)
+	messages, err := h.Stream.ReadSubscriber(ctx, topic, subscriber)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -244,7 +243,24 @@ func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Http) AckMessage(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+		messageId  = chi.URLParam(r, "messageId")
+	)
 
+	err := h.Stream.AckMessage(r.Context(), topic, subscriber, messageId)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Message: httpresponse.MessageSuccess,
+	})
 }
 
 func (h *Http) topicExist(next http.Handler) http.Handler {

@@ -1,6 +1,7 @@
 package blockqueue
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
 	"github.com/nutsdb/nutsdb"
+	"github.com/yudhasubki/eventpool"
 	"github.com/yudhasubki/queuestream/pkg/bucket"
 	"github.com/yudhasubki/queuestream/pkg/core"
 	blockio "github.com/yudhasubki/queuestream/pkg/io"
@@ -19,50 +21,93 @@ import (
 )
 
 var (
-	ErrListenerShutdown = errors.New("listener shutdown")
-	ErrListenerNotFound = errors.New("listener not found")
-	ErrListenerDeleted  = errors.New("listener was deleted")
+	ErrListenerShutdown             = errors.New("listener shutdown")
+	ErrListenerNotFound             = errors.New("listener not found")
+	ErrListenerDeleted              = errors.New("listener was deleted")
+	ErrListenerRetryMessageNotFound = errors.New("error ack message. message_id not found")
 )
 
-type ListenerStatus string
+type KindEventListener string
 
 const (
-	ShutdownListenerStatus       ListenerStatus = "shutdown"
-	RemovedListenerStatus        ListenerStatus = "remove"
-	FailedDeliveryListenerStatus ListenerStatus = "failed_delivery"
-	DeliveryListenerStatus       ListenerStatus = "delivery"
+	ShutdownKindEventListener       KindEventListener = "shutdown"
+	RemovedKindEventListener        KindEventListener = "remove"
+	FailedDeliveryKindEventListener KindEventListener = "failed_delivery"
+	DeliveryKindEventListener       KindEventListener = "delivery"
 )
+
+const (
+	BufferSizeRetryListener = 100
+)
+
+type EventListener struct {
+	Kind  KindEventListener
+	Error error
+}
 
 type Listener[V chan blockio.ResponseMessages] struct {
 	Id            string
 	JobId         string
 	PriorityQueue *pqueue.PriorityQueue[V]
-	ServerCtx     context.Context
 
+	pool       *eventpool.Eventpool
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	shutdown   bool
 	remove     bool
-	response   chan chan ListenerStatus
+	response   chan chan EventListener
+	option     listenerOption
 }
 
-func NewListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber) *Listener[V] {
+type listenerOption struct {
+	MaxAttempts        int
+	VisibilityDuration time.Duration
+}
+
+func NewListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber) (*Listener[V], error) {
+	option := core.SubscriberOpt{}
+	err := json.Unmarshal(subscriber.Option, &option)
+	if err != nil {
+		return &Listener[V]{}, err
+	}
+
+	parse, err := time.ParseDuration(option.VisibilityDuration)
+	if err != nil {
+		return &Listener[V]{}, err
+	}
+
 	ctx, cancel := context.WithCancel(serverCtx)
+
 	listener := &Listener[V]{
 		ctx:           ctx,
 		cancelFunc:    cancel,
 		Id:            subscriber.Name,
 		JobId:         jobId,
 		PriorityQueue: pqueue.New[V](),
-		shutdown:      false,
-		remove:        false,
-		response:      make(chan chan ListenerStatus),
+		option: listenerOption{
+			MaxAttempts:        option.MaxAttempts,
+			VisibilityDuration: parse,
+		},
+		pool:     eventpool.New(),
+		shutdown: false,
+		remove:   false,
+		response: make(chan chan EventListener),
 	}
+
+	listener.pool.Submit(eventpool.EventpoolListener{
+		Name:       string(listener.RetryBucket()),
+		Subscriber: listener.retryCatcher,
+		Opts: []eventpool.SubscriberConfigFunc{
+			eventpool.BufferSize(BufferSizeRetryListener),
+		},
+	})
+	listener.pool.Run()
 
 	go listener.watcher()
 	go listener.dispatcher()
+	go listener.retryWatcher()
 
-	return listener
+	return listener, nil
 }
 
 func (listener *Listener[V]) Shutdown() {
@@ -85,6 +130,52 @@ func (listener *Listener[V]) Remove() {
 
 func (listener Listener[V]) Bucket() []byte {
 	return []byte(fmt.Sprintf("%s:%s", listener.JobId, listener.Id))
+}
+
+func (listener Listener[V]) RetryBucket() []byte {
+	return []byte(fmt.Sprintf("%s:%s:temp", listener.JobId, listener.Id))
+}
+
+func (listener *Listener[V]) DeleteRetryMessage(id string) error {
+	position := 0
+
+	err := ReadBucketTx(func(tx *nutsdb.Tx) error {
+		items, err := tx.LRange(listener.JobId, listener.RetryBucket(), 0, -1)
+		if err != nil {
+			return err
+		}
+
+		for idx, item := range items {
+			bucket := bucket.MessageVisibility{}
+			err := json.Unmarshal(item, &bucket)
+			if err != nil {
+				return err
+			}
+
+			if bucket.Message.Id == id {
+				slog.Debug(
+					"[DeleteRetryMessage] found message id",
+					"message_id", id,
+					"position", idx,
+				)
+				position = idx + 1
+				break
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	if position > 0 {
+		return UpdateBucketTx(func(tx *nutsdb.Tx) error {
+			return tx.LRemByIndex(listener.JobId, listener.RetryBucket(), position-1)
+		})
+	}
+
+	return ErrListenerRetryMessageNotFound
 }
 
 func (listener *Listener[V]) Enqueue(messages chan blockio.ResponseMessages) string {
@@ -119,102 +210,102 @@ func (listener *Listener[V]) Dequeue(id string) {
 
 func (listener *Listener[V]) dispatcher() {
 	for response := range listener.response {
-		listener.PriorityQueue.Cond.L.Lock()
+		listener.notify(response)
+	}
+}
 
-		for listener.PriorityQueue.Len() == 0 && !listener.shutdown && !listener.remove {
-			slog.Info(
-				"wait priority queue",
-				"size", listener.PriorityQueue.Len(),
-			)
-			listener.PriorityQueue.Cond.Wait()
-		}
+func (listener *Listener[V]) notify(response chan EventListener) {
+	listener.PriorityQueue.Cond.L.Lock()
+	defer listener.PriorityQueue.Cond.L.Unlock()
 
-		var (
-			err      error
-			messages = make(blockio.ResponseMessages, 0)
+	for listener.PriorityQueue.Len() == 0 && !listener.shutdown && !listener.remove {
+		slog.Info(
+			"wait priority queue",
+			"size", listener.PriorityQueue.Len(),
 		)
+		listener.PriorityQueue.Cond.Wait()
+	}
 
-		if listener.shutdown {
-			response <- ShutdownListenerStatus
-			goto Unlock
+	if listener.shutdown {
+		response <- EventListener{
+			Kind: ShutdownKindEventListener,
+		}
+		return
+	}
+
+	if listener.remove {
+		response <- EventListener{
+			Kind: RemovedKindEventListener,
+		}
+		return
+	}
+
+	messages := make(blockio.ResponseMessages, 0)
+	err := ReadBucketTx(func(tx *nutsdb.Tx) error {
+		items, err := tx.LRange(listener.JobId, listener.Bucket(), 0, 10)
+		if err != nil {
+			return err
 		}
 
-		if listener.remove {
-			response <- RemovedListenerStatus
-			goto Unlock
-		}
-
-		err = ReadBucketTx(func(tx *nutsdb.Tx) error {
-			items, err := tx.LRange(listener.JobId, listener.Bucket(), 0, 10)
+		for _, item := range items {
+			message := bucket.MessageVisibility{}
+			err := json.Unmarshal(item, &message)
 			if err != nil {
 				return err
 			}
 
-			for _, item := range items {
-				message := bucket.Message{}
-				err := json.Unmarshal(item, &message)
-				if err != nil {
-					return err
-				}
+			messages = append(messages, blockio.ResponseMessage{
+				Id:      message.Message.Id,
+				Message: message.Message.Message,
+			})
 
-				messages = append(messages, blockio.ResponseMessage{
-					Id:      message.Id,
-					Message: message.Message,
-				})
-			}
-
-			return nil
-		})
-		if err != nil {
-			slog.Error(
-				"[watcher] error reading the unclaimed message on the bucket",
-				LogPrefixErr, err,
-				LogPrefixBucket, listener.JobId,
-				LogPrefixConsumer, string(listener.Bucket()),
-			)
-
-			response <- FailedDeliveryListenerStatus
-			goto Unlock
+			listener.pool.Publish(eventpool.SendJson(message))
 		}
 
-		err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
-			for i := 0; i < len(messages); i++ {
-				_, err := tx.LPop(listener.JobId, listener.Bucket())
-				if err != nil {
-					return err
-				}
-			}
+		return nil
+	})
+	if err != nil {
+		response <- EventListener{
+			Kind:  FailedDeliveryKindEventListener,
+			Error: err,
+		}
+		return
+	}
 
-			return nil
-		})
-		if err != nil {
-			slog.Error(
-				"[watcher] error remove the claimed message on the bucket",
-				LogPrefixErr, err,
-				LogPrefixBucket, listener.JobId,
-				LogPrefixConsumer, string(listener.Bucket()),
-			)
-			response <- FailedDeliveryListenerStatus
-			goto Unlock
+	err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+		for i := 0; i < len(messages); i++ {
+			_, err := tx.LPop(listener.JobId, listener.Bucket())
+			if err != nil {
+				return err
+			}
 		}
 
-		listener.PriorityQueue.Peek().Value <- messages
-		listener.PriorityQueue.Pop()
+		return nil
+	})
 
-		response <- DeliveryListenerStatus
+	if err != nil {
+		response <- EventListener{
+			Kind:  FailedDeliveryKindEventListener,
+			Error: err,
+		}
+		return
+	}
 
-	Unlock:
-		listener.PriorityQueue.Cond.L.Unlock()
+	listener.PriorityQueue.Peek().Value <- messages
+	listener.PriorityQueue.Pop()
+
+	response <- EventListener{
+		Kind: DeliveryKindEventListener,
 	}
 }
 
 func (listener *Listener[V]) watcher() {
 	for {
-		ticker := time.NewTicker(500 * time.Microsecond)
+		ticker := time.NewTicker(500 * time.Millisecond)
 		select {
 		case <-listener.ctx.Done():
 			slog.Debug(
-				"listener entering shutdown status",
+				"[watcher] listener entering shutdown status",
 				"removed", listener.remove,
 				"shutdown", listener.shutdown,
 			)
@@ -236,28 +327,28 @@ func (listener *Listener[V]) watcher() {
 			}
 
 			if messageLength > 0 {
-				kind := make(chan ListenerStatus)
-				listener.response <- kind
+				eventListener := make(chan EventListener)
+				listener.response <- eventListener
 
-				k := <-kind
-				switch k {
-				case RemovedListenerStatus:
+				switch event := <-eventListener; event.Kind {
+				case RemovedKindEventListener:
 					slog.Debug(
 						"[watcher] listener entering shutdown status, listener removed",
 						LogPrefixConsumer, listener.Id,
 					)
 					return
-				case ShutdownListenerStatus:
+				case ShutdownKindEventListener:
 					slog.Debug(
 						"[watcher] listener entering shutdown status, server receive signal shutdown",
 						LogPrefixConsumer, listener.Id,
 					)
 					return
-				case FailedDeliveryListenerStatus:
+				case FailedDeliveryKindEventListener:
 					slog.Error(
 						"[watcher] error sent to the incoming request",
+						LogPrefixErr, event.Error,
 					)
-				case DeliveryListenerStatus:
+				case DeliveryKindEventListener:
 					slog.Debug(
 						"[watcher] success deliver message to the client",
 						LogPrefixConsumer, listener.Id,
@@ -268,7 +359,7 @@ func (listener *Listener[V]) watcher() {
 	}
 }
 
-func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
+func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 	var (
 		messages core.Messages
 		prefix   = time.Now().UnixNano()
@@ -292,9 +383,15 @@ func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
 					id = fmt.Sprintf("%d_%d", prefix, idx)
 				)
 
-				b, err := json.Marshal(bucket.Message{
-					Id:      id,
-					Message: message.Message,
+				b, err := json.Marshal(bucket.MessageVisibility{
+					Message: bucket.Message{
+						Id:      id,
+						Message: message.Message,
+					},
+					RetryPolicy: bucket.MessageVisibilityRetryPolicy{
+						MaxAttempts: 0,
+						NextIter:    time.Now().Add(listener.option.VisibilityDuration),
+					},
 				})
 				if err != nil {
 					return err
@@ -321,4 +418,110 @@ func (listener *Listener[V]) storeJob(name string, message io.Reader) error {
 	}
 
 	return nil
+}
+
+func (listener *Listener[V]) retryWatcher() {
+	for {
+		message := bucket.MessageVisibility{}
+		err := ReadBucketTx(func(tx *nutsdb.Tx) error {
+			b, err := tx.LPeek(listener.JobId, listener.RetryBucket())
+			if err != nil {
+				return err
+			}
+
+			err = json.Unmarshal(b, &message)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+		if err != nil {
+			continue
+		}
+
+		if (message == bucket.MessageVisibility{}) {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		skipRetry := false
+		if message.RetryPolicy.MaxAttempts >= listener.option.MaxAttempts {
+			skipRetry = true
+			goto Update
+		}
+
+		if time.Now().Before(message.RetryPolicy.NextIter) {
+			time.Sleep(time.Until(message.RetryPolicy.NextIter))
+			continue
+		}
+
+	Update:
+		message.RetryPolicy.MaxAttempts++
+		if !skipRetry {
+			err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+				message.RetryPolicy.NextIter = message.RetryPolicy.NextIter.Add(listener.option.VisibilityDuration)
+
+				b, _ := json.Marshal(message)
+				err := tx.RPush(listener.JobId, listener.Bucket(), b)
+				if err != nil {
+					return err
+				}
+
+				return nil
+			})
+			if err != nil {
+				slog.Error(
+					"[retryWatcher] error RPush retry message on bucket",
+					LogPrefixConsumer, string(listener.Bucket()),
+					LogPrefixConsumer, string(listener.RetryBucket()),
+				)
+				continue
+			}
+		}
+		err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+			item, err := tx.LPop(listener.JobId, listener.RetryBucket())
+			if err != nil {
+				return err
+			}
+
+			slog.Debug(
+				"[retryWatcher] success pop the first element",
+				LogPrefixConsumer, string(listener.RetryBucket()),
+				LogPrefixMessage, string(item),
+			)
+
+			return nil
+		})
+		if err != nil {
+			slog.Error(
+				"[retryWatcher] error LPop retry message on bucket",
+				LogPrefixConsumer, string(listener.Bucket()),
+				LogPrefixConsumer, string(listener.RetryBucket()),
+			)
+			continue
+		}
+
+		slog.Debug(
+			"[retryWatcher] success send retry message",
+			LogPrefixConsumer, string(listener.Bucket()),
+			LogPrefixConsumer, string(listener.RetryBucket()),
+			LogPrefixMessage, message,
+		)
+	}
+}
+
+func (listener *Listener[V]) retryCatcher(name string, message io.Reader) error {
+	var buf bytes.Buffer
+
+	_, err := io.Copy(&buf, message)
+	if err != nil {
+		return err
+	}
+
+	return backoff.Retry(func() error {
+		return UpdateBucketTx(func(tx *nutsdb.Tx) error {
+			return tx.RPush(listener.JobId, listener.RetryBucket(), buf.Bytes())
+		})
+	}, backoff.NewExponentialBackOff())
 }

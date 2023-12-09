@@ -6,4 +6,5 @@ const (
 	LogPrefixErr           string = "err"
 	LogPrefixTopic         string = "topic"
 	LogPrefixMessageStatus string = "message_status"
+	LogPrefixMessage       string = "message"
 )

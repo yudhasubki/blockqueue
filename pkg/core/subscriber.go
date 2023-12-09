@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -9,12 +10,13 @@ import (
 )
 
 type Subscriber struct {
-	Id        uuid.UUID   `db:"id"`
-	TopicId   uuid.UUID   `db:"topic_id"`
-	TopicName string      `db:"topic_name"`
-	Name      string      `db:"name"`
-	CreatedAt string      `db:"created_at"`
-	DeletedAt null.String `db:"deleted_at"`
+	Id        uuid.UUID       `db:"id"`
+	TopicId   uuid.UUID       `db:"topic_id"`
+	TopicName string          `db:"topic_name"`
+	Name      string          `db:"name"`
+	Option    json.RawMessage `db:"option"`
+	CreatedAt string          `db:"created_at"`
+	DeletedAt null.String     `db:"deleted_at"`
 }
 
 func (s Subscriber) Bucket() string {
@@ -65,4 +67,9 @@ func (f FilterSubscriber) Filter(operator string) (string, map[string]interface{
 	}
 
 	return strings.Join(clause, " "+operator+" "), args
+}
+
+type SubscriberOpt struct {
+	MaxAttempts        int    `json:"max_attempts"`
+	VisibilityDuration string `json:"visibility_duration"`
 }
