@@ -166,7 +166,7 @@ func (listener *Listener[V]) reset() {
 
 			slog.Debug(
 				"reset bucket",
-				LogPrefixBucket, listener.Bucket(),
+				LogPrefixBucket, listener.RetryBucket(),
 				LogPrefixMessage, string(item),
 			)
 		}
