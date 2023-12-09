@@ -168,6 +168,30 @@ func (job *Job[V]) DeleteListener(ctx context.Context, topic core.Topic, subscri
 	return nil
 }
 
+func (job *Job[V]) GetListeners(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
+	subscribers, err := GetSubscribers(ctx, core.FilterSubscriber{
+		TopicId: []uuid.UUID{topic.Id},
+	})
+	if err != nil {
+		return io.SubscriberMessages{}, err
+	}
+
+	subscriberMessages := make(io.SubscriberMessages, 0)
+	for _, subscriber := range subscribers {
+		message, err := job.listeners[subscriber.Id].GetMessages()
+		if err != nil {
+			return io.SubscriberMessages{}, err
+		}
+		subscriberMessages = append(subscriberMessages, io.SubscriberMessage{
+			Name:               message.Name,
+			UnpublishedMessage: message.UnpublishMessage,
+			UnackedMessage:     message.UnackMessage,
+		})
+	}
+
+	return subscriberMessages, nil
+}
+
 func (job *Job[V]) Enqueue(ctx context.Context, topic core.Topic, subscriberName string) (io.ResponseMessages, error) {
 	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {

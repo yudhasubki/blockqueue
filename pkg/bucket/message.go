@@ -20,3 +20,9 @@ type MessageVisibilityRetryPolicy struct {
 	MaxAttempts int       `json:"max_attempts"`
 	NextIter    time.Time `json:"next_iteration"`
 }
+
+type MessageCounter struct {
+	Name             string
+	UnpublishMessage int
+	UnackMessage     int
+}

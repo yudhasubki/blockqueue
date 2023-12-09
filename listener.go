@@ -178,6 +178,45 @@ func (listener *Listener[V]) DeleteRetryMessage(id string) error {
 	return ErrListenerRetryMessageNotFound
 }
 
+func (listener *Listener[V]) GetMessages() (bucket.MessageCounter, error) {
+	var (
+		unpublishMessage = 0
+		unackMessage     = 0
+	)
+
+	err := ReadBucketTx(func(tx *nutsdb.Tx) error {
+		size, err := tx.LSize(listener.JobId, listener.Bucket())
+		if err != nil {
+			return err
+		}
+
+		unpublishMessage = size
+		return nil
+	})
+	if err != nil {
+		return bucket.MessageCounter{}, err
+	}
+
+	err = ReadBucketTx(func(tx *nutsdb.Tx) error {
+		size, err := tx.LSize(listener.JobId, listener.RetryBucket())
+		if err != nil {
+			return err
+		}
+
+		unackMessage = size
+		return nil
+	})
+	if err != nil {
+		return bucket.MessageCounter{}, err
+	}
+
+	return bucket.MessageCounter{
+		Name:             listener.Id,
+		UnpublishMessage: unpublishMessage,
+		UnackMessage:     unackMessage,
+	}, nil
+}
+
 func (listener *Listener[V]) Enqueue(messages chan blockio.ResponseMessages) string {
 	listener.PriorityQueue.Cond.L.Lock()
 	defer listener.PriorityQueue.Cond.L.Unlock()

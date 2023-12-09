@@ -105,18 +105,6 @@ func (q *BlockQueue[V]) AckMessage(ctx context.Context, topic core.Topic, subscr
 	return job.AckMessage(ctx, topic, subscriberName, messageId)
 }
 
-func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
-	q.mtx.RLock()
-	defer q.mtx.RUnlock()
-
-	job, exist := q.jobs[topic.Name]
-	if !exist {
-		return &Job[V]{}, false
-	}
-
-	return job, true
-}
-
 func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request io.Publish) error {
 	job, exist := q.getJob(topic)
 	if !exist {
@@ -138,6 +126,15 @@ func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request i
 	job.Trigger()
 
 	return nil
+}
+
+func (q *BlockQueue[V]) GetSubscribers(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return io.SubscriberMessages{}, ErrJobNotFound
+	}
+
+	return job.GetListeners(ctx, topic)
 }
 
 func (q *BlockQueue[V]) AddSubscribers(ctx context.Context, topic core.Topic) error {
@@ -170,4 +167,16 @@ func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, su
 	}
 
 	return job.Enqueue(ctx, topic, subscriber)
+}
+
+func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
+	q.mtx.RLock()
+	defer q.mtx.RUnlock()
+
+	job, exist := q.jobs[topic.Name]
+	if !exist {
+		return &Job[V]{}, false
+	}
+
+	return job, true
 }

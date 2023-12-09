@@ -52,3 +52,11 @@ func (s *SubscriberOpt) Marshal() []byte {
 
 	return b
 }
+
+type SubscriberMessage struct {
+	Name               string `json:"name"`
+	UnpublishedMessage int    `json:"unpublished_message"`
+	UnackedMessage     int    `json:"unacked_message"`
+}
+
+type SubscriberMessages []SubscriberMessage

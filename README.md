@@ -104,6 +104,13 @@ After reading and successfully processing a message, you must delete it, as the 
 curl --location --request DELETE 'http://your-host/topics/{topic_name}/subscribers/{subscriber_name}/messages/{message_id}'
 ```
 
+### Subscriber Message Status
+
+If you want to check how many unpublished or unacked message, you can immediately hit this endpoint
+```bash
+curl --location 'localhost:8080/topics/{your_topic}/subscribers'
+```
+
 ## Roadmap
 - [ ] Protocol
     - [x] HTTP

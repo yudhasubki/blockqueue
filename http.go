@@ -165,7 +165,23 @@ func (h *Http) Publish(w http.ResponseWriter, r *http.Request) {
 
 // GetSubscribers is endpoint to get metadata of subscribers before it claimed to consumer bucket
 func (h *Http) GetSubscribers(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic = h.getTopic(r.Context())
+	)
 
+	subscriberStatus, err := h.Stream.GetSubscribers(r.Context(), topic)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Data:    subscriberStatus,
+		Message: httpresponse.MessageSuccess,
+	})
 }
 
 func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
