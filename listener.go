@@ -345,7 +345,7 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 				Message: message.Message.Message,
 			})
 
-			message.RetryPolicy.NextIter = message.RetryPolicy.NextIter.Add(listener.option.VisibilityDuration)
+			message.RetryPolicy.NextIter = time.Now().Add(listener.option.VisibilityDuration)
 			listener.pool.Publish(eventpool.SendJson(message))
 		}
 
@@ -487,7 +487,7 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 				messageBytes = append(messageBytes, b)
 			}
 
-			err = tx.RPush(listener.JobId, []byte(listener.Bucket()), messageBytes...)
+			err = tx.RPush(listener.JobId, listener.Bucket(), messageBytes...)
 			if err != nil {
 				return err
 			}
@@ -513,6 +513,9 @@ func (listener *Listener[V]) retryWatcher() {
 		err := ReadBucketTx(func(tx *nutsdb.Tx) error {
 			b, err := tx.LPeek(listener.JobId, listener.RetryBucket())
 			if err != nil {
+				if errors.Is(err, nutsdb.ErrEmptyList) {
+					return nil
+				}
 				return err
 			}
 
@@ -586,13 +589,6 @@ func (listener *Listener[V]) retryWatcher() {
 			)
 			continue
 		}
-
-		slog.Debug(
-			"[retryWatcher] success send retry message",
-			LogPrefixConsumer, string(listener.Bucket()),
-			LogPrefixConsumer, string(listener.RetryBucket()),
-			LogPrefixMessage, message,
-		)
 	}
 }
 
