@@ -312,8 +312,8 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
 	for listener.PriorityQueue.Len() == 0 && !listener.shutdown && !listener.remove {
-		slog.Info(
-			"wait priority queue",
+		slog.Debug(
+			"wait request from queue",
 			"size", listener.PriorityQueue.Len(),
 		)
 		listener.PriorityQueue.Cond.Wait()
