@@ -9,7 +9,7 @@ require (
 	github.com/jmoiron/sqlx v1.3.5
 	github.com/lesismal/nbio v1.3.20
 	github.com/mattn/go-sqlite3 v1.14.18
-	github.com/nutsdb/nutsdb v1.0.1
+	github.com/nutsdb/nutsdb v1.0.2-0.20231210073356-fec3b20ddfa0
 	github.com/yudhasubki/eventpool v0.1.5
 	gopkg.in/guregu/null.v4 v4.0.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -26,5 +26,5 @@ require (
 	github.com/xujiajun/mmap-go v1.0.1 // indirect
 	github.com/xujiajun/utils v0.0.0-20220904132955-5f7c5b914235 // indirect
 	golang.org/x/crypto v0.6.0 // indirect
-	golang.org/x/sys v0.10.0 // indirect
+	golang.org/x/sys v0.15.0 // indirect
 )

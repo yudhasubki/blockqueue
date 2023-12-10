@@ -124,7 +124,7 @@ func (listener *Listener[V]) Remove() {
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
 	listener.remove = true
-	go listener.reset()
+	listener.reset()
 	listener.cancelFunc()
 	listener.PriorityQueue.Cond.Broadcast()
 }
@@ -519,49 +519,26 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 
 func (listener *Listener[V]) retryWatcher() {
 	for {
-		message := bucket.MessageVisibility{}
-		err := ReadBucketTx(func(tx *nutsdb.Tx) error {
-			b, err := tx.LPeek(listener.JobId, listener.RetryBucket())
-			if err != nil {
-				if errors.Is(err, nutsdb.ErrEmptyList) {
-					return nil
+		select {
+		case <-listener.ctx.Done():
+			slog.Debug(
+				"[retryWatcher] listener entering shutdown status",
+				"removed", listener.remove,
+				"shutdown", listener.shutdown,
+			)
+			return
+		default:
+			message := bucket.MessageVisibility{}
+			err := ReadBucketTx(func(tx *nutsdb.Tx) error {
+				b, err := tx.LPeek(listener.JobId, listener.RetryBucket())
+				if err != nil {
+					if errors.Is(err, nutsdb.ErrEmptyList) {
+						return nil
+					}
+					return err
 				}
-				return err
-			}
 
-			err = json.Unmarshal(b, &message)
-			if err != nil {
-				return err
-			}
-
-			return nil
-		})
-		if err != nil {
-			continue
-		}
-
-		if (message == bucket.MessageVisibility{}) {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		skipRetry := false
-		if message.RetryPolicy.MaxAttempts >= listener.option.MaxAttempts {
-			skipRetry = true
-			goto Update
-		}
-
-		if time.Now().Before(message.RetryPolicy.NextIter) {
-			time.Sleep(time.Until(message.RetryPolicy.NextIter))
-			continue
-		}
-
-	Update:
-		message.RetryPolicy.MaxAttempts++
-		if !skipRetry {
-			err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
-				b, _ := json.Marshal(message)
-				err := tx.RPush(listener.JobId, listener.Bucket(), b)
+				err = json.Unmarshal(b, &message)
 				if err != nil {
 					return err
 				}
@@ -569,36 +546,69 @@ func (listener *Listener[V]) retryWatcher() {
 				return nil
 			})
 			if err != nil {
+				continue
+			}
+
+			if (message == bucket.MessageVisibility{}) {
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			skipRetry := false
+			if message.RetryPolicy.MaxAttempts >= listener.option.MaxAttempts {
+				skipRetry = true
+				goto Update
+			}
+
+			if time.Now().Before(message.RetryPolicy.NextIter) {
+				time.Sleep(time.Until(message.RetryPolicy.NextIter))
+				continue
+			}
+
+		Update:
+			message.RetryPolicy.MaxAttempts++
+			if !skipRetry {
+				err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+					b, _ := json.Marshal(message)
+					err := tx.RPush(listener.JobId, listener.Bucket(), b)
+					if err != nil {
+						return err
+					}
+
+					return nil
+				})
+				if err != nil {
+					slog.Error(
+						"[retryWatcher] error RPush retry message on bucket",
+						LogPrefixConsumer, string(listener.Bucket()),
+						LogPrefixConsumer, string(listener.RetryBucket()),
+					)
+					continue
+				}
+			}
+			err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
+				item, err := tx.LPop(listener.JobId, listener.RetryBucket())
+				if err != nil {
+					return err
+				}
+
+				slog.Debug(
+					"[retryWatcher] success pop the first element",
+					LogPrefixConsumer, string(listener.RetryBucket()),
+					LogPrefixMessage, string(item),
+				)
+
+				return nil
+			})
+			if err != nil {
 				slog.Error(
-					"[retryWatcher] error RPush retry message on bucket",
+					"[retryWatcher] error LPop retry message on bucket",
+					LogPrefixErr, err,
 					LogPrefixConsumer, string(listener.Bucket()),
 					LogPrefixConsumer, string(listener.RetryBucket()),
 				)
 				continue
 			}
-		}
-		err = UpdateBucketTx(func(tx *nutsdb.Tx) error {
-			item, err := tx.LPop(listener.JobId, listener.RetryBucket())
-			if err != nil {
-				return err
-			}
-
-			slog.Debug(
-				"[retryWatcher] success pop the first element",
-				LogPrefixConsumer, string(listener.RetryBucket()),
-				LogPrefixMessage, string(item),
-			)
-
-			return nil
-		})
-		if err != nil {
-			slog.Error(
-				"[retryWatcher] error LPop retry message on bucket",
-				LogPrefixErr, err,
-				LogPrefixConsumer, string(listener.Bucket()),
-				LogPrefixConsumer, string(listener.RetryBucket()),
-			)
-			continue
 		}
 	}
 }
