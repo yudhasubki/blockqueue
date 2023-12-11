@@ -1,6 +1,6 @@
 module github.com/yudhasubki/blockqueue
 
-go 1.21.1
+go 1.21
 
 require (
 	github.com/cenkalti/backoff/v4 v4.2.1
@@ -9,7 +9,7 @@ require (
 	github.com/jmoiron/sqlx v1.3.5
 	github.com/lesismal/nbio v1.3.20
 	github.com/mattn/go-sqlite3 v1.14.18
-	github.com/nutsdb/nutsdb v1.0.2-0.20231210073356-fec3b20ddfa0
+	github.com/nutsdb/nutsdb v1.0.2-0.20231211145816-3468fe949461
 	github.com/yudhasubki/eventpool v0.1.5
 	gopkg.in/guregu/null.v4 v4.0.0
 	gopkg.in/yaml.v3 v3.0.1
