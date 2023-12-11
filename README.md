@@ -13,6 +13,10 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 - 📢 Pub/Sub Mechanism: The inclusion of a publish/subscribe mechanism allows for easy communication and real-time updates.
 - 📶 Less Network Latency: Prioritizing efficiency, Block Queue minimizes network latency to persistence to enhance overall performance.
 
+## How to Install
+
+You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/How-to-Install
+
 ## Architecture
 
 ![Publish Architecture](https://github.com/yudhasubki/blockqueue/blob/main/docs/img/publisher_architecture.png)
