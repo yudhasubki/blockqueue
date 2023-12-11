@@ -15,7 +15,7 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 
 ## How to Install
 
-You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/How-to-Install
+You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/Welcome-to-BlockQueue
 
 ## Architecture
 
