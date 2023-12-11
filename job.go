@@ -219,9 +219,6 @@ func (job *Job[V]) Enqueue(ctx context.Context, topic core.Topic, subscriberName
 }
 
 func (job *Job[V]) getListeners(subscriberId uuid.UUID) (*Listener[V], bool) {
-	job.mtx.RLock()
-	defer job.mtx.RUnlock()
-
 	listener, exist := job.listeners[subscriberId]
 	if !exist {
 		return listener, false

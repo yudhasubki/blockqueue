@@ -170,9 +170,6 @@ func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, su
 }
 
 func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
-	q.mtx.RLock()
-	defer q.mtx.RUnlock()
-
 	job, exist := q.jobs[topic.Name]
 	if !exist {
 		return &Job[V]{}, false
