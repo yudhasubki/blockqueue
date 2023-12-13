@@ -26,3 +26,22 @@ func testDeleteJob(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.Res
 		require.NoError(t, err)
 	}
 }
+
+func testPublish(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, request io.Publish, expectErr error) {
+	err := bq.publish(ctx, topic, request)
+	if err != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
+func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectResponse io.ResponseMessages, expectErr error) {
+	response, err := bq.readSubscriberMessage(ctx, topic, subscriberName)
+	if err != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
+		require.EqualValues(t, expectResponse[0].Message, response[0].Message)
+	}
+}

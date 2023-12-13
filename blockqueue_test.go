@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
@@ -151,6 +152,61 @@ func TestBlockQueueDeleteJob(t *testing.T) {
 			testDeleteJob(t, ctx, bq, topic, ErrJobNotFound)
 		})
 	})
+}
+
+func TestBlockQueuePublishAndRead(t *testing.T) {
+	t.Run("success publish and read", func(t *testing.T) {
+		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
+			var (
+				ctx     = context.Background()
+				request = bqio.Topic{
+					Name: getRandomChar(1),
+					Subscribers: bqio.Subscribers{
+						{
+							Name: getRandomChar(2),
+						},
+					},
+				}
+				topic       = request.Topic()
+				subscribers = request.Subscriber(topic.Id)
+			)
+			bq.Run(ctx)
+
+			testAddJob(t, ctx, bq, topic, subscribers, nil)
+			testPublish(t, ctx, bq, topic, bqio.Publish{
+				Message: getRandomChar(3),
+			}, ErrJobNotFound)
+			testReadSubscriberMessage(t, ctx, bq, topic, getRandomChar(2), bqio.ResponseMessages{
+				{
+					Message: getRandomChar(3),
+				},
+			}, nil)
+			time.Sleep(3 * time.Second)
+		})
+	})
+
+	t.Run("topic not found when publish a message", func(t *testing.T) {
+		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
+			var (
+				ctx     = context.Background()
+				request = bqio.Topic{
+					Name: getRandomChar(1),
+					Subscribers: bqio.Subscribers{
+						{
+							Name: getRandomChar(2),
+						},
+					},
+				}
+				topic = request.Topic()
+				// subscribers = request.Subscriber(topic.Id)
+			)
+			bq.Run(ctx)
+			testPublish(t, ctx, bq, topic, bqio.Publish{
+				Message: "test",
+			}, ErrJobNotFound)
+		})
+	})
+
 }
 
 func getRandomChar(i int) string {
