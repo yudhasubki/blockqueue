@@ -131,6 +131,9 @@ func TestBlockQueueDeleteJob(t *testing.T) {
 			bq.Run(ctx)
 			testAddJob(t, ctx, bq, topic, request.Subscriber(topic.Id), nil)
 			testDeleteJob(t, ctx, bq, topic, nil)
+			testPublish(t, ctx, bq, topic, bqio.Publish{
+				Message: getRandomChar(1),
+			}, ErrJobNotFound)
 		})
 	})
 
@@ -155,7 +158,7 @@ func TestBlockQueueDeleteJob(t *testing.T) {
 }
 
 func TestBlockQueuePublishAndRead(t *testing.T) {
-	t.Run("success publish and read", func(t *testing.T) {
+	t.Run("success publish, read, and ack", func(t *testing.T) {
 		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
 			var (
 				ctx     = context.Background()
@@ -176,12 +179,12 @@ func TestBlockQueuePublishAndRead(t *testing.T) {
 			testPublish(t, ctx, bq, topic, bqio.Publish{
 				Message: getRandomChar(3),
 			}, ErrJobNotFound)
-			testReadSubscriberMessage(t, ctx, bq, topic, getRandomChar(2), bqio.ResponseMessages{
+			response := testReadSubscriberMessage(t, ctx, bq, topic, getRandomChar(2), bqio.ResponseMessages{
 				{
 					Message: getRandomChar(3),
 				},
 			}, nil)
-			time.Sleep(3 * time.Second)
+			testAckMessage(t, ctx, bq, topic, getRandomChar(2), response.Id, nil)
 		})
 	})
 

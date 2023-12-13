@@ -92,6 +92,7 @@ func (q *BlockQueue[V]) deleteJob(topic core.Topic) error {
 	}
 
 	job.remove()
+	delete(q.jobs, topic.Name)
 
 	return nil
 }

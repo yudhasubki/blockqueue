@@ -36,7 +36,7 @@ func testPublish(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.Respo
 	}
 }
 
-func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectResponse io.ResponseMessages, expectErr error) {
+func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectResponse io.ResponseMessages, expectErr error) io.ResponseMessage {
 	response, err := bq.readSubscriberMessage(ctx, topic, subscriberName)
 	if err != nil {
 		require.Equal(t, expectErr, err)
@@ -44,12 +44,23 @@ func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue
 		require.NoError(t, err)
 		if len(expectResponse) > 0 {
 			require.EqualValues(t, expectResponse[0].Message, response[0].Message)
+			return response[0]
 		}
 	}
+	return io.ResponseMessage{}
 }
 
 func testDeleteSubscriber(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectErr error) {
 	err := bq.deleteSubscriber(ctx, topic, subscriberName)
+	if err != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
+func testAckMessage(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName, messageId string, expectErr error) {
+	err := bq.ackMessage(ctx, topic, subscriberName, messageId)
 	if err != nil {
 		require.Equal(t, expectErr, err)
 	} else {

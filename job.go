@@ -20,15 +20,15 @@ const (
 )
 
 type Job[V chan io.ResponseMessages] struct {
-	Id        uuid.UUID
-	Name      string
-	ServerCtx context.Context
+	Id   uuid.UUID
+	Name string
 
-	pool      *eventpool.Eventpool
-	mtx       *sync.RWMutex
-	listeners map[uuid.UUID]*Listener[V]
-	message   chan bool
-	deleted   chan bool
+	ctx        context.Context
+	cancelFunc context.CancelFunc
+	pool       *eventpool.Eventpool
+	mtx        *sync.RWMutex
+	listeners  map[uuid.UUID]*Listener[V]
+	message    chan bool
 }
 
 func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic) (*Job[V], error) {
@@ -60,15 +60,16 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		})
 	}
 
+	ctx, cancel := context.WithCancel(serverCtx)
 	job := &Job[V]{
-		Id:        topic.Id,
-		Name:      topic.Name,
-		pool:      eventpool.New(),
-		ServerCtx: serverCtx,
-		message:   make(chan bool, 20000),
-		deleted:   make(chan bool, 1),
-		mtx:       new(sync.RWMutex),
-		listeners: listeners,
+		Id:         topic.Id,
+		Name:       topic.Name,
+		pool:       eventpool.New(),
+		ctx:        ctx,
+		cancelFunc: cancel,
+		message:    make(chan bool, 20000),
+		mtx:        new(sync.RWMutex),
+		listeners:  listeners,
 	}
 	job.pool.Submit(eventpoolListeners...)
 	job.pool.Run()
@@ -118,7 +119,7 @@ func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0)
 	for _, subscriber := range subscribers {
 		if _, exist := job.listeners[subscriber.Id]; !exist {
-			listener, err := newListener[V](job.ServerCtx, topic.Name, subscriber)
+			listener, err := newListener[V](job.ctx, topic.Name, subscriber)
 			if err != nil {
 				return err
 			}
@@ -252,40 +253,37 @@ func (job *Job[V]) close() {
 }
 
 func (job *Job[V]) remove() {
-	job.deleted <- true
+	slog.Info(
+		"topic is deleted. dispatcher waiting job entered shutdown status",
+		logPrefixTopic, job.Name,
+	)
+
+	job.cancelFunc()
+	job.pool.Close()
+
+	for _, listener := range job.listeners {
+		listener.remove()
+	}
+
+	err := job.delete()
+	if err != nil {
+		slog.Error(
+			"error remove topic and his subscribers",
+			logPrefixErr, err,
+		)
+	}
 }
 
 func (job *Job[V]) fetchWaitingJob() {
 	for {
 		select {
-		case <-job.ServerCtx.Done():
+		case <-job.ctx.Done():
 			slog.Info(
 				"signal cancel received. dispatcher waiting job entered shutdown status.",
 				logPrefixTopic, job.Name,
 			)
 			job.pool.Close()
 			job.close()
-
-			return
-		case <-job.deleted:
-			slog.Info(
-				"topic is deleted. dispatcher waiting job entered shutdown status",
-				logPrefixTopic, job.Name,
-			)
-
-			job.pool.Close()
-
-			for _, listener := range job.listeners {
-				listener.remove()
-			}
-
-			err := job.delete()
-			if err != nil {
-				slog.Error(
-					"error remove topic and his subscribers",
-					logPrefixErr, err,
-				)
-			}
 
 			return
 		case <-job.message:

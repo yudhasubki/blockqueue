@@ -1,7 +1,6 @@
 package blockqueue
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,7 +16,6 @@ import (
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	blockio "github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/pqueue"
-	"github.com/yudhasubki/eventpool"
 )
 
 var (
@@ -50,7 +48,6 @@ type Listener[V chan blockio.ResponseMessages] struct {
 	JobId         string
 	PriorityQueue *pqueue.PriorityQueue[V]
 
-	pool       *eventpool.Eventpool
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	onShutdown bool
@@ -88,20 +85,10 @@ func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, job
 			MaxAttempts:        option.MaxAttempts,
 			VisibilityDuration: parse,
 		},
-		pool:       eventpool.New(),
 		onShutdown: false,
 		onRemove:   false,
 		response:   make(chan chan eventListener),
 	}
-
-	listener.pool.Submit(eventpool.EventpoolListener{
-		Name:       string(listener.retryBucket()),
-		Subscriber: listener.retryCatcher,
-		Opts: []eventpool.SubscriberConfigFunc{
-			eventpool.BufferSize(bufferSizeRetryListener),
-		},
-	})
-	listener.pool.Run()
 
 	go listener.watcher()
 	go listener.dispatcher()
@@ -334,6 +321,7 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 	}
 
 	messages := make(blockio.ResponseMessages, 0)
+	messageVisibilities := make(bucket.MessageVisibilities, 0)
 	err := readBucketTx(func(tx *nutsdb.Tx) error {
 		items, err := tx.LRange(listener.JobId, listener.bucket(), 0, 10)
 		if err != nil {
@@ -353,7 +341,7 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 			})
 
 			message.RetryPolicy.NextIter = time.Now().Add(listener.option.VisibilityDuration)
-			listener.pool.Publish(eventpool.SendJson(message))
+			messageVisibilities = append(messageVisibilities, message)
 		}
 
 		return nil
@@ -366,17 +354,16 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 		return
 	}
 
-	err = updateBucketTx(func(tx *nutsdb.Tx) error {
-		for i := 0; i < len(messages); i++ {
-			_, err := tx.LPop(listener.JobId, listener.bucket())
-			if err != nil {
-				return err
-			}
+	err = listener.retryCatcher(messageVisibilities)
+	if err != nil {
+		response <- eventListener{
+			Kind:  failedDeliveryKindEventListener,
+			Error: err,
 		}
+		return
+	}
 
-		return nil
-	})
-
+	err = listener.popBucketMessage(len(messages))
 	if err != nil {
 		response <- eventListener{
 			Kind:  failedDeliveryKindEventListener,
@@ -613,17 +600,34 @@ func (listener *Listener[V]) retryWatcher() {
 	}
 }
 
-func (listener *Listener[V]) retryCatcher(name string, message io.Reader) error {
-	var buf bytes.Buffer
-
-	_, err := io.Copy(&buf, message)
-	if err != nil {
-		return err
-	}
-
+func (listener *Listener[V]) retryCatcher(messageVisibilities bucket.MessageVisibilities) error {
 	return backoff.Retry(func() error {
 		return updateBucketTx(func(tx *nutsdb.Tx) error {
-			return tx.RPush(listener.JobId, listener.retryBucket(), buf.Bytes())
+			for _, message := range messageVisibilities {
+				b, err := json.Marshal(message)
+				if err != nil {
+					return err
+				}
+				err = tx.RPush(listener.JobId, listener.retryBucket(), b)
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
 		})
 	}, backoff.NewExponentialBackOff())
+}
+
+func (listener *Listener[V]) popBucketMessage(size int) error {
+	return updateBucketTx(func(tx *nutsdb.Tx) error {
+		for i := 0; i < size; i++ {
+			_, err := tx.LPop(listener.JobId, listener.bucket())
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
