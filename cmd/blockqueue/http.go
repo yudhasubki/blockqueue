@@ -51,11 +51,9 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	blockqueue.Etcd = etcd
-
 	ctx, cancel := context.WithCancel(ctx)
 
-	stream := blockqueue.New()
+	stream := blockqueue.New(blockqueue.NewKV(etcd))
 
 	err = stream.Run(ctx)
 	if err != nil {

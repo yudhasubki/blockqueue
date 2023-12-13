@@ -23,6 +23,7 @@ type Job[V chan io.ResponseMessages] struct {
 	Id   uuid.UUID
 	Name string
 
+	kv         *kv
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	pool       *eventpool.Eventpool
@@ -31,7 +32,7 @@ type Job[V chan io.ResponseMessages] struct {
 	message    chan bool
 }
 
-func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic) (*Job[V], error) {
+func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, kv *kv) (*Job[V], error) {
 	subscribers, err := getSubscribers(serverCtx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
@@ -39,15 +40,32 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		return &Job[V]{}, err
 	}
 
+	ctx, cancel := context.WithCancel(serverCtx)
+	job := &Job[V]{
+		Id:         topic.Id,
+		Name:       topic.Name,
+		kv:         kv,
+		cancelFunc: cancel,
+		ctx:        ctx,
+		message:    make(chan bool, 20000),
+		mtx:        new(sync.RWMutex),
+		pool:       eventpool.New(),
+	}
+	err = job.createBucket()
+	if err != nil {
+		return nil, err
+	}
+
 	listeners := make(map[uuid.UUID]*Listener[V])
 	for _, subscriber := range subscribers {
-		listener, err := newListener[V](serverCtx, topic.Name, subscriber)
+		listener, err := newListener[V](serverCtx, topic.Name, subscriber, job.kv)
 		if err != nil {
 			return &Job[V]{}, err
 		}
 
 		listeners[subscriber.Id] = listener
 	}
+	job.listeners = listeners
 
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0, len(listeners))
 	for _, listener := range listeners {
@@ -60,24 +78,8 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		})
 	}
 
-	ctx, cancel := context.WithCancel(serverCtx)
-	job := &Job[V]{
-		Id:         topic.Id,
-		Name:       topic.Name,
-		pool:       eventpool.New(),
-		ctx:        ctx,
-		cancelFunc: cancel,
-		message:    make(chan bool, 20000),
-		mtx:        new(sync.RWMutex),
-		listeners:  listeners,
-	}
 	job.pool.Submit(eventpoolListeners...)
 	job.pool.Run()
-
-	err = job.createBucket()
-	if err != nil {
-		return nil, err
-	}
 
 	go job.fetchWaitingJob()
 
@@ -85,8 +87,8 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 }
 
 func (job *Job[V]) createBucket() error {
-	return updateBucketTx(func(tx *nutsdb.Tx) error {
-		return createTxBucket(tx, nutsdb.DataStructureList, job.Name)
+	return job.kv.readBucketTx(func(tx *nutsdb.Tx) error {
+		return job.kv.createTxBucket(tx, nutsdb.DataStructureList, job.Name)
 	})
 }
 
@@ -119,7 +121,7 @@ func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0)
 	for _, subscriber := range subscribers {
 		if _, exist := job.listeners[subscriber.Id]; !exist {
-			listener, err := newListener[V](job.ctx, topic.Name, subscriber)
+			listener, err := newListener[V](job.ctx, topic.Name, subscriber, job.kv)
 			if err != nil {
 				return err
 			}
@@ -344,7 +346,7 @@ func (job *Job[V]) dispatchJob() error {
 }
 
 func (job *Job[V]) delete() error {
-	err := updateBucketTx(func(tx *nutsdb.Tx) error {
+	err := job.kv.updateBucketTx(func(tx *nutsdb.Tx) error {
 		return tx.DeleteBucket(nutsdb.DataStructureList, job.Name)
 	})
 	if err != nil {

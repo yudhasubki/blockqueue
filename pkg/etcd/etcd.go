@@ -5,7 +5,7 @@ import (
 )
 
 type Etcd struct {
-	Database *nutsdb.DB
+	db *nutsdb.DB
 }
 
 func New(dbName string) (*Etcd, error) {
@@ -19,10 +19,14 @@ func New(dbName string) (*Etcd, error) {
 	}
 
 	return &Etcd{
-		Database: db,
+		db: db,
 	}, nil
 }
 
+func (e *Etcd) Database() *nutsdb.DB {
+	return e.db
+}
+
 func (e *Etcd) Close() error {
-	return e.Database.Close()
+	return e.db.Close()
 }

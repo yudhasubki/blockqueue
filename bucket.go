@@ -3,26 +3,43 @@ package blockqueue
 import (
 	"errors"
 	"log/slog"
+	"sync"
 
 	"github.com/nutsdb/nutsdb"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
 )
 
-var Etcd *etcd.Etcd
+type kv struct {
+	mtx *sync.RWMutex
+	db  *etcd.Etcd
+}
 
-func updateBucketTx(fn func(tx *nutsdb.Tx) error) error {
-	return Etcd.Database.Update(func(tx *nutsdb.Tx) error {
+func NewKV(etcd *etcd.Etcd) *kv {
+	return &kv{
+		mtx: new(sync.RWMutex),
+		db:  etcd,
+	}
+}
+
+func (e *kv) readBucketTx(fn func(tx *nutsdb.Tx) error) error {
+	e.mtx.RLock()
+	defer e.mtx.RUnlock()
+
+	return e.db.Database().View(func(tx *nutsdb.Tx) error {
 		return fn(tx)
 	})
 }
 
-func readBucketTx(fn func(tx *nutsdb.Tx) error) error {
-	return Etcd.Database.View(func(tx *nutsdb.Tx) error {
+func (e *kv) updateBucketTx(fn func(tx *nutsdb.Tx) error) error {
+	e.mtx.Lock()
+	defer e.mtx.Unlock()
+
+	return e.db.Database().Update(func(tx *nutsdb.Tx) error {
 		return fn(tx)
 	})
 }
 
-func createTxBucket(tx *nutsdb.Tx, structure uint16, bucketName string) error {
+func (bucket *kv) createTxBucket(tx *nutsdb.Tx, structure uint16, bucketName string) error {
 	err := tx.NewBucket(structure, bucketName)
 	if err != nil {
 		if errors.Is(err, nutsdb.ErrBucketAlreadyExist) {

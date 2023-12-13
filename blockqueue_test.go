@@ -42,15 +42,14 @@ func runBlockQueueTest(t *testing.T, test func(bq *BlockQueue[chan bqio.Response
 	defer os.RemoveAll(persistenceBucketPath)
 	require.NoError(t, err)
 
-	Etcd = bucket
-
-	bq := New()
+	kv := NewKV(bucket)
+	bq := New(kv)
 
 	test(bq)
 
 	t.Cleanup(func() {
-		if bucket.Database.IsClose() {
-			require.NoError(t, bucket.Database.Close())
+		if bucket.Database().IsClose() {
+			require.NoError(t, bucket.Database().Close())
 		}
 
 		sqlite.Database.Close()

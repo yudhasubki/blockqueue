@@ -20,12 +20,14 @@ type BlockQueue[V chan io.ResponseMessages] struct {
 	mtx       *sync.RWMutex
 	serverCtx context.Context
 	jobs      map[string]*Job[V]
+	kv        *kv
 }
 
-func New[V chan io.ResponseMessages]() *BlockQueue[V] {
+func New[V chan io.ResponseMessages](bucket *kv) *BlockQueue[V] {
 	return &BlockQueue[V]{
 		mtx:  new(sync.RWMutex),
 		jobs: make(map[string]*Job[V]),
+		kv:   bucket,
 	}
 }
 
@@ -36,7 +38,7 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 	}
 
 	for _, topic := range topics {
-		job, err := newJob[V](ctx, topic)
+		job, err := newJob[V](ctx, topic, q.kv)
 		if err != nil {
 			return err
 		}
@@ -73,7 +75,7 @@ func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscriber
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
-	job, err := newJob[V](q.serverCtx, topic)
+	job, err := newJob[V](q.serverCtx, topic, q.kv)
 	if err != nil {
 		return err
 	}
