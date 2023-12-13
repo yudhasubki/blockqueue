@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	BufferSizeJob = 5000
+	bufferSizeJob = 5000
 )
 
 type Job[V chan io.ResponseMessages] struct {
@@ -55,7 +55,7 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 			Name:       listener.Id,
 			Subscriber: listener.jobCatcher,
 			Opts: []eventpool.SubscriberConfigFunc{
-				eventpool.BufferSize(BufferSizeJob),
+				eventpool.BufferSize(bufferSizeJob),
 			},
 		})
 	}
@@ -261,7 +261,7 @@ func (job *Job[V]) fetchWaitingJob() {
 		case <-job.ServerCtx.Done():
 			slog.Info(
 				"signal cancel received. dispatcher waiting job entered shutdown status.",
-				LogPrefixTopic, job.Name,
+				logPrefixTopic, job.Name,
 			)
 			job.pool.Close()
 			job.close()
@@ -270,7 +270,7 @@ func (job *Job[V]) fetchWaitingJob() {
 		case <-job.deleted:
 			slog.Info(
 				"topic is deleted. dispatcher waiting job entered shutdown status",
-				LogPrefixTopic, job.Name,
+				logPrefixTopic, job.Name,
 			)
 
 			job.pool.Close()
@@ -283,7 +283,7 @@ func (job *Job[V]) fetchWaitingJob() {
 			if err != nil {
 				slog.Error(
 					"error remove topic and his subscribers",
-					LogPrefixErr, err,
+					logPrefixErr, err,
 				)
 			}
 
@@ -291,15 +291,15 @@ func (job *Job[V]) fetchWaitingJob() {
 		case <-job.message:
 			slog.Debug(
 				"push job to the consumer bucket",
-				LogPrefixTopic, job.Name,
+				logPrefixTopic, job.Name,
 			)
 
 			err := job.dispatchJob()
 			if err != nil {
 				slog.Error(
 					"error dispatching job to the listener",
-					LogPrefixTopic, job.Name,
-					LogPrefixErr, err,
+					logPrefixTopic, job.Name,
+					logPrefixErr, err,
 				)
 			}
 		}
@@ -317,9 +317,9 @@ func (job *Job[V]) dispatchJob() error {
 	if err != nil {
 		slog.Error(
 			"error fetching message",
-			LogPrefixTopic, job.Name,
-			LogPrefixMessageStatus, core.MessageStatusWaiting,
-			LogPrefixErr, err,
+			logPrefixTopic, job.Name,
+			logPrefixMessageStatus, core.MessageStatusWaiting,
+			logPrefixErr, err,
 		)
 		return err
 	}
@@ -333,8 +333,8 @@ func (job *Job[V]) dispatchJob() error {
 		if err != nil {
 			slog.Error(
 				"error update status message",
-				LogPrefixTopic, job.Name,
-				LogPrefixMessageStatus, core.MessageStatusDelivered,
+				logPrefixTopic, job.Name,
+				logPrefixMessageStatus, core.MessageStatusDelivered,
 			)
 			return nil
 		}
@@ -352,7 +352,7 @@ func (job *Job[V]) delete() error {
 	if err != nil {
 		slog.Error(
 			"error remove bucket",
-			LogPrefixBucket, job.Name,
+			logPrefixBucket, job.Name,
 		)
 		return err
 	}

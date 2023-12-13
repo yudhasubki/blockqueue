@@ -28,8 +28,8 @@ func createTxBucket(tx *nutsdb.Tx, structure uint16, bucketName string) error {
 		if errors.Is(err, nutsdb.ErrBucketAlreadyExist) {
 			slog.Debug(
 				"bucket exist. skip create the bucket",
-				LogPrefixErr, err,
-				LogPrefixBucket, bucketName,
+				logPrefixErr, err,
+				logPrefixBucket, bucketName,
 			)
 			return nil
 		}

@@ -1,10 +1,10 @@
 package blockqueue
 
 const (
-	LogPrefixBucket        string = "bucket"
-	LogPrefixConsumer      string = "consumer"
-	LogPrefixErr           string = "err"
-	LogPrefixTopic         string = "topic"
-	LogPrefixMessageStatus string = "message_status"
-	LogPrefixMessage       string = "message"
+	logPrefixBucket        string = "bucket"
+	logPrefixConsumer      string = "consumer"
+	logPrefixErr           string = "err"
+	logPrefixTopic         string = "topic"
+	logPrefixMessageStatus string = "message_status"
+	logPrefixMessage       string = "message"
 )

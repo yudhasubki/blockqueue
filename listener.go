@@ -27,21 +27,21 @@ var (
 	ErrListenerRetryMessageNotFound = errors.New("error ack message. message_id not found")
 )
 
-type KindEventListener string
+type kindEventListener string
 
 const (
-	ShutdownKindEventListener       KindEventListener = "shutdown"
-	RemovedKindEventListener        KindEventListener = "remove"
-	FailedDeliveryKindEventListener KindEventListener = "failed_delivery"
-	DeliveryKindEventListener       KindEventListener = "delivery"
+	shutdownKindEventListener       kindEventListener = "shutdown"
+	removedKindEventListener        kindEventListener = "remove"
+	failedDeliveryKindEventListener kindEventListener = "failed_delivery"
+	deliveryKindEventListener       kindEventListener = "delivery"
 )
 
 const (
-	BufferSizeRetryListener = 100
+	bufferSizeRetryListener = 100
 )
 
-type EventListener struct {
-	Kind  KindEventListener
+type eventListener struct {
+	Kind  kindEventListener
 	Error error
 }
 
@@ -55,7 +55,7 @@ type Listener[V chan blockio.ResponseMessages] struct {
 	cancelFunc context.CancelFunc
 	onShutdown bool
 	onRemove   bool
-	response   chan chan EventListener
+	response   chan chan eventListener
 	option     listenerOption
 }
 
@@ -91,14 +91,14 @@ func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, job
 		pool:       eventpool.New(),
 		onShutdown: false,
 		onRemove:   false,
-		response:   make(chan chan EventListener),
+		response:   make(chan chan eventListener),
 	}
 
 	listener.pool.Submit(eventpool.EventpoolListener{
 		Name:       string(listener.retryBucket()),
 		Subscriber: listener.retryCatcher,
 		Opts: []eventpool.SubscriberConfigFunc{
-			eventpool.BufferSize(BufferSizeRetryListener),
+			eventpool.BufferSize(bufferSizeRetryListener),
 		},
 	})
 	listener.pool.Run()
@@ -144,8 +144,8 @@ func (listener *Listener[V]) reset() {
 
 			slog.Debug(
 				"reset bucket",
-				LogPrefixBucket, listener.bucket(),
-				LogPrefixMessage, string(item),
+				logPrefixBucket, listener.bucket(),
+				logPrefixMessage, string(item),
 			)
 		}
 
@@ -166,8 +166,8 @@ func (listener *Listener[V]) reset() {
 
 			slog.Debug(
 				"reset bucket",
-				LogPrefixBucket, listener.retryBucket(),
-				LogPrefixMessage, string(item),
+				logPrefixBucket, listener.retryBucket(),
+				logPrefixMessage, string(item),
 			)
 		}
 
@@ -307,7 +307,7 @@ func (listener *Listener[V]) dispatcher() {
 	}
 }
 
-func (listener *Listener[V]) notify(response chan EventListener) {
+func (listener *Listener[V]) notify(response chan eventListener) {
 	listener.PriorityQueue.Cond.L.Lock()
 	defer listener.PriorityQueue.Cond.L.Unlock()
 
@@ -320,15 +320,15 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 	}
 
 	if listener.onShutdown {
-		response <- EventListener{
-			Kind: ShutdownKindEventListener,
+		response <- eventListener{
+			Kind: shutdownKindEventListener,
 		}
 		return
 	}
 
 	if listener.onRemove {
-		response <- EventListener{
-			Kind: RemovedKindEventListener,
+		response <- eventListener{
+			Kind: removedKindEventListener,
 		}
 		return
 	}
@@ -359,8 +359,8 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 		return nil
 	})
 	if err != nil {
-		response <- EventListener{
-			Kind:  FailedDeliveryKindEventListener,
+		response <- eventListener{
+			Kind:  failedDeliveryKindEventListener,
 			Error: err,
 		}
 		return
@@ -378,8 +378,8 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 	})
 
 	if err != nil {
-		response <- EventListener{
-			Kind:  FailedDeliveryKindEventListener,
+		response <- eventListener{
+			Kind:  failedDeliveryKindEventListener,
 			Error: err,
 		}
 		return
@@ -388,8 +388,8 @@ func (listener *Listener[V]) notify(response chan EventListener) {
 	listener.PriorityQueue.Peek().Value <- messages
 	listener.PriorityQueue.Pop()
 
-	response <- EventListener{
-		Kind: DeliveryKindEventListener,
+	response <- eventListener{
+		Kind: deliveryKindEventListener,
 	}
 }
 
@@ -424,31 +424,31 @@ func (listener *Listener[V]) watcher() {
 			}
 
 			if messageLength > 0 {
-				eventListener := make(chan EventListener)
+				eventListener := make(chan eventListener)
 				listener.response <- eventListener
 
 				switch event := <-eventListener; event.Kind {
-				case RemovedKindEventListener:
+				case removedKindEventListener:
 					slog.Debug(
 						"[watcher] listener entering shutdown status, listener removed",
-						LogPrefixConsumer, listener.Id,
+						logPrefixConsumer, listener.Id,
 					)
 					return
-				case ShutdownKindEventListener:
+				case shutdownKindEventListener:
 					slog.Debug(
 						"[watcher] listener entering shutdown status, server receive signal shutdown",
-						LogPrefixConsumer, listener.Id,
+						logPrefixConsumer, listener.Id,
 					)
 					return
-				case FailedDeliveryKindEventListener:
+				case failedDeliveryKindEventListener:
 					slog.Error(
 						"[watcher] error sent to the incoming request",
-						LogPrefixErr, event.Error,
+						logPrefixErr, event.Error,
 					)
-				case DeliveryKindEventListener:
+				case deliveryKindEventListener:
 					slog.Debug(
 						"[watcher] success deliver message to the client",
-						LogPrefixConsumer, listener.Id,
+						logPrefixConsumer, listener.Id,
 					)
 				}
 			}
@@ -466,8 +466,8 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 	if err != nil {
 		slog.Error(
 			"error decode message",
-			LogPrefixErr, err,
-			LogPrefixConsumer, name,
+			logPrefixErr, err,
+			logPrefixConsumer, name,
 		)
 		return err
 	}
@@ -508,8 +508,8 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 	if err != nil {
 		slog.Error(
 			"error insert bucket",
-			LogPrefixErr, err,
-			LogPrefixConsumer, name,
+			logPrefixErr, err,
+			logPrefixConsumer, name,
 		)
 		return err
 	}
@@ -580,8 +580,8 @@ func (listener *Listener[V]) retryWatcher() {
 				if err != nil {
 					slog.Error(
 						"[retryWatcher] error RPush retry message on bucket",
-						LogPrefixConsumer, string(listener.bucket()),
-						LogPrefixConsumer, string(listener.retryBucket()),
+						logPrefixConsumer, string(listener.bucket()),
+						logPrefixConsumer, string(listener.retryBucket()),
 					)
 					continue
 				}
@@ -594,8 +594,8 @@ func (listener *Listener[V]) retryWatcher() {
 
 				slog.Debug(
 					"[retryWatcher] success pop the first element",
-					LogPrefixConsumer, string(listener.retryBucket()),
-					LogPrefixMessage, string(item),
+					logPrefixConsumer, string(listener.retryBucket()),
+					logPrefixMessage, string(item),
 				)
 
 				return nil
@@ -603,9 +603,9 @@ func (listener *Listener[V]) retryWatcher() {
 			if err != nil {
 				slog.Error(
 					"[retryWatcher] error LPop retry message on bucket",
-					LogPrefixErr, err,
-					LogPrefixConsumer, string(listener.bucket()),
-					LogPrefixConsumer, string(listener.retryBucket()),
+					logPrefixErr, err,
+					logPrefixConsumer, string(listener.bucket()),
+					logPrefixConsumer, string(listener.retryBucket()),
 				)
 				continue
 			}
