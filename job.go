@@ -31,8 +31,8 @@ type Job[V chan io.ResponseMessages] struct {
 	deleted   chan bool
 }
 
-func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic) (*Job[V], error) {
-	subscribers, err := GetSubscribers(serverCtx, core.FilterSubscriber{
+func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic) (*Job[V], error) {
+	subscribers, err := getSubscribers(serverCtx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -41,7 +41,7 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 
 	listeners := make(map[uuid.UUID]*Listener[V])
 	for _, subscriber := range subscribers {
-		listener, err := NewListener[V](serverCtx, topic.Name, subscriber)
+		listener, err := newListener[V](serverCtx, topic.Name, subscriber)
 		if err != nil {
 			return &Job[V]{}, err
 		}
@@ -84,16 +84,16 @@ func NewJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 }
 
 func (job *Job[V]) createBucket() error {
-	return UpdateBucketTx(func(tx *nutsdb.Tx) error {
-		return CreateTxBucket(tx, nutsdb.DataStructureList, job.Name)
+	return updateBucketTx(func(tx *nutsdb.Tx) error {
+		return createTxBucket(tx, nutsdb.DataStructureList, job.Name)
 	})
 }
 
-func (job *Job[V]) Trigger() {
+func (job *Job[V]) trigger() {
 	job.message <- true
 }
 
-func (job *Job[V]) AckMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+func (job *Job[V]) ackMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
 	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {
 		return err
@@ -104,11 +104,11 @@ func (job *Job[V]) AckMessage(ctx context.Context, topic core.Topic, subscriberN
 		return ErrListenerNotFound
 	}
 
-	return listener.DeleteRetryMessage(messageId)
+	return listener.deleteRetryMessage(messageId)
 }
 
-func (job *Job[V]) AddListener(ctx context.Context, topic core.Topic) error {
-	subscribers, err := GetSubscribers(ctx, core.FilterSubscriber{
+func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
+	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -118,7 +118,7 @@ func (job *Job[V]) AddListener(ctx context.Context, topic core.Topic) error {
 	eventpoolListeners := make([]eventpool.EventpoolListener, 0)
 	for _, subscriber := range subscribers {
 		if _, exist := job.listeners[subscriber.Id]; !exist {
-			listener, err := NewListener[V](job.ServerCtx, topic.Name, subscriber)
+			listener, err := newListener[V](job.ServerCtx, topic.Name, subscriber)
 			if err != nil {
 				return err
 			}
@@ -137,7 +137,7 @@ func (job *Job[V]) AddListener(ctx context.Context, topic core.Topic) error {
 	return nil
 }
 
-func (job *Job[V]) DeleteListener(ctx context.Context, topic core.Topic, subscriberName string) error {
+func (job *Job[V]) deleteListener(ctx context.Context, topic core.Topic, subscriberName string) error {
 	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {
 		return err
@@ -151,8 +151,8 @@ func (job *Job[V]) DeleteListener(ctx context.Context, topic core.Topic, subscri
 	job.mtx.Lock()
 	defer job.mtx.Unlock()
 
-	err = Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		return DeleteTxSubscribers(ctx, tx, core.Subscriber{
+	err = tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return deleteTxSubscribers(ctx, tx, core.Subscriber{
 			Name:      listener.Id,
 			TopicId:   job.Id,
 			DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),
@@ -162,14 +162,14 @@ func (job *Job[V]) DeleteListener(ctx context.Context, topic core.Topic, subscri
 		return err
 	}
 
-	listener.Remove()
+	listener.remove()
 	delete(job.listeners, subscriber.Id)
 
 	return nil
 }
 
-func (job *Job[V]) GetListeners(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
-	subscribers, err := GetSubscribers(ctx, core.FilterSubscriber{
+func (job *Job[V]) getListenersStatus(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
+	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -178,7 +178,7 @@ func (job *Job[V]) GetListeners(ctx context.Context, topic core.Topic) (io.Subsc
 
 	subscriberMessages := make(io.SubscriberMessages, 0)
 	for _, subscriber := range subscribers {
-		message, err := job.listeners[subscriber.Id].GetMessages()
+		message, err := job.listeners[subscriber.Id].messages()
 		if err != nil {
 			return io.SubscriberMessages{}, err
 		}
@@ -192,7 +192,7 @@ func (job *Job[V]) GetListeners(ctx context.Context, topic core.Topic) (io.Subsc
 	return subscriberMessages, nil
 }
 
-func (job *Job[V]) Enqueue(ctx context.Context, topic core.Topic, subscriberName string) (io.ResponseMessages, error) {
+func (job *Job[V]) enqueue(ctx context.Context, topic core.Topic, subscriberName string) (io.ResponseMessages, error) {
 	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
 	if err != nil {
 		return io.ResponseMessages{}, err
@@ -204,14 +204,14 @@ func (job *Job[V]) Enqueue(ctx context.Context, topic core.Topic, subscriberName
 	}
 
 	response := make(chan io.ResponseMessages, 1)
-	id := listener.Enqueue(response)
+	id := listener.enqueue(response)
 
 	select {
 	case <-ctx.Done():
-		listener.Dequeue(id)
+		listener.dequeue(id)
 		return io.ResponseMessages{}, nil
 	case <-listener.ctx.Done():
-		listener.Dequeue(id)
+		listener.dequeue(id)
 		return io.ResponseMessages{}, ErrListenerDeleted
 	case resp := <-response:
 		return resp, nil
@@ -228,7 +228,7 @@ func (job *Job[V]) getListeners(subscriberId uuid.UUID) (*Listener[V], bool) {
 }
 
 func (job *Job[V]) getSubscribers(ctx context.Context, topic core.Topic, subscriberName string) (core.Subscriber, error) {
-	subscribers, err := GetSubscribers(ctx, core.FilterSubscriber{
+	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 		Name:    []string{subscriberName},
 	})
@@ -243,15 +243,15 @@ func (job *Job[V]) getSubscribers(ctx context.Context, topic core.Topic, subscri
 	return subscribers[0], nil
 }
 
-func (job *Job[V]) Close() {
+func (job *Job[V]) close() {
 	job.mtx.Lock()
 	for _, listener := range job.listeners {
-		listener.Shutdown()
+		listener.shutdown()
 	}
 	job.mtx.Unlock()
 }
 
-func (job *Job[V]) Remove() {
+func (job *Job[V]) remove() {
 	job.deleted <- true
 }
 
@@ -264,7 +264,7 @@ func (job *Job[V]) fetchWaitingJob() {
 				LogPrefixTopic, job.Name,
 			)
 			job.pool.Close()
-			job.Close()
+			job.close()
 
 			return
 		case <-job.deleted:
@@ -276,10 +276,10 @@ func (job *Job[V]) fetchWaitingJob() {
 			job.pool.Close()
 
 			for _, listener := range job.listeners {
-				listener.Remove()
+				listener.remove()
 			}
 
-			err := job.remove()
+			err := job.delete()
 			if err != nil {
 				slog.Error(
 					"error remove topic and his subscribers",
@@ -308,7 +308,7 @@ func (job *Job[V]) fetchWaitingJob() {
 
 func (job *Job[V]) dispatchJob() error {
 	ctx := context.Background()
-	messages, err := GetMessages(ctx, core.FilterMessage{
+	messages, err := getMessages(ctx, core.FilterMessage{
 		TopicId: []uuid.UUID{job.Id},
 		Status:  []core.MessageStatus{core.MessageStatusWaiting},
 		Offset:  1,
@@ -329,7 +329,7 @@ func (job *Job[V]) dispatchJob() error {
 	}
 
 	if len(messages) > 0 {
-		err = UpdateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
+		err = updateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
 		if err != nil {
 			slog.Error(
 				"error update status message",
@@ -345,8 +345,8 @@ func (job *Job[V]) dispatchJob() error {
 	return nil
 }
 
-func (job *Job[V]) remove() error {
-	err := UpdateBucketTx(func(tx *nutsdb.Tx) error {
+func (job *Job[V]) delete() error {
+	err := updateBucketTx(func(tx *nutsdb.Tx) error {
 		return tx.DeleteBucket(nutsdb.DataStructureList, job.Name)
 	})
 	if err != nil {
@@ -357,8 +357,8 @@ func (job *Job[V]) remove() error {
 		return err
 	}
 
-	return Tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
-		err := DeleteTxTopic(ctx, tx, core.Topic{
+	return tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := deleteTxTopic(ctx, tx, core.Topic{
 			Id:        job.Id,
 			DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),
 		})
@@ -367,7 +367,7 @@ func (job *Job[V]) remove() error {
 		}
 
 		for _, listener := range job.listeners {
-			err := DeleteTxSubscribers(ctx, tx, core.Subscriber{
+			err := deleteTxSubscribers(ctx, tx, core.Subscriber{
 				Name:      listener.Id,
 				TopicId:   job.Id,
 				DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),

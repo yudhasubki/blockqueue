@@ -28,25 +28,25 @@ func (h *Http) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Route("/topics", func(r chi.Router) {
-		r.Post("/", h.CreateTopic)
+		r.Post("/", h.createTopic)
 
 		r.Group(func(r chi.Router) {
 			r.Use(h.topicExist)
-			r.Delete("/{topicName}", h.DeleteTopic)
-			r.Post("/{topicName}/messages", h.Publish)
+			r.Delete("/{topicName}", h.deleteTopic)
+			r.Post("/{topicName}/messages", h.publish)
 
-			r.Get("/{topicName}/subscribers", h.GetSubscribers)
-			r.Post("/{topicName}/subscribers", h.CreateSubscriber)
-			r.Delete("/{topicName}/subscribers/{subscriberName}", h.DeleteSubscriber)
-			r.Get("/{topicName}/subscribers/{subscriberName}", h.ReadSubscriber)
-			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/{messageId}", h.AckMessage)
+			r.Get("/{topicName}/subscribers", h.getSubscribers)
+			r.Post("/{topicName}/subscribers", h.createSubscriber)
+			r.Delete("/{topicName}/subscribers/{subscriberName}", h.deleteSubscriber)
+			r.Get("/{topicName}/subscribers/{subscriberName}", h.readSubscriber)
+			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/{messageId}", h.ackMessage)
 		})
 	})
 
 	return r
 }
 
-func (h *Http) CreateTopic(w http.ResponseWriter, r *http.Request) {
+func (h *Http) createTopic(w http.ResponseWriter, r *http.Request) {
 	var request io.Topic
 
 	err := json.NewDecoder(r.Body).Decode(&request)
@@ -59,7 +59,7 @@ func (h *Http) CreateTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topics, err := GetTopics(r.Context(), core.FilterTopic{
+	topics, err := getTopics(r.Context(), core.FilterTopic{
 		Name: []string{request.Name},
 	})
 	if err != nil {
@@ -83,7 +83,7 @@ func (h *Http) CreateTopic(w http.ResponseWriter, r *http.Request) {
 		subscribers = request.Subscriber(topic.Id)
 	)
 
-	err = h.Stream.AddJob(r.Context(), topic, subscribers)
+	err = h.Stream.addJob(r.Context(), topic, subscribers)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -97,10 +97,10 @@ func (h *Http) CreateTopic(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) DeleteTopic(w http.ResponseWriter, r *http.Request) {
+func (h *Http) deleteTopic(w http.ResponseWriter, r *http.Request) {
 	topic := h.getTopic(r.Context())
 
-	err := h.Stream.DeleteJob(topic)
+	err := h.Stream.deleteJob(topic)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -114,13 +114,13 @@ func (h *Http) DeleteTopic(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) DeleteSubscriber(w http.ResponseWriter, r *http.Request) {
+func (h *Http) deleteSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic      = h.getTopic(r.Context())
 		subscriber = chi.URLParam(r, "subscriberName")
 	)
 
-	err := h.Stream.DeleteSubscriber(r.Context(), topic, subscriber)
+	err := h.Stream.deleteSubscriber(r.Context(), topic, subscriber)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -133,7 +133,7 @@ func (h *Http) DeleteSubscriber(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) Publish(w http.ResponseWriter, r *http.Request) {
+func (h *Http) publish(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic   = h.getTopic(r.Context())
 		request io.Publish
@@ -149,7 +149,7 @@ func (h *Http) Publish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.Stream.Publish(r.Context(), topic, request)
+	err = h.Stream.publish(r.Context(), topic, request)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -164,12 +164,12 @@ func (h *Http) Publish(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetSubscribers is endpoint to get metadata of subscribers before it claimed to consumer bucket
-func (h *Http) GetSubscribers(w http.ResponseWriter, r *http.Request) {
+func (h *Http) getSubscribers(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic = h.getTopic(r.Context())
 	)
 
-	subscriberStatus, err := h.Stream.GetSubscribers(r.Context(), topic)
+	subscriberStatus, err := h.Stream.getSubscribersStatus(r.Context(), topic)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -184,7 +184,7 @@ func (h *Http) GetSubscribers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
+func (h *Http) createSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
 		request io.Subscribers
 		topic   = h.getTopic(r.Context())
@@ -200,8 +200,8 @@ func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subscribers := request.Subscriber(topic.Id)
-	err = Tx(r.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
-		return CreateTxSubscribers(ctx, tx, subscribers)
+	err = tx(r.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
+		return createTxSubscribers(ctx, tx, subscribers)
 	})
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
@@ -211,7 +211,7 @@ func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.Stream.AddSubscribers(r.Context(), topic)
+	err = h.Stream.addSubscriber(r.Context(), topic)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -225,7 +225,7 @@ func (h *Http) CreateSubscriber(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
+func (h *Http) readSubscriber(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic      = h.getTopic(r.Context())
 		subscriber = chi.URLParam(r, "subscriberName")
@@ -243,7 +243,7 @@ func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), duration)
 	defer cancel()
 
-	messages, err := h.Stream.ReadSubscriber(ctx, topic, subscriber)
+	messages, err := h.Stream.readSubscriberMessage(ctx, topic, subscriber)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -258,14 +258,14 @@ func (h *Http) ReadSubscriber(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Http) AckMessage(w http.ResponseWriter, r *http.Request) {
+func (h *Http) ackMessage(w http.ResponseWriter, r *http.Request) {
 	var (
 		topic      = h.getTopic(r.Context())
 		subscriber = chi.URLParam(r, "subscriberName")
 		messageId  = chi.URLParam(r, "messageId")
 	)
 
-	err := h.Stream.AckMessage(r.Context(), topic, subscriber, messageId)
+	err := h.Stream.ackMessage(r.Context(), topic, subscriber, messageId)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),
@@ -283,7 +283,7 @@ func (h *Http) topicExist(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topicName := chi.URLParam(r, "topicName")
 
-		topics, err := GetTopics(r.Context(), core.FilterTopic{
+		topics, err := getTopics(r.Context(), core.FilterTopic{
 			Name: []string{topicName},
 		})
 		if err != nil {

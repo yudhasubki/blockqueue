@@ -11,7 +11,7 @@ import (
 
 var Conn *sqlite.SQLite
 
-func GetTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
+func getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
 	var (
 		topics = make(core.Topics, 0)
 		query  = "SELECT * FROM topics"
@@ -41,7 +41,7 @@ func GetTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error
 	return topics, nil
 }
 
-func GetSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Subscribers, error) {
+func getSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Subscribers, error) {
 	var (
 		subscribers = make(core.Subscribers, 0)
 		query       = "SELECT topic_subscribers.*, t.name as topic_name FROM topic_subscribers INNER JOIN topics t ON topic_subscribers.topic_id = t.id"
@@ -71,7 +71,7 @@ func GetSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Sub
 	return subscribers, nil
 }
 
-func CreateTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
+func createTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "INSERT INTO topics (`id`, `name`) VALUES (:id, :name)")
 	if err != nil {
 		return err
@@ -86,7 +86,7 @@ func CreateTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	return nil
 }
 
-func DeleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
+func deleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "UPDATE topics SET deleted_at = :deleted_at WHERE id = :id")
 	if err != nil {
 		return err
@@ -101,7 +101,7 @@ func DeleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	return nil
 }
 
-func DeleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber) error {
+func deleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "UPDATE topic_subscribers SET deleted_at = :deleted_at WHERE name = :name AND topic_id = :topic_id")
 	if err != nil {
 		return err
@@ -116,7 +116,7 @@ func DeleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber
 	return nil
 }
 
-func CreateTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
+func createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
 	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (`id`, `topic_id`, `name`, `option`) VALUES (:id, :topic_id, :name, :option)", subscribers)
 	if err != nil {
 		return err
@@ -125,7 +125,7 @@ func CreateTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subs
 	return nil
 }
 
-func CreateMessages(ctx context.Context, message core.Message) error {
+func createMessages(ctx context.Context, message core.Message) error {
 	stmt, err := Conn.Database.PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
 	if err != nil {
 		return err
@@ -140,7 +140,7 @@ func CreateMessages(ctx context.Context, message core.Message) error {
 	return nil
 }
 
-func UpdateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...uuid.UUID) error {
+func updateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...uuid.UUID) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -158,7 +158,7 @@ func UpdateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...
 	return nil
 }
 
-func GetMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
+func getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
 	var (
 		messages = make(core.Messages, 0)
 		query    = "SELECT * FROM topic_messages"
@@ -189,7 +189,7 @@ func GetMessages(ctx context.Context, filter core.FilterMessage) (core.Messages,
 	return messages, nil
 }
 
-func Tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) error) error {
+func tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) error) error {
 	tx, err := Conn.Database.Beginx()
 	if err != nil {
 		return err

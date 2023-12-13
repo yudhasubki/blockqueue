@@ -30,13 +30,13 @@ func New[V chan io.ResponseMessages]() *BlockQueue[V] {
 }
 
 func (q *BlockQueue[V]) Run(ctx context.Context) error {
-	topics, err := GetTopics(ctx, core.FilterTopic{})
+	topics, err := getTopics(ctx, core.FilterTopic{})
 	if err != nil {
 		return err
 	}
 
 	for _, topic := range topics {
-		job, err := NewJob[V](ctx, topic)
+		job, err := newJob[V](ctx, topic)
 		if err != nil {
 			return err
 		}
@@ -47,14 +47,14 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 	return nil
 }
 
-func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
-	err := Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		err := CreateTxTopic(ctx, tx, topic)
+func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
+	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		err := createTxTopic(ctx, tx, topic)
 		if err != nil {
 			return err
 		}
 
-		err = CreateTxSubscribers(ctx, tx, subscribers)
+		err = createTxSubscribers(ctx, tx, subscribers)
 		if err != nil {
 			return err
 		}
@@ -73,7 +73,7 @@ func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscriber
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
-	job, err := NewJob[V](q.serverCtx, topic)
+	job, err := newJob[V](q.serverCtx, topic)
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,7 @@ func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscriber
 	return nil
 }
 
-func (q *BlockQueue[V]) DeleteJob(topic core.Topic) error {
+func (q *BlockQueue[V]) deleteJob(topic core.Topic) error {
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
@@ -91,28 +91,28 @@ func (q *BlockQueue[V]) DeleteJob(topic core.Topic) error {
 		return ErrJobNotFound
 	}
 
-	job.Remove()
+	job.remove()
 
 	return nil
 }
 
-func (q *BlockQueue[V]) AckMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+func (q *BlockQueue[V]) ackMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	return job.AckMessage(ctx, topic, subscriberName, messageId)
+	return job.ackMessage(ctx, topic, subscriberName, messageId)
 }
 
-func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request io.Publish) error {
+func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request io.Publish) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	err := Tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		return CreateMessages(ctx, core.Message{
+	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return createMessages(ctx, core.Message{
 			Id:      uuid.New(),
 			TopicId: topic.Id,
 			Message: request.Message,
@@ -123,27 +123,27 @@ func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request i
 		return err
 	}
 
-	job.Trigger()
+	job.trigger()
 
 	return nil
 }
 
-func (q *BlockQueue[V]) GetSubscribers(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
+func (q *BlockQueue[V]) getSubscribersStatus(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return io.SubscriberMessages{}, ErrJobNotFound
 	}
 
-	return job.GetListeners(ctx, topic)
+	return job.getListenersStatus(ctx, topic)
 }
 
-func (q *BlockQueue[V]) AddSubscribers(ctx context.Context, topic core.Topic) error {
+func (q *BlockQueue[V]) addSubscriber(ctx context.Context, topic core.Topic) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	err := job.AddListener(ctx, topic)
+	err := job.addListener(ctx, topic)
 	if err != nil {
 		return err
 	}
@@ -151,22 +151,22 @@ func (q *BlockQueue[V]) AddSubscribers(ctx context.Context, topic core.Topic) er
 	return nil
 }
 
-func (q *BlockQueue[V]) DeleteSubscriber(ctx context.Context, topic core.Topic, subcriber string) error {
+func (q *BlockQueue[V]) deleteSubscriber(ctx context.Context, topic core.Topic, subcriber string) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	return job.DeleteListener(ctx, topic, subcriber)
+	return job.deleteListener(ctx, topic, subcriber)
 }
 
-func (q *BlockQueue[V]) ReadSubscriber(ctx context.Context, topic core.Topic, subscriber string) (io.ResponseMessages, error) {
+func (q *BlockQueue[V]) readSubscriberMessage(ctx context.Context, topic core.Topic, subscriber string) (io.ResponseMessages, error) {
 	job, exist := q.jobs[topic.Name]
 	if !exist {
 		return io.ResponseMessages{}, ErrJobNotFound
 	}
 
-	return job.Enqueue(ctx, topic, subscriber)
+	return job.enqueue(ctx, topic, subscriber)
 }
 
 func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
