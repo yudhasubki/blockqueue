@@ -185,6 +185,57 @@ func TestBlockQueuePublishAndRead(t *testing.T) {
 		})
 	})
 
+	t.Run("read message but listener deleted", func(t *testing.T) {
+		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
+			var (
+				ctx     = context.Background()
+				request = bqio.Topic{
+					Name: getRandomChar(1),
+					Subscribers: bqio.Subscribers{
+						{
+							Name: getRandomChar(2),
+						},
+					},
+				}
+				topic       = request.Topic()
+				subscribers = request.Subscriber(topic.Id)
+			)
+			bq.Run(ctx)
+
+			testAddJob(t, ctx, bq, topic, subscribers, nil)
+			go testReadSubscriberMessage(t, ctx, bq, topic, getRandomChar(2), nil, ErrListenerDeleted)
+			time.Sleep(2 * time.Second)
+			testDeleteSubscriber(t, ctx, bq, topic, getRandomChar(2), nil)
+			time.Sleep(3 * time.Second)
+		})
+	})
+
+	t.Run("read message but timeout or no message available", func(t *testing.T) {
+		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
+			var (
+				serverCtx          = context.Background()
+				requestCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+				request            = bqio.Topic{
+					Name: getRandomChar(1),
+					Subscribers: bqio.Subscribers{
+						{
+							Name: getRandomChar(2),
+						},
+					},
+				}
+				topic       = request.Topic()
+				subscribers = request.Subscriber(topic.Id)
+			)
+			bq.Run(serverCtx)
+
+			testAddJob(t, requestCtx, bq, topic, subscribers, nil)
+			go testReadSubscriberMessage(t, requestCtx, bq, topic, getRandomChar(2), nil, nil)
+			time.Sleep(2 * time.Second)
+			cancel()
+			time.Sleep(3 * time.Second)
+		})
+	})
+
 	t.Run("topic not found when publish a message", func(t *testing.T) {
 		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
 			var (

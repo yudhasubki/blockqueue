@@ -145,7 +145,7 @@ func (job *Job[V]) deleteListener(ctx context.Context, topic core.Topic, subscri
 
 	listener, exist := job.getListeners(subscriber.Id)
 	if !exist {
-		return nil
+		return ErrListenerNotFound
 	}
 
 	job.mtx.Lock()

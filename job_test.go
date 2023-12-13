@@ -42,6 +42,17 @@ func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue
 		require.Equal(t, expectErr, err)
 	} else {
 		require.NoError(t, err)
-		require.EqualValues(t, expectResponse[0].Message, response[0].Message)
+		if len(expectResponse) > 0 {
+			require.EqualValues(t, expectResponse[0].Message, response[0].Message)
+		}
+	}
+}
+
+func testDeleteSubscriber(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectErr error) {
+	err := bq.deleteSubscriber(ctx, topic, subscriberName)
+	if err != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
 	}
 }
