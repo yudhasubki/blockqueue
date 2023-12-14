@@ -18,4 +18,18 @@ var (
 			Help: fmt.Sprintf("The total number succesfully published to the topic %s", topicName),
 		})
 	}
+
+	TotalRequestQueueSubscriber = func(topicName, subscriberName string) prometheus.Counter {
+		return prometheus.NewCounter(prometheus.CounterOpts{
+			Name: fmt.Sprintf("total_request_queue_topic_%s_subscriber_%s", topicName, subscriberName),
+			Help: fmt.Sprintf("The current total request queue on topic %s subscriber %s", topicName, subscriberName),
+		})
+	}
+
+	TotalConsumedMessage = func(topicName, subscriberName string) prometheus.Counter {
+		return prometheus.NewCounter(prometheus.CounterOpts{
+			Name: fmt.Sprintf("total_consumed_message_topic_%s_subscriber_%s", topicName, subscriberName),
+			Help: fmt.Sprintf("The current total consumed message on topic %s subscriber %s", topicName, subscriberName),
+		})
+	}
 )

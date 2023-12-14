@@ -13,9 +13,11 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/google/uuid"
 	"github.com/nutsdb/nutsdb"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/bucket"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	blockio "github.com/yudhasubki/blockqueue/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
 	"github.com/yudhasubki/blockqueue/pkg/pqueue"
 )
 
@@ -56,11 +58,17 @@ type Listener[V chan blockio.ResponseMessages] struct {
 	onShutdown *atomic.Bool
 	option     listenerOption
 	response   chan chan eventListener
+	metric     *listenerMetric
 }
 
 type listenerOption struct {
 	MaxAttempts        int
 	VisibilityDuration time.Duration
+}
+
+type listenerMetric struct {
+	totalEnqueue         prometheus.Counter
+	totalConsumedMessage prometheus.Counter
 }
 
 func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber, bucket *kv) (*Listener[V], error) {
@@ -91,7 +99,13 @@ func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, job
 		onShutdown: &atomic.Bool{},
 		onRemove:   &atomic.Bool{},
 		response:   make(chan chan eventListener),
+		metric: &listenerMetric{
+			totalEnqueue:         metric.TotalRequestQueueSubscriber(jobId, subscriber.Name),
+			totalConsumedMessage: metric.TotalConsumedMessage(jobId, subscriber.Name),
+		},
 	}
+	prometheus.Register(listener.metric.totalEnqueue)
+	prometheus.Register(listener.metric.totalConsumedMessage)
 
 	go listener.watcher()
 	go listener.dispatcher()
@@ -112,6 +126,9 @@ func (listener *Listener[V]) shutdown() {
 func (listener *Listener[V]) remove() {
 	listener.PriorityQueue.Cond.L.Lock()
 	defer listener.PriorityQueue.Cond.L.Unlock()
+
+	prometheus.Unregister(listener.metric.totalEnqueue)
+	prometheus.Unregister(listener.metric.totalConsumedMessage)
 
 	listener.onRemove.Swap(true)
 	listener.reset()
@@ -257,6 +274,7 @@ func (listener *Listener[V]) enqueue(messages chan blockio.ResponseMessages) str
 		Id:    id,
 		Value: messages,
 	})
+	go listener.metric.totalEnqueue.Inc()
 
 	listener.PriorityQueue.Cond.Broadcast()
 
@@ -313,7 +331,7 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 	messages := make(blockio.ResponseMessages, 0)
 	messageVisibilities := make(bucket.MessageVisibilities, 0)
 	err := listener.kv.readBucketTx(func(tx *nutsdb.Tx) error {
-		items, err := tx.LRange(listener.JobId, listener.messageBucket(), 0, 10)
+		items, err := tx.LRange(listener.JobId, listener.messageBucket(), 0, 9)
 		if err != nil {
 			return err
 		}
@@ -368,6 +386,7 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 	response <- eventListener{
 		Kind: deliveryKindEventListener,
 	}
+	go listener.metric.totalConsumedMessage.Add(float64(len(messages)))
 }
 
 func (listener *Listener[V]) watcher() {
