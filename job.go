@@ -3,12 +3,12 @@ package blockqueue
 import (
 	"context"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/nutsdb/nutsdb"
+	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/eventpool"
@@ -27,7 +27,7 @@ type Job[V chan io.ResponseMessages] struct {
 	ctx        context.Context
 	cancelFunc context.CancelFunc
 	pool       *eventpool.Eventpool
-	mtx        *sync.RWMutex
+	mtx        *cas.SpinLock
 	listeners  map[uuid.UUID]*Listener[V]
 	message    chan bool
 }
@@ -48,7 +48,7 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		cancelFunc: cancel,
 		ctx:        ctx,
 		message:    make(chan bool, 20000),
-		mtx:        new(sync.RWMutex),
+		mtx:        cas.New(),
 		pool:       eventpool.New(),
 	}
 	err = job.createBucket()

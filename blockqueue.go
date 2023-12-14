@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/io"
 )
@@ -17,7 +17,7 @@ var (
 )
 
 type BlockQueue[V chan io.ResponseMessages] struct {
-	mtx       *sync.RWMutex
+	mtx       *cas.SpinLock
 	serverCtx context.Context
 	jobs      map[string]*Job[V]
 	kv        *kv
@@ -25,7 +25,7 @@ type BlockQueue[V chan io.ResponseMessages] struct {
 
 func New[V chan io.ResponseMessages](bucket *kv) *BlockQueue[V] {
 	return &BlockQueue[V]{
-		mtx:  new(sync.RWMutex),
+		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
 		kv:   bucket,
 	}
