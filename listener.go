@@ -215,13 +215,9 @@ func (listener *Listener[V]) deleteRetryMessage(id string) error {
 	return ErrListenerRetryMessageNotFound
 }
 
-func (listener *Listener[V]) messages() (bucket.MessageCounter, error) {
-	var (
-		unpublishMessage = 0
-		unackMessage     = 0
-	)
-
-	err := listener.kv.readBucketTx(func(tx *nutsdb.Tx) error {
+func (listener *Listener[V]) messages() (counter bucket.MessageCounter, err error) {
+	counter.Name = listener.Id
+	err = listener.kv.readBucketTx(func(tx *nutsdb.Tx) error {
 		size, err := tx.LSize(listener.JobId, listener.messageBucket())
 		if err != nil {
 			if errors.Is(err, nutsdb.ErrListNotFound) {
@@ -230,14 +226,14 @@ func (listener *Listener[V]) messages() (bucket.MessageCounter, error) {
 			return err
 		}
 
-		unpublishMessage = size
+		counter.UnpublishMessage = size
 		return nil
 	})
 	if err != nil {
 		return bucket.MessageCounter{}, err
 	}
 
-	err = listener.kv.readBucketTx(func(tx *nutsdb.Tx) error {
+	return counter, listener.kv.readBucketTx(func(tx *nutsdb.Tx) error {
 		size, err := tx.LSize(listener.JobId, listener.retryBucket())
 		if err != nil {
 			if errors.Is(err, nutsdb.ErrListNotFound) {
@@ -247,18 +243,9 @@ func (listener *Listener[V]) messages() (bucket.MessageCounter, error) {
 			return err
 		}
 
-		unackMessage = size
+		counter.UnackMessage = size
 		return nil
 	})
-	if err != nil {
-		return bucket.MessageCounter{}, err
-	}
-
-	return bucket.MessageCounter{
-		Name:             listener.Id,
-		UnpublishMessage: unpublishMessage,
-		UnackMessage:     unackMessage,
-	}, nil
 }
 
 func (listener *Listener[V]) enqueue(messages chan blockio.ResponseMessages) string {
@@ -464,7 +451,6 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 
 	err = backoff.Retry(func() error {
 		return listener.kv.updateBucketTx(func(tx *nutsdb.Tx) error {
-			messageBytes := make([][]byte, 0)
 			for idx, message := range messages {
 				var (
 					id = fmt.Sprintf("%d_%d", prefix, idx)
@@ -484,12 +470,10 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 					return err
 				}
 
-				messageBytes = append(messageBytes, b)
-			}
-
-			err = tx.RPush(listener.JobId, listener.messageBucket(), messageBytes...)
-			if err != nil {
-				return err
+				err = tx.RPush(listener.JobId, listener.messageBucket(), b)
+				if err != nil {
+					return err
+				}
 			}
 
 			return nil

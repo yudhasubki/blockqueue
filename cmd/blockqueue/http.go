@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lesismal/nbio/nbhttp"
@@ -83,9 +84,13 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	<-shutdown
 
 	cancel()
+	stream.Close()
 	engine.Stop()
 	sqlite.Close()
 	etcd.Close()
+
+	// handling graceful shutdown
+	time.Sleep(cfg.Http.Shutdown)
 
 	return nil
 }

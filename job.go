@@ -278,6 +278,7 @@ func (job *Job[V]) remove() {
 
 func (job *Job[V]) fetchWaitingJob() {
 	for {
+		ticker := time.NewTicker(1 * time.Second)
 		select {
 		case <-job.ctx.Done():
 			slog.Info(
@@ -288,12 +289,7 @@ func (job *Job[V]) fetchWaitingJob() {
 			job.close()
 
 			return
-		case <-job.message:
-			slog.Debug(
-				"push job to the consumer bucket",
-				logPrefixTopic, job.Name,
-			)
-
+		case <-ticker.C:
 			err := job.dispatchJob()
 			if err != nil {
 				slog.Error(
@@ -312,7 +308,7 @@ func (job *Job[V]) dispatchJob() error {
 		TopicId: []uuid.UUID{job.Id},
 		Status:  []core.MessageStatus{core.MessageStatusWaiting},
 		Offset:  1,
-		Limit:   10,
+		Limit:   100,
 	})
 	if err != nil {
 		slog.Error(

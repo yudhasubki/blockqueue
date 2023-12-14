@@ -1,5 +1,6 @@
 http:
   port: 8080
+  shutdown: "30s"
 logging:
   level: "debug"
   type:  "json"

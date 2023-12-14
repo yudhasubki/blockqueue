@@ -2,33 +2,50 @@ package blockqueue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
-	"github.com/yudhasubki/blockqueue/pkg/io"
+	bqio "github.com/yudhasubki/blockqueue/pkg/io"
+	"github.com/yudhasubki/eventpool"
 )
 
 var (
 	ErrJobNotFound = errors.New("job not found")
 )
 
-type BlockQueue[V chan io.ResponseMessages] struct {
+type BlockQueue[V chan bqio.ResponseMessages] struct {
 	mtx       *cas.SpinLock
 	serverCtx context.Context
 	jobs      map[string]*Job[V]
 	kv        *kv
+	pool      *eventpool.Eventpool
 }
 
-func New[V chan io.ResponseMessages](bucket *kv) *BlockQueue[V] {
-	return &BlockQueue[V]{
+func New[V chan bqio.ResponseMessages](bucket *kv) *BlockQueue[V] {
+	blockqueue := &BlockQueue[V]{
 		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
 		kv:   bucket,
 	}
+	pool := eventpool.New()
+	pool.Submit(eventpool.EventpoolListener{
+		Name:       "store_job",
+		Subscriber: blockqueue.storeJob,
+		Opts: []eventpool.SubscriberConfigFunc{
+			eventpool.BufferSize(20000),
+			eventpool.MaxWorker(50),
+		},
+	})
+	pool.Run()
+	blockqueue.pool = pool
+
+	return blockqueue
 }
 
 func (q *BlockQueue[V]) Run(ctx context.Context) error {
@@ -108,33 +125,26 @@ func (q *BlockQueue[V]) ackMessage(ctx context.Context, topic core.Topic, subscr
 	return job.ackMessage(ctx, topic, subscriberName, messageId)
 }
 
-func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request io.Publish) error {
-	job, exist := q.getJob(topic)
+func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request bqio.Publish) error {
+	_, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		return createMessages(ctx, core.Message{
-			Id:      uuid.New(),
-			TopicId: topic.Id,
-			Message: request.Message,
-			Status:  core.MessageStatusWaiting,
-		})
-	})
-	if err != nil {
-		return err
-	}
-
-	job.trigger()
+	q.pool.Publish(eventpool.SendJson(core.Message{
+		Id:      uuid.New(),
+		TopicId: topic.Id,
+		Message: request.Message,
+		Status:  core.MessageStatusWaiting,
+	}))
 
 	return nil
 }
 
-func (q *BlockQueue[V]) getSubscribersStatus(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
+func (q *BlockQueue[V]) getSubscribersStatus(ctx context.Context, topic core.Topic) (bqio.SubscriberMessages, error) {
 	job, exist := q.getJob(topic)
 	if !exist {
-		return io.SubscriberMessages{}, ErrJobNotFound
+		return bqio.SubscriberMessages{}, ErrJobNotFound
 	}
 
 	return job.getListenersStatus(ctx, topic)
@@ -170,10 +180,10 @@ func (q *BlockQueue[V]) deleteSubscriber(ctx context.Context, topic core.Topic, 
 	return job.deleteListener(ctx, topic, subcriber)
 }
 
-func (q *BlockQueue[V]) readSubscriberMessage(ctx context.Context, topic core.Topic, subscriber string) (io.ResponseMessages, error) {
+func (q *BlockQueue[V]) readSubscriberMessage(ctx context.Context, topic core.Topic, subscriber string) (bqio.ResponseMessages, error) {
 	job, exist := q.jobs[topic.Name]
 	if !exist {
-		return io.ResponseMessages{}, ErrJobNotFound
+		return bqio.ResponseMessages{}, ErrJobNotFound
 	}
 
 	return job.enqueue(ctx, topic, subscriber)
@@ -186,4 +196,21 @@ func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 	}
 
 	return job, true
+}
+
+func (q *BlockQueue[V]) storeJob(name string, message io.Reader) error {
+	var request core.Message
+	err := json.NewDecoder(message).Decode(&request)
+	if err != nil {
+		return err
+	}
+
+	return tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
+
+		return createMessages(ctx, request)
+	})
+}
+
+func (q *BlockQueue[V]) Close() {
+	q.pool.Close()
 }

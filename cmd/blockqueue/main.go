@@ -86,6 +86,10 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		return config, err
 	}
 
+	if config.Http.Shutdown.Seconds() == 0 {
+		config.Http.Shutdown = 30 * time.Second
+	}
+
 	logOutput := os.Stdout
 	if config.Logging.Stderr {
 		logOutput = os.Stderr
@@ -118,7 +122,8 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 }
 
 type HttpConfig struct {
-	Port string `yaml:"port"`
+	Port     string        `yaml:"port"`
+	Shutdown time.Duration `yaml:"shutdown"`
 }
 
 func register(fs *flag.FlagSet) *string {
