@@ -12,12 +12,8 @@ type SpinLock struct {
 const free = uint32(0)
 
 func New() *SpinLock {
-	var poke *uint32
-	poke = new(uint32)
-	*poke = 0
-
 	return &SpinLock{
-		state: poke,
+		state: new(uint32),
 	}
 }
 
