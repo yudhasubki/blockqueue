@@ -23,6 +23,7 @@ type Job[V chan io.ResponseMessages] struct {
 	Id   uuid.UUID
 	Name string
 
+	db         *db
 	kv         *kv
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -32,18 +33,12 @@ type Job[V chan io.ResponseMessages] struct {
 	message    chan bool
 }
 
-func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, kv *kv) (*Job[V], error) {
-	subscribers, err := getSubscribers(serverCtx, core.FilterSubscriber{
-		TopicId: []uuid.UUID{topic.Id},
-	})
-	if err != nil {
-		return &Job[V]{}, err
-	}
-
+func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv) (*Job[V], error) {
 	ctx, cancel := context.WithCancel(serverCtx)
 	job := &Job[V]{
 		Id:         topic.Id,
 		Name:       topic.Name,
+		db:         db,
 		kv:         kv,
 		cancelFunc: cancel,
 		ctx:        ctx,
@@ -51,9 +46,17 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		mtx:        cas.New(),
 		pool:       eventpool.New(),
 	}
-	err = job.createBucket()
+
+	err := job.createBucket()
 	if err != nil {
 		return nil, err
+	}
+
+	subscribers, err := db.getSubscribers(serverCtx, core.FilterSubscriber{
+		TopicId: []uuid.UUID{topic.Id},
+	})
+	if err != nil {
+		return &Job[V]{}, err
 	}
 
 	listeners := make(map[uuid.UUID]*Listener[V])
@@ -111,7 +114,7 @@ func (job *Job[V]) ackMessage(ctx context.Context, topic core.Topic, subscriberN
 }
 
 func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
-	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
+	subscribers, err := job.db.getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -154,8 +157,8 @@ func (job *Job[V]) deleteListener(ctx context.Context, topic core.Topic, subscri
 	job.mtx.Lock()
 	defer job.mtx.Unlock()
 
-	err = tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		return deleteTxSubscribers(ctx, tx, core.Subscriber{
+	err = job.db.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return job.db.deleteTxSubscribers(ctx, tx, core.Subscriber{
 			Name:      listener.Id,
 			TopicId:   job.Id,
 			DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),
@@ -172,7 +175,7 @@ func (job *Job[V]) deleteListener(ctx context.Context, topic core.Topic, subscri
 }
 
 func (job *Job[V]) getListenersStatus(ctx context.Context, topic core.Topic) (io.SubscriberMessages, error) {
-	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
+	subscribers, err := job.db.getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -231,7 +234,7 @@ func (job *Job[V]) getListeners(subscriberId uuid.UUID) (*Listener[V], bool) {
 }
 
 func (job *Job[V]) getSubscribers(ctx context.Context, topic core.Topic, subscriberName string) (core.Subscriber, error) {
-	subscribers, err := getSubscribers(ctx, core.FilterSubscriber{
+	subscribers, err := job.db.getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 		Name:    []string{subscriberName},
 	})
@@ -304,7 +307,7 @@ func (job *Job[V]) fetchWaitingJob() {
 
 func (job *Job[V]) dispatchJob() error {
 	ctx := context.Background()
-	messages, err := getMessages(ctx, core.FilterMessage{
+	messages, err := job.db.getMessages(ctx, core.FilterMessage{
 		TopicId: []uuid.UUID{job.Id},
 		Status:  []core.MessageStatus{core.MessageStatusWaiting},
 		Offset:  1,
@@ -325,7 +328,7 @@ func (job *Job[V]) dispatchJob() error {
 	}
 
 	if len(messages) > 0 {
-		err = updateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
+		err = job.db.updateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
 		if err != nil {
 			slog.Error(
 				"error update status message",
@@ -353,8 +356,8 @@ func (job *Job[V]) delete() error {
 		return err
 	}
 
-	return tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
-		err := deleteTxTopic(ctx, tx, core.Topic{
+	return job.db.tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
+		err := job.db.deleteTxTopic(ctx, tx, core.Topic{
 			Id:        job.Id,
 			DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),
 		})
@@ -363,7 +366,7 @@ func (job *Job[V]) delete() error {
 		}
 
 		for _, listener := range job.listeners {
-			err := deleteTxSubscribers(ctx, tx, core.Subscriber{
+			err := job.db.deleteTxSubscribers(ctx, tx, core.Subscriber{
 				Name:      listener.Id,
 				TopicId:   job.Id,
 				DeletedAt: null.StringFrom(time.Now().Format("2006-01-02 15:04:05")),

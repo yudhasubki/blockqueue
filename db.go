@@ -5,13 +5,24 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
-var Conn *sqlite.SQLite
+type db struct {
+	mtx *cas.SpinLock
+	*sqlite.SQLite
+}
 
-func getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
+func NewDb(sqlite *sqlite.SQLite) *db {
+	return &db{
+		mtx:    cas.New(),
+		SQLite: sqlite,
+	}
+}
+
+func (d *db) getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
 	var (
 		topics = make(core.Topics, 0)
 		query  = "SELECT * FROM topics"
@@ -31,9 +42,9 @@ func getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error
 	if err != nil {
 		return topics, err
 	}
-	query = Conn.Database.Rebind(query)
+	query = d.Database.Rebind(query)
 
-	err = Conn.Database.Select(&topics, query, args...)
+	err = d.Database.Select(&topics, query, args...)
 	if err != nil {
 		return topics, err
 	}
@@ -41,7 +52,7 @@ func getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error
 	return topics, nil
 }
 
-func getSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Subscribers, error) {
+func (d *db) getSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Subscribers, error) {
 	var (
 		subscribers = make(core.Subscribers, 0)
 		query       = "SELECT topic_subscribers.*, t.name as topic_name FROM topic_subscribers INNER JOIN topics t ON topic_subscribers.topic_id = t.id"
@@ -61,9 +72,9 @@ func getSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Sub
 	if err != nil {
 		return subscribers, err
 	}
-	query = Conn.Database.Rebind(query)
+	query = d.Database.Rebind(query)
 
-	err = Conn.Database.Select(&subscribers, query, args...)
+	err = d.Database.Select(&subscribers, query, args...)
 	if err != nil {
 		return subscribers, err
 	}
@@ -71,7 +82,7 @@ func getSubscribers(ctx context.Context, filter core.FilterSubscriber) (core.Sub
 	return subscribers, nil
 }
 
-func createTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
+func (d *db) createTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "INSERT INTO topics (`id`, `name`) VALUES (:id, :name)")
 	if err != nil {
 		return err
@@ -86,7 +97,7 @@ func createTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	return nil
 }
 
-func deleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
+func (d *db) deleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "UPDATE topics SET deleted_at = :deleted_at WHERE id = :id")
 	if err != nil {
 		return err
@@ -101,7 +112,7 @@ func deleteTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
 	return nil
 }
 
-func deleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber) error {
+func (d *db) deleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber) error {
 	stmt, err := tx.PrepareNamedContext(ctx, "UPDATE topic_subscribers SET deleted_at = :deleted_at WHERE name = :name AND topic_id = :topic_id")
 	if err != nil {
 		return err
@@ -116,7 +127,7 @@ func deleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Subscriber
 	return nil
 }
 
-func createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
+func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
 	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (`id`, `topic_id`, `name`, `option`) VALUES (:id, :topic_id, :name, :option)", subscribers)
 	if err != nil {
 		return err
@@ -125,8 +136,8 @@ func createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subs
 	return nil
 }
 
-func createMessages(ctx context.Context, message core.Message) error {
-	stmt, err := Conn.Database.PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
+func (d *db) createMessages(ctx context.Context, message core.Message) error {
+	stmt, err := d.Database.PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
 	if err != nil {
 		return err
 	}
@@ -140,7 +151,7 @@ func createMessages(ctx context.Context, message core.Message) error {
 	return nil
 }
 
-func updateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...uuid.UUID) error {
+func (d *db) updateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...uuid.UUID) error {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -150,7 +161,7 @@ func updateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...
 		return err
 	}
 
-	_, err = Conn.Database.ExecContext(ctx, Conn.Database.Rebind(query), args...)
+	_, err = d.Database.ExecContext(ctx, d.Database.Rebind(query), args...)
 	if err != nil {
 		return err
 	}
@@ -158,7 +169,7 @@ func updateStatusMessage(ctx context.Context, status core.MessageStatus, ids ...
 	return nil
 }
 
-func getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
+func (d *db) getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
 	var (
 		messages = make(core.Messages, 0)
 		query    = "SELECT * FROM topic_messages"
@@ -179,9 +190,9 @@ func getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages,
 	if err != nil {
 		return messages, err
 	}
-	query = Conn.Database.Rebind(query)
+	query = d.Database.Rebind(query)
 
-	err = Conn.Database.Select(&messages, query, args...)
+	err = d.Database.Select(&messages, query, args...)
 	if err != nil {
 		return messages, err
 	}
@@ -189,8 +200,8 @@ func getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages,
 	return messages, nil
 }
 
-func tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) error) error {
-	tx, err := Conn.Database.Beginx()
+func (d *db) tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) error) error {
+	tx, err := d.Database.Beginx()
 	if err != nil {
 		return err
 	}

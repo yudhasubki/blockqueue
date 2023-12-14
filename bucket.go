@@ -5,35 +5,26 @@ import (
 	"log/slog"
 
 	"github.com/nutsdb/nutsdb"
-	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
 )
 
 type kv struct {
-	mtx *cas.SpinLock
-	db  *etcd.Etcd
+	db *etcd.Etcd
 }
 
 func NewKV(etcd *etcd.Etcd) *kv {
 	return &kv{
-		mtx: cas.New(),
-		db:  etcd,
+		db: etcd,
 	}
 }
 
 func (e *kv) readBucketTx(fn func(tx *nutsdb.Tx) error) error {
-	e.mtx.Lock()
-	defer e.mtx.Unlock()
-
 	return e.db.Database().View(func(tx *nutsdb.Tx) error {
 		return fn(tx)
 	})
 }
 
 func (e *kv) updateBucketTx(fn func(tx *nutsdb.Tx) error) error {
-	e.mtx.Lock()
-	defer e.mtx.Unlock()
-
 	return e.db.Database().Update(func(tx *nutsdb.Tx) error {
 		return fn(tx)
 	})

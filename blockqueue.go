@@ -24,11 +24,13 @@ type BlockQueue[V chan bqio.ResponseMessages] struct {
 	serverCtx context.Context
 	jobs      map[string]*Job[V]
 	kv        *kv
+	db        *db
 	pool      *eventpool.Eventpool
 }
 
-func New[V chan bqio.ResponseMessages](bucket *kv) *BlockQueue[V] {
+func New[V chan bqio.ResponseMessages](db *db, bucket *kv) *BlockQueue[V] {
 	blockqueue := &BlockQueue[V]{
+		db:   db,
 		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
 		kv:   bucket,
@@ -49,13 +51,13 @@ func New[V chan bqio.ResponseMessages](bucket *kv) *BlockQueue[V] {
 }
 
 func (q *BlockQueue[V]) Run(ctx context.Context) error {
-	topics, err := getTopics(ctx, core.FilterTopic{})
+	topics, err := q.db.getTopics(ctx, core.FilterTopic{})
 	if err != nil {
 		return err
 	}
 
 	for _, topic := range topics {
-		job, err := newJob[V](ctx, topic, q.kv)
+		job, err := newJob[V](ctx, topic, q.db, q.kv)
 		if err != nil {
 			return err
 		}
@@ -67,13 +69,13 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 }
 
 func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
-	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		err := createTxTopic(ctx, tx, topic)
+	err := q.db.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		err := q.db.createTxTopic(ctx, tx, topic)
 		if err != nil {
 			return err
 		}
 
-		err = createTxSubscribers(ctx, tx, subscribers)
+		err = q.db.createTxSubscribers(ctx, tx, subscribers)
 		if err != nil {
 			return err
 		}
@@ -92,7 +94,7 @@ func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscriber
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
-	job, err := newJob[V](q.serverCtx, topic, q.kv)
+	job, err := newJob[V](q.serverCtx, topic, q.db, q.kv)
 	if err != nil {
 		return err
 	}
@@ -156,8 +158,8 @@ func (q *BlockQueue[V]) addSubscriber(ctx context.Context, topic core.Topic, sub
 		return ErrJobNotFound
 	}
 
-	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
-		return createTxSubscribers(ctx, tx, subscribers)
+	err := q.db.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return q.db.createTxSubscribers(ctx, tx, subscribers)
 	})
 	if err != nil {
 		return err
@@ -205,9 +207,9 @@ func (q *BlockQueue[V]) storeJob(name string, message io.Reader) error {
 		return err
 	}
 
-	return tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
+	return q.db.tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
 
-		return createMessages(ctx, request)
+		return q.db.createMessages(ctx, request)
 	})
 }
 

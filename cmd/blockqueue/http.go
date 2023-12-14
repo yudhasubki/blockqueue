@@ -44,7 +44,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 		slog.Error("failed to open database", "error", err)
 		return err
 	}
-	blockqueue.Conn = sqlite
+	db := blockqueue.NewDb(sqlite)
 
 	etcd, err := etcd.New(cfg.Etcd.Path)
 	if err != nil {
@@ -54,7 +54,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	stream := blockqueue.New(blockqueue.NewKV(etcd))
+	stream := blockqueue.New(db, blockqueue.NewKV(etcd))
 
 	err = stream.Run(ctx)
 	if err != nil {
@@ -65,6 +65,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	mux := chi.NewRouter()
 	mux.Mount("/", (&blockqueue.Http{
 		Stream: stream,
+		Db:     db,
 	}).Router())
 
 	engine := nbhttp.NewEngine(nbhttp.Config{
