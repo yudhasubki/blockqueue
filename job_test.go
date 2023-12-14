@@ -50,6 +50,15 @@ func testReadSubscriberMessage(t *testing.T, ctx context.Context, bq *BlockQueue
 	return io.ResponseMessage{}
 }
 
+func testAddSubscriber(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscribers core.Subscribers, expectErr error) {
+	err := bq.addSubscriber(ctx, topic, subscribers)
+	if err != nil {
+		require.Equal(t, expectErr, err)
+	} else {
+		require.NoError(t, err)
+	}
+}
+
 func testDeleteSubscriber(t *testing.T, ctx context.Context, bq *BlockQueue[chan io.ResponseMessages], topic core.Topic, subscriberName string, expectErr error) {
 	err := bq.deleteSubscriber(ctx, topic, subscriberName)
 	if err != nil {

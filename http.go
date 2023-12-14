@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	httpresponse "github.com/yudhasubki/blockqueue/pkg/http"
 	"github.com/yudhasubki/blockqueue/pkg/io"
@@ -200,18 +199,8 @@ func (h *Http) createSubscriber(w http.ResponseWriter, r *http.Request) {
 	}
 
 	subscribers := request.Subscriber(topic.Id)
-	err = tx(r.Context(), func(ctx context.Context, tx *sqlx.Tx) error {
-		return createTxSubscribers(ctx, tx, subscribers)
-	})
-	if err != nil {
-		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
-			Error:   err.Error(),
-			Message: httpresponse.MessageFailure,
-		})
-		return
-	}
 
-	err = h.Stream.addSubscriber(r.Context(), topic)
+	err = h.Stream.addSubscriber(r.Context(), topic, subscribers)
 	if err != nil {
 		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
 			Error:   err.Error(),

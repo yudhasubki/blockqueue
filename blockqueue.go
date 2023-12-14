@@ -140,13 +140,20 @@ func (q *BlockQueue[V]) getSubscribersStatus(ctx context.Context, topic core.Top
 	return job.getListenersStatus(ctx, topic)
 }
 
-func (q *BlockQueue[V]) addSubscriber(ctx context.Context, topic core.Topic) error {
+func (q *BlockQueue[V]) addSubscriber(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 
-	err := job.addListener(ctx, topic)
+	err := tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		return createTxSubscribers(ctx, tx, subscribers)
+	})
+	if err != nil {
+		return err
+	}
+
+	err = job.addListener(ctx, topic)
 	if err != nil {
 		return err
 	}
