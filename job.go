@@ -8,9 +8,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/nutsdb/nutsdb"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
 	"github.com/yudhasubki/eventpool"
 	"gopkg.in/guregu/null.v4"
 )
@@ -31,6 +33,11 @@ type Job[V chan io.ResponseMessages] struct {
 	mtx        *cas.SpinLock
 	listeners  map[uuid.UUID]*Listener[V]
 	message    chan bool
+	metric     *jobMetric
+}
+
+type jobMetric struct {
+	message prometheus.Counter
 }
 
 func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv) (*Job[V], error) {
@@ -45,7 +52,11 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		message:    make(chan bool, 20000),
 		mtx:        cas.New(),
 		pool:       eventpool.New(),
+		metric: &jobMetric{
+			message: metric.MessagePublishedTopic(topic.Name),
+		},
 	}
+	prometheus.Register(job.metric.message)
 
 	err := job.createBucket()
 	if err != nil {
@@ -277,6 +288,7 @@ func (job *Job[V]) remove() {
 			logPrefixErr, err,
 		)
 	}
+	prometheus.Unregister(job.metric.message)
 }
 
 func (job *Job[V]) fetchWaitingJob() {
@@ -339,6 +351,7 @@ func (job *Job[V]) dispatchJob() error {
 		}
 
 		job.pool.Publish(eventpool.SendJson(messages))
+		go job.metric.message.Inc()
 	}
 
 	return nil
