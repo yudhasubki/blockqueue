@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/lesismal/nbio/nbhttp"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
@@ -67,6 +68,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 		Stream: stream,
 		Db:     db,
 	}).Router())
+	mux.Mount("/prometheus/metrics", promhttp.Handler())
 
 	engine := nbhttp.NewEngine(nbhttp.Config{
 		Network: "tcp",

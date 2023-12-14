@@ -5,19 +5,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
 type db struct {
-	mtx *cas.SpinLock
 	*sqlite.SQLite
 }
 
 func NewDb(sqlite *sqlite.SQLite) *db {
 	return &db{
-		mtx:    cas.New(),
 		SQLite: sqlite,
 	}
 }

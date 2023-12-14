@@ -9,9 +9,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	bqio "github.com/yudhasubki/blockqueue/pkg/io"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
 	"github.com/yudhasubki/eventpool"
 )
 
@@ -26,6 +28,10 @@ type BlockQueue[V chan bqio.ResponseMessages] struct {
 	kv        *kv
 	db        *db
 	pool      *eventpool.Eventpool
+}
+
+func init() {
+	prometheus.Register(metric.MessagePublished)
 }
 
 func New[V chan bqio.ResponseMessages](db *db, bucket *kv) *BlockQueue[V] {
@@ -207,8 +213,9 @@ func (q *BlockQueue[V]) storeJob(name string, message io.Reader) error {
 		return err
 	}
 
-	return q.db.tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
+	go metric.MessagePublished.Inc()
 
+	return q.db.tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
 		return q.db.createMessages(ctx, request)
 	})
 }
