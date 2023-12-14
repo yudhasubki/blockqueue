@@ -290,6 +290,42 @@ func TestBlockQueueCreateSubscriber(t *testing.T) {
 		})
 	})
 
+	t.Run("success create subscriber, publish, and read message", func(t *testing.T) {
+		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
+			var (
+				serverCtx = context.Background()
+				request   = bqio.Topic{
+					Name: getRandomChar(1),
+					Subscribers: bqio.Subscribers{
+						{
+							Name: getRandomChar(2),
+						},
+					},
+				}
+				topic       = request.Topic()
+				subscribers = request.Subscriber(topic.Id)
+			)
+			bq.Run(serverCtx)
+
+			requestSubscriber := bqio.Subscribers{
+				{
+					Name: getRandomChar(3),
+				},
+			}
+
+			testAddJob(t, serverCtx, bq, topic, subscribers, nil)
+			testAddSubscriber(t, serverCtx, bq, topic, requestSubscriber.Subscriber(topic.Id), nil)
+			testPublish(t, serverCtx, bq, topic, bqio.Publish{
+				Message: "test 2",
+			}, nil)
+			go testReadSubscriberMessage(t, serverCtx, bq, topic, getRandomChar(3), bqio.ResponseMessages{{
+				Message: "test 2",
+			}}, nil)
+
+			time.Sleep(3 * time.Second)
+		})
+	})
+
 	t.Run("failed create subscriber job not found", func(t *testing.T) {
 		runBlockQueueTest(t, func(bq *BlockQueue[chan bqio.ResponseMessages]) {
 			var (
