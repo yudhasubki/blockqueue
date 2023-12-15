@@ -67,8 +67,8 @@ type listenerOption struct {
 }
 
 type listenerMetric struct {
-	totalEnqueue         prometheus.Counter
 	totalConsumedMessage prometheus.Counter
+	totalEnqueue         prometheus.Gauge
 }
 
 func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber, bucket *kv) (*Listener[V], error) {
@@ -100,7 +100,7 @@ func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, job
 		onRemove:   &atomic.Bool{},
 		response:   make(chan chan eventListener),
 		metric: &listenerMetric{
-			totalEnqueue:         metric.TotalRequestQueueSubscriber(jobId, subscriber.Name),
+			totalEnqueue:         metric.TotalFlightRequestQueueSubscriber(jobId, subscriber.Name),
 			totalConsumedMessage: metric.TotalConsumedMessage(jobId, subscriber.Name),
 		},
 	}
@@ -293,6 +293,7 @@ func (listener *Listener[V]) dequeue(id string) {
 		}
 	}
 
+	go listener.metric.totalEnqueue.Dec()
 	listener.PriorityQueue.Cond.Broadcast()
 }
 
@@ -386,6 +387,8 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 	response <- eventListener{
 		Kind: deliveryKindEventListener,
 	}
+
+	go listener.metric.totalEnqueue.Dec()
 	go listener.metric.totalConsumedMessage.Add(float64(len(messages)))
 }
 

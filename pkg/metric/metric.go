@@ -19,10 +19,10 @@ var (
 		})
 	}
 
-	TotalRequestQueueSubscriber = func(topicName, subscriberName string) prometheus.Counter {
-		return prometheus.NewCounter(prometheus.CounterOpts{
-			Name: fmt.Sprintf("total_request_queue_topic_%s_subscriber_%s", topicName, subscriberName),
-			Help: fmt.Sprintf("The current total request queue on topic %s subscriber %s", topicName, subscriberName),
+	TotalFlightRequestQueueSubscriber = func(topicName, subscriberName string) prometheus.Gauge {
+		return prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: fmt.Sprintf("total_flight_request_queue_topic_%s_subscriber_%s", topicName, subscriberName),
+			Help: fmt.Sprintf("The current total flight request queue on topic %s subscriber %s", topicName, subscriberName),
 		})
 	}
 
