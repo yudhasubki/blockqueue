@@ -37,6 +37,7 @@ func New(dbName string, opts ...opt) (*Etcd, error) {
 		nutsdb.WithDir(dbName),
 		nutsdb.WithEntryIdxMode(nutsdb.HintKeyAndRAMIdxMode),
 		nutsdb.WithSyncEnable(opt.sync),
+		nutsdb.WithHintKeyAndRAMIdxCacheSize(0),
 	)
 	if err != nil {
 		return &Etcd{}, err
