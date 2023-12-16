@@ -9,3 +9,4 @@ sqlite:
   busy_timeout: 5000
 etcd:
   path: "etcdb"
+  sync: false

@@ -47,7 +47,10 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	}
 	db := blockqueue.NewDb(sqlite)
 
-	etcd, err := etcd.New(cfg.Etcd.Path)
+	etcd, err := etcd.New(
+		cfg.Etcd.Path,
+		etcd.WithSync(cfg.Etcd.Sync),
+	)
 	if err != nil {
 		slog.Error("failed to open etcd database", "error", err)
 		return err

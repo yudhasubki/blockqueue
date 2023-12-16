@@ -143,6 +143,7 @@ type SQLiteConfig struct {
 
 type EtcdConfig struct {
 	Path string `yaml:"path"`
+	Sync bool   `yaml:"sync"`
 }
 
 type JobConfig struct {
