@@ -67,8 +67,8 @@ type listenerOption struct {
 }
 
 type listenerMetric struct {
-	totalConsumedMessage prometheus.Counter
-	totalEnqueue         prometheus.Gauge
+	totalConsumedMessage *prometheus.CounterVec
+	totalEnqueue         *prometheus.GaugeVec
 }
 
 func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, jobId string, subscriber core.Subscriber, bucket *kv) (*Listener[V], error) {
@@ -274,7 +274,7 @@ func (listener *Listener[V]) enqueue(messages chan blockio.ResponseMessages) str
 		Id:    id,
 		Value: messages,
 	})
-	go listener.metric.totalEnqueue.Inc()
+	go listener.metric.totalEnqueue.WithLabelValues(listener.JobId, listener.Id).Inc()
 
 	listener.PriorityQueue.Cond.Broadcast()
 
@@ -293,7 +293,7 @@ func (listener *Listener[V]) dequeue(id string) {
 		}
 	}
 
-	go listener.metric.totalEnqueue.Dec()
+	go listener.metric.totalEnqueue.WithLabelValues(listener.JobId, listener.Id).Dec()
 	listener.PriorityQueue.Cond.Broadcast()
 }
 
@@ -388,8 +388,8 @@ func (listener *Listener[V]) notify(response chan eventListener) {
 		Kind: deliveryKindEventListener,
 	}
 
-	go listener.metric.totalEnqueue.Dec()
-	go listener.metric.totalConsumedMessage.Add(float64(len(messages)))
+	go listener.metric.totalEnqueue.WithLabelValues(listener.JobId, listener.Id).Dec()
+	go listener.metric.totalConsumedMessage.WithLabelValues(listener.JobId, listener.Id).Add(float64(len(messages)))
 }
 
 func (listener *Listener[V]) watcher() {

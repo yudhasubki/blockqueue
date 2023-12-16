@@ -87,8 +87,9 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	<-shutdown
 
 	cancel()
-	stream.Close()
+
 	engine.Stop()
+	stream.Close()
 	sqlite.Close()
 	etcd.Close()
 

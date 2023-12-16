@@ -37,7 +37,7 @@ type Job[V chan io.ResponseMessages] struct {
 }
 
 type jobMetric struct {
-	message prometheus.Counter
+	message *prometheus.CounterVec
 }
 
 func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv) (*Job[V], error) {
@@ -351,7 +351,7 @@ func (job *Job[V]) dispatchJob() error {
 		}
 
 		job.pool.Publish(eventpool.SendJson(messages))
-		go job.metric.message.Inc()
+		go job.metric.message.WithLabelValues(job.Name).Inc()
 	}
 
 	return nil
