@@ -43,6 +43,8 @@ github.com/nutsdb/nutsdb v1.0.2-0.20231210073356-fec3b20ddfa0 h1:7JLN1uW/tG5WMKq
 github.com/nutsdb/nutsdb v1.0.2-0.20231210073356-fec3b20ddfa0/go.mod h1:jIbbpBXajzTMZ0o33Yn5zoYIo3v0Dz4WstkVce+sYuQ=
 github.com/nutsdb/nutsdb v1.0.2-0.20231211145816-3468fe949461 h1:wb5O82PuENmF1H0+Mv3IUYY66YS5z0cPgCSX/PNbSqE=
 github.com/nutsdb/nutsdb v1.0.2-0.20231211145816-3468fe949461/go.mod h1:jIbbpBXajzTMZ0o33Yn5zoYIo3v0Dz4WstkVce+sYuQ=
+github.com/nutsdb/nutsdb v1.0.3-0.20231216092931-133fd88373b5 h1:eSMyRgjdRSGrnH0jzuRIdusDFGRRBXOOrUSIDqoAiBk=
+github.com/nutsdb/nutsdb v1.0.3-0.20231216092931-133fd88373b5/go.mod h1:jIbbpBXajzTMZ0o33Yn5zoYIo3v0Dz4WstkVce+sYuQ=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=
 github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

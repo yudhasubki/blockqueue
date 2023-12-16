@@ -9,7 +9,7 @@ require (
 	github.com/jmoiron/sqlx v1.3.5
 	github.com/lesismal/nbio v1.3.20
 	github.com/mattn/go-sqlite3 v1.14.18
-	github.com/nutsdb/nutsdb v1.0.2-0.20231211145816-3468fe949461
+	github.com/nutsdb/nutsdb v1.0.3-0.20231216092931-133fd88373b5
 	github.com/yudhasubki/eventpool v0.1.5
 	gopkg.in/guregu/null.v4 v4.0.0
 	gopkg.in/yaml.v3 v3.0.1

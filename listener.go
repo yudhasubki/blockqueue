@@ -471,36 +471,28 @@ func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
 		return err
 	}
 
-	err = backoff.Retry(func() error {
-		return listener.kv.updateBucketTx(func(tx *nutsdb.Tx) error {
-			for idx, message := range messages {
-				var (
-					id = fmt.Sprintf("%d_%d", prefix, idx)
-				)
-
-				b, err := json.Marshal(bucket.MessageVisibility{
-					Message: bucket.Message{
-						Id:      id,
-						Message: message.Message,
-					},
-					RetryPolicy: bucket.MessageVisibilityRetryPolicy{
-						MaxAttempts: 0,
-						NextIter:    time.Now().Add(listener.option.VisibilityDuration),
-					},
-				})
-				if err != nil {
-					return err
-				}
-
-				err = tx.RPush(listener.JobId, listener.messageBucket(), b)
-				if err != nil {
-					return err
-				}
-			}
-
-			return nil
+	messageBytes := make([][]byte, 0, len(messages))
+	for idx, message := range messages {
+		b, err := json.Marshal(bucket.MessageVisibility{
+			Message: bucket.Message{
+				Id:      fmt.Sprintf("%d_%d", prefix, idx),
+				Message: message.Message,
+			},
+			RetryPolicy: bucket.MessageVisibilityRetryPolicy{
+				MaxAttempts: 0,
+				NextIter:    time.Now().Add(listener.option.VisibilityDuration),
+			},
 		})
-	}, backoff.NewExponentialBackOff())
+		if err != nil {
+			return err
+		}
+
+		messageBytes = append(messageBytes, b)
+	}
+
+	err = listener.kv.updateBucketTx(func(tx *nutsdb.Tx) error {
+		return tx.RPush(listener.JobId, listener.messageBucket(), messageBytes...)
+	})
 	if err != nil {
 		slog.Error(
 			"error insert bucket",
