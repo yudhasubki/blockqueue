@@ -118,7 +118,8 @@ curl --location 'localhost:8080/topics/{your_topic}/subscribers'
 - [ ] Protocol
     - [x] HTTP
     - [ ] TCP
-- [ ] Metrics
+- [x] Metrics
+- [ ] WAL
 - [ ] SDK
     - [ ] Go
     - [ ] PHP
