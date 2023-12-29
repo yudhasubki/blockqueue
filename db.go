@@ -13,7 +13,7 @@ type db struct {
 	*sqlite.SQLite
 }
 
-func NewDb(sqlite *sqlite.SQLite) *db {
+func newDb(sqlite *sqlite.SQLite) *db {
 	return &db{
 		SQLite: sqlite,
 	}

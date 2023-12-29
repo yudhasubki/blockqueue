@@ -15,7 +15,6 @@ import (
 
 type Http struct {
 	Stream *BlockQueue[chan io.ResponseMessages]
-	Db     *db
 }
 
 type ctxKeyTopicName string
@@ -59,7 +58,7 @@ func (h *Http) createTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	topics, err := h.Db.getTopics(r.Context(), core.FilterTopic{
+	topics, err := h.Stream.getTopics(r.Context(), core.FilterTopic{
 		Name: []string{request.Name},
 	})
 	if err != nil {
@@ -273,7 +272,7 @@ func (h *Http) topicExist(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topicName := chi.URLParam(r, "topicName")
 
-		topics, err := h.Db.getTopics(r.Context(), core.FilterTopic{
+		topics, err := h.Stream.getTopics(r.Context(), core.FilterTopic{
 			Name: []string{topicName},
 		})
 		if err != nil {

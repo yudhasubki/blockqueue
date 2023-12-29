@@ -12,8 +12,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
+	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	bqio "github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
+	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 	"github.com/yudhasubki/eventpool"
 )
 
@@ -34,12 +36,12 @@ func init() {
 	prometheus.Register(metric.MessagePublished)
 }
 
-func New[V chan bqio.ResponseMessages](db *db, bucket *kv) *BlockQueue[V] {
+func New[V chan bqio.ResponseMessages](db *sqlite.SQLite, kv *etcd.Etcd) *BlockQueue[V] {
 	blockqueue := &BlockQueue[V]{
-		db:   db,
+		db:   newDb(db),
 		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
-		kv:   bucket,
+		kv:   newKv(kv),
 	}
 	pool := eventpool.New()
 	pool.Submit(eventpool.EventpoolListener{
@@ -222,4 +224,8 @@ func (q *BlockQueue[V]) storeJob(name string, message io.Reader) error {
 
 func (q *BlockQueue[V]) Close() {
 	q.pool.Close()
+}
+
+func (q *BlockQueue[V]) getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
+	return q.db.getTopics(ctx, filter)
 }

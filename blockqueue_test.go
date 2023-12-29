@@ -35,15 +35,13 @@ func runBlockQueueTest(t *testing.T, test func(bq *BlockQueue[chan bqio.Response
 
 	require.NoError(t, err)
 
-	db := NewDb(sqlite)
-	runMigrate(t, db.SQLite)
+	runMigrate(t, sqlite)
 
 	bucket, err := etcd.New(persistenceBucketPath)
 	defer os.RemoveAll(persistenceBucketPath)
 	require.NoError(t, err)
 
-	kv := NewKV(bucket)
-	bq := New(db, kv)
+	bq := New(sqlite, bucket)
 
 	test(bq)
 

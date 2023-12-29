@@ -10,3 +10,5 @@ sqlite:
 etcd:
   path: "etcdb"
   sync: false
+metric:
+  enable: false

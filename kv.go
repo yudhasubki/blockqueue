@@ -12,7 +12,7 @@ type kv struct {
 	db *etcd.Etcd
 }
 
-func NewKV(etcd *etcd.Etcd) *kv {
+func newKv(etcd *etcd.Etcd) *kv {
 	return &kv{
 		db: etcd,
 	}

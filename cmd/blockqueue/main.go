@@ -72,6 +72,7 @@ type Config struct {
 	Logging LoggingConfig `yaml:"logging"`
 	SQLite  SQLiteConfig  `yaml:"sqlite"`
 	Job     JobConfig     `yaml:"job"`
+	Metric  MetricConfig  `yaml:"metric"`
 }
 
 func ReadConfigFile(filename string) (_ Config, err error) {
@@ -148,4 +149,8 @@ type EtcdConfig struct {
 
 type JobConfig struct {
 	Interval time.Duration `yaml:"interval"`
+}
+
+type MetricConfig struct {
+	Enable bool `yaml:"enable"`
 }
