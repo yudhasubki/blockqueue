@@ -18,6 +18,10 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/Welcome-to-BlockQueue
 
 ### Running on Go
+```bash
+go get -u github.com/yudhasubki/blockqueue
+```
+
 ```go
     // github.com/yudhasubki/blockqueue/pkg/sqlite or you can define your own
     sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
