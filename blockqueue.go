@@ -76,6 +76,42 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 	return nil
 }
 
+func (q *BlockQueue[V]) GetTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
+	return q.getTopics(ctx, filter)
+}
+
+func (q *BlockQueue[V]) AddJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
+	return q.addJob(ctx, topic, subscribers)
+}
+
+func (q *BlockQueue[V]) DeleteJob(topic core.Topic) error {
+	return q.deleteJob(topic)
+}
+
+func (q *BlockQueue[V]) Ack(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+	return q.ackMessage(ctx, topic, subscriberName, messageId)
+}
+
+func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request bqio.Publish) error {
+	return q.publish(ctx, topic, request)
+}
+
+func (q *BlockQueue[V]) GetSubscribersStatus(ctx context.Context, topic core.Topic) (bqio.SubscriberMessages, error) {
+	return q.getSubscribersStatus(ctx, topic)
+}
+
+func (q *BlockQueue[V]) AddSubscriber(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
+	return q.addSubscriber(ctx, topic, subscribers)
+}
+
+func (q *BlockQueue[V]) DeleteSubscriber(ctx context.Context, topic core.Topic, subcriber string) error {
+	return q.deleteSubscriber(ctx, topic, subcriber)
+}
+
+func (q *BlockQueue[V]) Read(ctx context.Context, topic core.Topic, subscriber string) (bqio.ResponseMessages, error) {
+	return q.readSubscriberMessage(ctx, topic, subscriber)
+}
+
 func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscribers core.Subscribers) error {
 	err := q.db.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		err := q.db.createTxTopic(ctx, tx, topic)

@@ -14,8 +14,34 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 - 📶 Less Network Latency: Prioritizing efficiency, Block Queue minimizes network latency to persistence to enhance overall performance.
 
 ## How to Install
-
+### Binary
 You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/Welcome-to-BlockQueue
+
+### Running on Go
+```go
+    // github.com/yudhasubki/blockqueue/pkg/sqlite or you can define your own
+    sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
+		BusyTimeout: cfg.SQLite.BusyTimeout,
+	})
+    if err != nil {
+        return err
+    }
+
+    // github.com/yudhasubki/blockqueue/pkg/etcd or you can define your own
+    etcd, err := etcd.New(
+		cfg.Etcd.Path,
+		etcd.WithSync(cfg.Etcd.Sync),
+	)
+    if err != nil {
+        return err
+    }
+
+    stream := blockqueue.New(sqlite, etcd)
+    err = stream.Run(ctx)
+    if err != nil {
+        return err
+    }
+```
 
 ## Architecture
 
