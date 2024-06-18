@@ -1,12 +1,15 @@
 http:
   port: 8080
   shutdown: "30s"
+  driver: "sqlite"
 logging:
   level: "debug"
   type:  "json"
 sqlite:
   db_name: "blockqueue"
   busy_timeout: 5000
+turso:
+  url: "libsql://tursodatabase-username.turso.io"
 etcd:
   path: "etcdb"
   sync: false

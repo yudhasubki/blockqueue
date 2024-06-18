@@ -2,7 +2,7 @@
 
 **Block Queue** is a lightweight and cost-effective queue messaging system with pub/sub mechanism for a cheap, robust, reliable, and durable messaging system.
 
-Crafted atop the robust foundations of [SQLite3](https://www.sqlite.org/index.html) and [NutsDB](https://github.com/nutsdb/nutsdb), Block Queue prioritizes efficiency by minimizing network latency and ensuring cost-effectiveness.
+Built on the sturdy foundations of [SQLite3](https://www.sqlite.org/index.html), [NutsDB](https://github.com/nutsdb/nutsdb), and now supporting the [Turso Database](https://turso.tech/), Block Queue prioritizes efficiency by minimizing network latency and ensuring cost-effectiveness.
 
 ## Why BlockQueue
 
@@ -17,16 +17,44 @@ While Kafka, Redis, or SQS is an excellent product, it is quite complex and requ
 ### Binary
 You can read it on our wiki page at: https://github.com/yudhasubki/blockqueue/wiki/Welcome-to-BlockQueue
 
+### Driver
+BlockQueue supports drivers using SQLite or Turso. You can define the driver in the config.yaml under the http.driver setting (either **sqlite** or **turso**).
+
 ### Running on Go
 ```bash
 go get -u github.com/yudhasubki/blockqueue
 ```
 
+Using SQLite:
 ```go
     // github.com/yudhasubki/blockqueue/pkg/sqlite or you can define your own
     sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
 		BusyTimeout: cfg.SQLite.BusyTimeout,
 	})
+    if err != nil {
+        return err
+    }
+
+    // github.com/yudhasubki/blockqueue/pkg/etcd or you can define your own
+    etcd, err := etcd.New(
+		cfg.Etcd.Path,
+		etcd.WithSync(cfg.Etcd.Sync),
+	)
+    if err != nil {
+        return err
+    }
+
+    stream := blockqueue.New(sqlite, etcd)
+    err = stream.Run(ctx)
+    if err != nil {
+        return err
+    }
+```
+
+Using Turso:
+```go
+    // github.com/yudhasubki/blockqueue/pkg/sqlite or you can define your own
+    sqlite, err := turso.New("libsql://dbname-username.turso.io?authToken=[TOKEN]")
     if err != nil {
         return err
     }

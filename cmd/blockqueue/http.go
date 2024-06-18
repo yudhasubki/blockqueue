@@ -15,6 +15,7 @@ import (
 	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
+	"github.com/yudhasubki/blockqueue/pkg/turso"
 )
 
 type Http struct{}
@@ -38,12 +39,24 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
-		BusyTimeout: cfg.SQLite.BusyTimeout,
-	})
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
-		return err
+	var driver blockqueue.Driver
+	switch cfg.Http.Driver {
+	case "turso":
+		turso, err := turso.New(cfg.Turso.URL)
+		if err != nil {
+			return err
+		}
+		driver = turso
+	case "sqlite", "":
+		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
+			BusyTimeout: cfg.SQLite.BusyTimeout,
+		})
+		if err != nil {
+			slog.Error("failed to open database", "error", err)
+			return err
+		}
+
+		driver = sqlite
 	}
 
 	etcd, err := etcd.New(
@@ -57,7 +70,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	stream := blockqueue.New(sqlite, etcd)
+	stream := blockqueue.New(driver, etcd)
 
 	err = stream.Run(ctx)
 	if err != nil {
@@ -94,7 +107,7 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 
 	engine.Stop()
 	stream.Close()
-	sqlite.Close()
+	driver.Close()
 	etcd.Close()
 
 	// handling graceful shutdown

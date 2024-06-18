@@ -71,6 +71,7 @@ type Config struct {
 	Http    HttpConfig    `yaml:"http"`
 	Logging LoggingConfig `yaml:"logging"`
 	SQLite  SQLiteConfig  `yaml:"sqlite"`
+	Turso   TursoConfig   `yaml:"turso"`
 	Job     JobConfig     `yaml:"job"`
 	Metric  MetricConfig  `yaml:"metric"`
 }
@@ -100,6 +101,10 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		Level: slog.LevelInfo,
 	}
 
+	if config.Http.Driver == "" {
+		config.Http.Driver = "sqlite"
+	}
+
 	switch strings.ToUpper(config.Logging.Level) {
 	case "DEBUG":
 		logOpts.Level = slog.LevelDebug
@@ -125,6 +130,7 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 type HttpConfig struct {
 	Port     string        `yaml:"port"`
 	Shutdown time.Duration `yaml:"shutdown"`
+	Driver   string        `yaml:"driver"`
 }
 
 func register(fs *flag.FlagSet) *string {
@@ -140,6 +146,10 @@ type LoggingConfig struct {
 type SQLiteConfig struct {
 	DatabaseName string `yaml:"db_name"`
 	BusyTimeout  int    `yaml:"busy_timeout"`
+}
+
+type TursoConfig struct {
+	URL string `yaml:"url"`
 }
 
 type EtcdConfig struct {

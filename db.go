@@ -6,16 +6,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/pkg/core"
-	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
-type db struct {
-	*sqlite.SQLite
+type Driver interface {
+	Conn() *sqlx.DB
+	Close() error
 }
 
-func newDb(sqlite *sqlite.SQLite) *db {
+type db struct {
+	Database Driver
+}
+
+func newDb(driver Driver) *db {
 	return &db{
-		SQLite: sqlite,
+		Database: driver,
 	}
 }
 
@@ -39,9 +43,9 @@ func (d *db) getTopics(ctx context.Context, filter core.FilterTopic) (core.Topic
 	if err != nil {
 		return topics, err
 	}
-	query = d.Database.Rebind(query)
+	query = d.Database.Conn().Rebind(query)
 
-	err = d.Database.Select(&topics, query, args...)
+	err = d.Database.Conn().SelectContext(ctx, &topics, query, args...)
 	if err != nil {
 		return topics, err
 	}
@@ -69,9 +73,9 @@ func (d *db) getSubscribers(ctx context.Context, filter core.FilterSubscriber) (
 	if err != nil {
 		return subscribers, err
 	}
-	query = d.Database.Rebind(query)
+	query = d.Database.Conn().Rebind(query)
 
-	err = d.Database.Select(&subscribers, query, args...)
+	err = d.Database.Conn().SelectContext(ctx, &subscribers, query, args...)
 	if err != nil {
 		return subscribers, err
 	}
@@ -134,7 +138,7 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers c
 }
 
 func (d *db) createMessages(ctx context.Context, message core.Message) error {
-	stmt, err := d.Database.PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
+	stmt, err := d.Database.Conn().PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
 	if err != nil {
 		return err
 	}
@@ -158,7 +162,7 @@ func (d *db) updateStatusMessage(ctx context.Context, status core.MessageStatus,
 		return err
 	}
 
-	_, err = d.Database.ExecContext(ctx, d.Database.Rebind(query), args...)
+	_, err = d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), args...)
 	if err != nil {
 		return err
 	}
@@ -187,9 +191,9 @@ func (d *db) getMessages(ctx context.Context, filter core.FilterMessage) (core.M
 	if err != nil {
 		return messages, err
 	}
-	query = d.Database.Rebind(query)
+	query = d.Database.Conn().Rebind(query)
 
-	err = d.Database.Select(&messages, query, args...)
+	err = d.Database.Conn().SelectContext(ctx, &messages, query, args...)
 	if err != nil {
 		return messages, err
 	}
@@ -198,7 +202,7 @@ func (d *db) getMessages(ctx context.Context, filter core.FilterMessage) (core.M
 }
 
 func (d *db) tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) error) error {
-	tx, err := d.Database.Beginx()
+	tx, err := d.Database.Conn().Beginx()
 	if err != nil {
 		return err
 	}

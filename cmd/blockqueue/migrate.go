@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
+	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
+	"github.com/yudhasubki/blockqueue/pkg/turso"
 )
 
 type Migrate struct{}
@@ -34,12 +36,24 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
-		BusyTimeout: cfg.SQLite.BusyTimeout,
-	})
-	if err != nil {
-		slog.Error("failed to open database", "error", err)
-		return err
+	var driver blockqueue.Driver
+	switch cfg.Http.Driver {
+	case "turso":
+		turso, err := turso.New(cfg.Turso.URL)
+		if err != nil {
+			return err
+		}
+		driver = turso
+	case "sqlite", "":
+		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
+			BusyTimeout: cfg.SQLite.BusyTimeout,
+		})
+		if err != nil {
+			slog.Error("failed to open database", "error", err)
+			return err
+		}
+
+		driver = sqlite
 	}
 
 	_ = filepath.Walk("migration/", func(path string, info os.FileInfo, err error) error {
@@ -64,7 +78,7 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 			return err
 		}
 
-		_, err = sqlite.Database.Exec(buf.String())
+		_, err = driver.Conn().Exec(buf.String())
 		if err != nil {
 			slog.Error("failed migrate", "filename", path, "error", err)
 			return err

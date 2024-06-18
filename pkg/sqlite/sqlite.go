@@ -32,6 +32,10 @@ func New(dbName string, config Config) (*SQLite, error) {
 	}, nil
 }
 
+func (sqlite *SQLite) Conn() *sqlx.DB {
+	return sqlite.Database
+}
+
 func (sqlite *SQLite) Close() error {
 	return sqlite.Database.Close()
 }

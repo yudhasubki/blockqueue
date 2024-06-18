@@ -15,7 +15,6 @@ import (
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	bqio "github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
-	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 	"github.com/yudhasubki/eventpool"
 )
 
@@ -36,7 +35,7 @@ func init() {
 	prometheus.Register(metric.MessagePublished)
 }
 
-func New[V chan bqio.ResponseMessages](db *sqlite.SQLite, kv *etcd.Etcd) *BlockQueue[V] {
+func New[V chan bqio.ResponseMessages](db Driver, kv *etcd.Etcd) *BlockQueue[V] {
 	blockqueue := &BlockQueue[V]{
 		db:   newDb(db),
 		mtx:  cas.New(),
