@@ -172,6 +172,57 @@ If you want to check how many unpublished or unacked message, you can immediatel
 curl --location 'localhost:8080/topics/{your_topic}/subscribers'
 ```
 
+## Benchmark
+
+Macbook Pro M1, Apple Chip Memory 8GiB, here is some benchmarks:
+
+### Publish 10 Virtual Users
+```
+k6 run --vus=10 --duration=30s --summary-trend-stats="med,p(95),p(99.9)" publish.js
+
+data_received..............: 187 MB  6.2 MB/s
+data_sent..................: 217 MB  7.2 MB/s
+http_req_blocked...........: med=0s    p(95)=1µs      p(99.9)=68µs
+http_req_connecting........: med=0s    p(95)=0s       p(99.9)=0s
+http_req_duration..........: med=135µs p(95)=437µs    p(99.9)=7.63ms
+http_req_failed............: 100.00% ✓ 1142146      ✗ 0
+http_req_receiving.........: med=4µs   p(95)=21µs     p(99.9)=1.62ms
+http_req_sending...........: med=2µs   p(95)=10µs     p(99.9)=344µs
+http_req_tls_handshaking...: med=0s    p(95)=0s       p(99.9)=0s
+http_req_waiting...........: med=124µs p(95)=407µs    p(99.9)=5.48ms
+http_reqs..................: 1142146 38067.366226/s
+iteration_duration.........: med=162µs p(95)=507.66µs p(99.9)=11.55ms
+iterations.................: 1142146 38067.366226/s
+vus........................: 10      min=10         max=10
+vus_max....................: 10      min=10         max=10
+
+38K message per seconds.
+```
+
+### Publish 100 Virtual Users
+```
+k6 run --vus=100 --duration=30s --summary-trend-stats="med,p(95),p(99.9)" publish.js
+
+100 Virtual Users
+
+data_received..............: 195 MB  6.5 MB/s
+data_sent..................: 226 MB  7.5 MB/s
+http_req_blocked...........: med=0s     p(95)=2µs    p(99.9)=111µs
+http_req_connecting........: med=0s     p(95)=0s     p(99.9)=0s
+http_req_duration..........: med=1.17ms p(95)=7.38ms p(99.9)=59.32ms
+http_req_failed............: 100.00% ✓ 1186606      ✗ 0
+http_req_receiving.........: med=5µs    p(95)=32µs   p(99.9)=10.6ms
+http_req_sending...........: med=2µs    p(95)=14µs   p(99.9)=905.18µs
+http_req_tls_handshaking...: med=0s     p(95)=0s     p(99.9)=0s
+http_req_waiting...........: med=1.15ms p(95)=7.18ms p(99.9)=55.42ms
+http_reqs..................: 1186606 39541.018601/s
+iteration_duration.........: med=1.27ms p(95)=8.58ms p(99.9)=66.45ms
+iterations.................: 1186606 39541.018601/s
+vus........................: 100     min=100        max=100
+vus_max....................: 100     min=100        max=100
+
+39,5k message per seconds.
+```
 ## Roadmap
 - [ ] Protocol
     - [x] HTTP
@@ -181,7 +232,7 @@ curl --location 'localhost:8080/topics/{your_topic}/subscribers'
 - [ ] SDK
     - [ ] Go
     - [ ] PHP
-- [ ] Perfomance Test
+- [x] Perfomance Test
 
 ## Acknowledgment
 This package is inspired by the following:
