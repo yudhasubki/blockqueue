@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	blockqueue "github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/pkg/postgre"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 	"github.com/yudhasubki/blockqueue/pkg/turso"
 )
@@ -36,7 +37,10 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	var driver blockqueue.Driver
+	var (
+		driver        blockqueue.Driver
+		migrationPath = "migration/sqlite"
+	)
 	switch cfg.Http.Driver {
 	case "turso":
 		turso, err := turso.New(cfg.Turso.URL)
@@ -44,6 +48,23 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 			return err
 		}
 		driver = turso
+	case "pgsql":
+		pg, err := postgre.New(postgre.Config{
+			Host:         cfg.PgSQL.Host,
+			Username:     cfg.PgSQL.Username,
+			Password:     cfg.PgSQL.Password,
+			Name:         cfg.PgSQL.Name,
+			Port:         cfg.PgSQL.Port,
+			Timezone:     cfg.PgSQL.Timezone,
+			MaxOpenConns: cfg.PgSQL.MaxOpenConns,
+			MaxIdleConns: cfg.PgSQL.MaxIdleConns,
+		})
+		if err != nil {
+			slog.Error("failed to open database", "error", err)
+			return err
+		}
+		driver = pg
+		migrationPath = "migration/pgsql"
 	case "sqlite", "":
 		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
 			BusyTimeout: cfg.SQLite.BusyTimeout,
@@ -56,7 +77,7 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 		driver = sqlite
 	}
 
-	_ = filepath.Walk("migration/", func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(migrationPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}

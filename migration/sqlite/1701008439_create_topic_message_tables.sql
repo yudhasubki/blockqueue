@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS topic_messages (
     `id` VARCHAR(36) PRIMARY KEY,
     `topic_id` VARCHAR(36) NOT NULL,
     `message` TEXT NOT NULL,
-    `status` BOOLEAN DEFAULT 0,
+    `status` VARCHAR(15) DEFAULT 'waiting',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (`topic_id`) 
         REFERENCES `topics` (`id`)

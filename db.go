@@ -84,7 +84,7 @@ func (d *db) getSubscribers(ctx context.Context, filter core.FilterSubscriber) (
 }
 
 func (d *db) createTxTopic(ctx context.Context, tx *sqlx.Tx, topic core.Topic) error {
-	stmt, err := tx.PrepareNamedContext(ctx, "INSERT INTO topics (`id`, `name`) VALUES (:id, :name)")
+	stmt, err := tx.PrepareNamedContext(ctx, "INSERT INTO topics (id, name) VALUES (:id, :name)")
 	if err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (d *db) deleteTxSubscribers(ctx context.Context, tx *sqlx.Tx, topic core.Su
 }
 
 func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers core.Subscribers) error {
-	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (`id`, `topic_id`, `name`, `option`) VALUES (:id, :topic_id, :name, :option)", subscribers)
+	_, err := tx.NamedExecContext(ctx, "INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (:id, :topic_id, :name, :option)", subscribers)
 	if err != nil {
 		return err
 	}
@@ -138,7 +138,7 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers c
 }
 
 func (d *db) createMessages(ctx context.Context, message core.Message) error {
-	stmt, err := d.Database.Conn().PrepareNamedContext(ctx, "INSERT INTO topic_messages (`id`, `topic_id`, `message`, `status`) VALUES (:id, :topic_id, :message, :status)")
+	stmt, err := d.Database.Conn().PrepareNamedContext(ctx, "INSERT INTO topic_messages (id, topic_id, message, status) VALUES (:id, :topic_id, :message, :status)")
 	if err != nil {
 		return err
 	}

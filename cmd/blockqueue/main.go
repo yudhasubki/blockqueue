@@ -72,6 +72,7 @@ type Config struct {
 	Logging LoggingConfig `yaml:"logging"`
 	SQLite  SQLiteConfig  `yaml:"sqlite"`
 	Turso   TursoConfig   `yaml:"turso"`
+	PgSQL   PostgreConfig `yaml:"pgsql"`
 	Job     JobConfig     `yaml:"job"`
 	Metric  MetricConfig  `yaml:"metric"`
 }
@@ -152,6 +153,16 @@ type TursoConfig struct {
 	URL string `yaml:"url"`
 }
 
+type PostgreConfig struct {
+	Host         string `yaml:"host"`
+	Username     string `yaml:"username"`
+	Password     string `yaml:"password"`
+	Name         string `yaml:"name"`
+	Port         int    `yaml:"port"`
+	Timezone     string `yaml:"timezone"`
+	MaxOpenConns int    `yaml:"max_open_conns"`
+	MaxIdleConns int    `yaml:"max_idle_conns"`
+}
 type EtcdConfig struct {
 	Path string `yaml:"path"`
 	Sync bool   `yaml:"sync"`

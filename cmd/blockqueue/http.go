@@ -14,6 +14,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/pkg/etcd"
+	"github.com/yudhasubki/blockqueue/pkg/postgre"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 	"github.com/yudhasubki/blockqueue/pkg/turso"
 )
@@ -47,6 +48,22 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 			return err
 		}
 		driver = turso
+	case "pgsql":
+		pg, err := postgre.New(postgre.Config{
+			Host:         cfg.PgSQL.Host,
+			Username:     cfg.PgSQL.Username,
+			Password:     cfg.PgSQL.Password,
+			Name:         cfg.PgSQL.Name,
+			Port:         cfg.PgSQL.Port,
+			Timezone:     cfg.PgSQL.Timezone,
+			MaxOpenConns: cfg.PgSQL.MaxOpenConns,
+			MaxIdleConns: cfg.PgSQL.MaxIdleConns,
+		})
+		if err != nil {
+			slog.Error("failed to open database", "error", err)
+			return err
+		}
+		driver = pg
 	case "sqlite", "":
 		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
 			BusyTimeout: cfg.SQLite.BusyTimeout,

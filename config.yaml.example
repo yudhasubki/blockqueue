@@ -1,7 +1,7 @@
 http:
   port: 8080
   shutdown: "30s"
-  driver: "sqlite"
+  driver: "sqlite|turso|pgsql"
 logging:
   level: "debug"
   type:  "json"
@@ -10,6 +10,15 @@ sqlite:
   busy_timeout: 5000
 turso:
   url: "libsql://tursodatabase-username.turso.io"
+pgsql:
+  host: "localhost"
+  username: "postgres"
+  password: ""
+  name: "blockqueue"
+  port: 5432
+  timezone: "UTC"
+  max_open_conns: 10
+  max_idle_conns: 10
 etcd:
   path: "etcdb"
   sync: false
