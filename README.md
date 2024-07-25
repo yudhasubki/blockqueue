@@ -4,6 +4,7 @@
 
 Built on the sturdy foundations of [SQLite3](https://www.sqlite.org/index.html), [NutsDB](https://github.com/nutsdb/nutsdb), and now supporting the [Turso Database](https://turso.tech/), Block Queue prioritizes efficiency by minimizing network latency and ensuring cost-effectiveness.
 
+Block Queue now also supports PostgreSQL, expanding its versatility and compatibility.
 ## Why BlockQueue
 
 While Kafka, Redis, or SQS is an excellent product, it is quite complex and requires a lot of resources. My purpose is to build this BlockQueue for simplicity, low resources, and cheap.
