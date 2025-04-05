@@ -26,7 +26,10 @@ func main() {
 	}
 
 	ctx := context.Background()
-	stream := blockqueue.New(db, etcd, 8)
+	stream := blockqueue.New(db, etcd, blockqueue.BlockQueueOption{
+		ProducerPartitionNumber: 16,
+		ConsumerPartitionNumber: 16,
+	})
 
 	err = stream.Run(ctx)
 	if err != nil {
