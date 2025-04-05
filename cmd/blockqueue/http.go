@@ -87,7 +87,10 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 
-	stream := blockqueue.New(driver, etcd)
+	stream := blockqueue.New(driver, etcd, blockqueue.BlockQueueOption{
+		ProducerPartitionNumber: cfg.Job.ProducerPartition,
+		ConsumerPartitionNumber: cfg.Job.ConsumerPartition,
+	})
 
 	err = stream.Run(ctx)
 	if err != nil {
@@ -143,6 +146,8 @@ Usage:
 Arguments:
 	-config PATH
 	    Specifies the configuration file.
+	-partition PARTITION
+		Total Partition Producer and Consumer
 `[1:],
 	)
 }

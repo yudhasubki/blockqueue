@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -28,27 +27,33 @@ type BlockQueue[V chan bqio.ResponseMessages] struct {
 	jobs      map[string]*Job[V]
 	kv        *kv
 	db        *db
-	pool      *eventpool.Eventpool
+	pool      *eventpool.EventpoolPartition
+	Opt       BlockQueueOption
 }
 
 func init() {
 	prometheus.Register(metric.MessagePublished)
 }
 
-func New[V chan bqio.ResponseMessages](db Driver, kv *etcd.Etcd) *BlockQueue[V] {
+type BlockQueueOption struct {
+	ProducerPartitionNumber int
+	ConsumerPartitionNumber int
+}
+
+func New[V chan bqio.ResponseMessages](db Driver, kv *etcd.Etcd, opt BlockQueueOption) *BlockQueue[V] {
 	blockqueue := &BlockQueue[V]{
 		db:   newDb(db),
 		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
 		kv:   newKv(kv),
+		Opt:  opt,
 	}
-	pool := eventpool.New()
-	pool.Submit(eventpool.EventpoolListener{
+	pool := eventpool.NewPartition(opt.ProducerPartitionNumber)
+	pool.Submit(opt.ConsumerPartitionNumber, eventpool.EventpoolListener{
 		Name:       "store_job",
 		Subscriber: blockqueue.storeJob,
 		Opts: []eventpool.SubscriberConfigFunc{
 			eventpool.BufferSize(20000),
-			eventpool.MaxWorker(50),
 		},
 	})
 	pool.Run()
@@ -64,7 +69,7 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 	}
 
 	for _, topic := range topics {
-		job, err := newJob[V](ctx, topic, q.db, q.kv)
+		job, err := newJob[V](ctx, topic, q.db, q.kv, q.Opt)
 		if err != nil {
 			return err
 		}
@@ -137,7 +142,7 @@ func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscriber
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
-	job, err := newJob[V](q.serverCtx, topic, q.db, q.kv)
+	job, err := newJob[V](q.serverCtx, topic, q.db, q.kv, q.Opt)
 	if err != nil {
 		return err
 	}
@@ -176,7 +181,7 @@ func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request b
 		return ErrJobNotFound
 	}
 
-	q.pool.Publish(eventpool.SendJson(core.Message{
+	q.pool.Publish("*", uuid.NewString(), eventpool.SendJson(core.Message{
 		Id:      uuid.New(),
 		TopicId: topic.Id,
 		Message: request.Message,
@@ -243,18 +248,16 @@ func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 	return job, true
 }
 
-func (q *BlockQueue[V]) storeJob(name string, message io.Reader) error {
+func (q *BlockQueue[V]) storeJob(name string, message []byte) error {
 	var request core.Message
-	err := json.NewDecoder(message).Decode(&request)
+	err := json.Unmarshal(message, &request)
 	if err != nil {
 		return err
 	}
 
 	go metric.MessagePublished.Inc()
 
-	return q.db.tx(context.Background(), func(ctx context.Context, tx *sqlx.Tx) error {
-		return q.db.createMessages(ctx, request)
-	})
+	return q.db.createMessages(context.TODO(), request)
 }
 
 func (q *BlockQueue[V]) Close() {

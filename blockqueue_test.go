@@ -41,7 +41,10 @@ func runBlockQueueTest(t *testing.T, test func(bq *BlockQueue[chan bqio.Response
 	defer os.RemoveAll(persistenceBucketPath)
 	require.NoError(t, err)
 
-	bq := New(sqlite, bucket)
+	bq := New(sqlite, bucket, BlockQueueOption{
+		ProducerPartitionNumber: 16,
+		ConsumerPartitionNumber: 16,
+	})
 
 	test(bq)
 

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -455,13 +454,13 @@ func (listener *Listener[V]) watcher() {
 	}
 }
 
-func (listener *Listener[V]) jobCatcher(name string, message io.Reader) error {
+func (listener *Listener[V]) jobCatcher(name string, message []byte) error {
 	var (
 		messages core.Messages
 		prefix   = time.Now().UnixNano()
 	)
 
-	err := json.NewDecoder(message).Decode(&messages)
+	err := json.Unmarshal(message, &messages)
 	if err != nil {
 		slog.Error(
 			"error decode message",

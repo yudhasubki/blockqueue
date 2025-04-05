@@ -26,7 +26,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	stream := blockqueue.New(db, etcd)
+	stream := blockqueue.New(db, etcd, 8)
 
 	err = stream.Run(ctx)
 	if err != nil {

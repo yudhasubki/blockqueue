@@ -19,6 +19,9 @@ pgsql:
   timezone: "UTC"
   max_open_conns: 10
   max_idle_conns: 10
+job:
+  producer_partition: 16
+  consumer_partition: 16
 etcd:
   path: "etcdb"
   sync: false

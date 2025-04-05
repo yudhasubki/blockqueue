@@ -29,18 +29,19 @@ type Job[V chan io.ResponseMessages] struct {
 	kv         *kv
 	ctx        context.Context
 	cancelFunc context.CancelFunc
-	pool       *eventpool.Eventpool
+	pool       *eventpool.EventpoolPartition
 	mtx        *cas.SpinLock
 	listeners  map[uuid.UUID]*Listener[V]
 	message    chan bool
 	metric     *jobMetric
+	opt        BlockQueueOption
 }
 
 type jobMetric struct {
 	message *prometheus.CounterVec
 }
 
-func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv) (*Job[V], error) {
+func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv, opt BlockQueueOption) (*Job[V], error) {
 	ctx, cancel := context.WithCancel(serverCtx)
 	job := &Job[V]{
 		Id:         topic.Id,
@@ -51,7 +52,7 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		ctx:        ctx,
 		message:    make(chan bool, 20000),
 		mtx:        cas.New(),
-		pool:       eventpool.New(),
+		pool:       eventpool.NewPartition(opt.ProducerPartitionNumber),
 		metric: &jobMetric{
 			message: metric.MessagePublishedTopic(topic.Name),
 		},
@@ -92,7 +93,7 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		})
 	}
 
-	job.pool.Submit(eventpoolListeners...)
+	job.pool.Submit(opt.ConsumerPartitionNumber, eventpoolListeners...)
 	job.pool.Run()
 
 	go job.fetchWaitingJob()
@@ -149,7 +150,7 @@ func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
 		}
 	}
 
-	job.pool.SubmitOnFlight(eventpoolListeners...)
+	job.pool.SubmitOnFlight(10, eventpoolListeners...)
 
 	return nil
 }
@@ -350,7 +351,7 @@ func (job *Job[V]) dispatchJob() error {
 			return nil
 		}
 
-		job.pool.Publish(eventpool.SendJson(messages))
+		job.pool.Publish("*", job.Id.String(), eventpool.SendJson(messages))
 		go job.metric.message.WithLabelValues(job.Name).Inc()
 	}
 

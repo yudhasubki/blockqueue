@@ -169,7 +169,8 @@ type EtcdConfig struct {
 }
 
 type JobConfig struct {
-	Interval time.Duration `yaml:"interval"`
+	ProducerPartition int `yaml:"producer_partition"`
+	ConsumerPartition int `yaml:"consumer_partition"`
 }
 
 type MetricConfig struct {
