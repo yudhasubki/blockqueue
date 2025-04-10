@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -108,10 +109,18 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	}
 
 	engine := nbhttp.NewEngine(nbhttp.Config{
-		Network: "tcp",
-		Addrs:   []string{":" + cfg.Http.Port},
-		Handler: mux,
-		IOMod:   nbhttp.IOModNonBlocking,
+		Network:                 "tcp",
+		Addrs:                   []string{":" + cfg.Http.Port},
+		Handler:                 mux,
+		IOMod:                   nbhttp.IOModNonBlocking,
+		ReleaseWebsocketPayload: true,
+		MaxLoad:                 2000000,
+		MaxBlockingOnline:       300000,
+		KeepaliveTime:           time.Second * 300,
+		LockListener:            false,
+		ReadBufferSize:          32 * 1024,
+		MaxWriteBufferSize:      0,
+		NPoller:                 runtime.NumCPU() * 2,
 	})
 
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
