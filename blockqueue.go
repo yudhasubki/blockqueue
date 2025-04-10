@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -20,6 +22,8 @@ import (
 var (
 	ErrJobNotFound = errors.New("job not found")
 )
+
+var publishLoad int32 // Atomic counter to track publish concurrency
 
 type BlockQueue[V chan bqio.ResponseMessages] struct {
 	mtx       *cas.SpinLock
@@ -53,7 +57,7 @@ func New[V chan bqio.ResponseMessages](db Driver, kv *etcd.Etcd, opt BlockQueueO
 		Name:       "store_job",
 		Subscriber: blockqueue.storeJob,
 		Opts: []eventpool.SubscriberConfigFunc{
-			eventpool.BufferSize(20000),
+			eventpool.BufferSize(50000),
 		},
 	})
 	pool.Run()
@@ -181,12 +185,36 @@ func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request b
 		return ErrJobNotFound
 	}
 
-	q.pool.Publish("*", uuid.NewString(), eventpool.SendJson(core.Message{
-		Id:      uuid.New(),
+	// Pre-generate UUID to avoid overhead
+	messageID := uuid.New()
+
+	message := core.Message{
+		Id:      messageID,
 		TopicId: topic.Id,
 		Message: request.Message,
 		Status:  core.MessageStatusWaiting,
-	}))
+	}
+
+	// Fast path for small concurrent loads - direct publish
+	// This helps with low VU count scenarios by avoiding pool overhead
+	load := atomic.LoadInt32(&publishLoad)
+	if load < 20 { // Fast path for low concurrency
+		atomic.AddInt32(&publishLoad, 1)
+		err := q.db.createMessages(ctx, message)
+		atomic.AddInt32(&publishLoad, -1)
+		if err == nil {
+			// Still increment metric
+			metric.MessagePublished.Inc()
+			return nil
+		}
+		// Fall back to pool on error
+	}
+
+	// Use pool for higher concurrency - this scales better with many VUs
+	q.pool.Publish("*", messageID.String(), eventpool.SendJson(message))
+
+	// Increment metric asynchronously without blocking the publish flow
+	go metric.MessagePublished.Inc()
 
 	return nil
 }
@@ -250,14 +278,16 @@ func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 
 func (q *BlockQueue[V]) storeJob(name string, message []byte) error {
 	var request core.Message
+
 	err := json.Unmarshal(message, &request)
 	if err != nil {
 		return err
 	}
 
-	go metric.MessagePublished.Inc()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 
-	return q.db.createMessages(context.TODO(), request)
+	return q.db.createMessages(ctx, request)
 }
 
 func (q *BlockQueue[V]) Close() {

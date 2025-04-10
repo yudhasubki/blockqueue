@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	bufferSizeJob = 5000
+	bufferSizeJob = 20000
 )
 
 type Job[V chan io.ResponseMessages] struct {
@@ -50,12 +50,13 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 		kv:         kv,
 		cancelFunc: cancel,
 		ctx:        ctx,
-		message:    make(chan bool, 20000),
+		message:    make(chan bool, 50000),
 		mtx:        cas.New(),
 		pool:       eventpool.NewPartition(opt.ProducerPartitionNumber),
 		metric: &jobMetric{
 			message: metric.MessagePublishedTopic(topic.Name),
 		},
+		opt: opt,
 	}
 	prometheus.Register(job.metric.message)
 
@@ -319,12 +320,23 @@ func (job *Job[V]) fetchWaitingJob() {
 }
 
 func (job *Job[V]) dispatchJob() error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	// Determine optimal batch size based on active listeners
+	// For low concurrency, we can use larger batches
+	batchSize := 100
+
+	// Simple heuristic - if we have few active listeners, we likely have lower concurrency
+	if len(job.listeners) < 3 {
+		batchSize = 200 // Double batch size for low concurrency scenarios
+	}
+
 	messages, err := job.db.getMessages(ctx, core.FilterMessage{
 		TopicId: []uuid.UUID{job.Id},
 		Status:  []core.MessageStatus{core.MessageStatusWaiting},
 		Offset:  1,
-		Limit:   100,
+		Limit:   batchSize, // Use adaptive batch size
 	})
 	if err != nil {
 		slog.Error(
@@ -341,18 +353,25 @@ func (job *Job[V]) dispatchJob() error {
 	}
 
 	if len(messages) > 0 {
-		err = job.db.updateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
+		updateCtx, updateCancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer updateCancel()
+
+		err = job.db.updateStatusMessage(updateCtx, core.MessageStatusDelivered, messages.Ids()...)
 		if err != nil {
 			slog.Error(
 				"error update status message",
 				logPrefixTopic, job.Name,
 				logPrefixMessageStatus, core.MessageStatusDelivered,
+				logPrefixErr, err,
 			)
 			return nil
 		}
 
 		job.pool.Publish("*", job.Id.String(), eventpool.SendJson(messages))
-		go job.metric.message.WithLabelValues(job.Name).Inc()
+
+		go func() {
+			job.metric.message.WithLabelValues(job.Name).Add(float64(len(messages)))
+		}()
 	}
 
 	return nil

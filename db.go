@@ -138,13 +138,15 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers c
 }
 
 func (d *db) createMessages(ctx context.Context, message core.Message) error {
-	stmt, err := d.Database.Conn().PrepareNamedContext(ctx, "INSERT INTO topic_messages (id, topic_id, message, status) VALUES (:id, :topic_id, :message, :status)")
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	_, err = stmt.ExecContext(ctx, message)
+	// Use optimized direct SQL without prepared statements for single inserts
+	_, err := d.Database.Conn().ExecContext(
+		ctx,
+		"INSERT INTO topic_messages (id, topic_id, message, status) VALUES (?, ?, ?, ?)",
+		message.Id,
+		message.TopicId,
+		message.Message,
+		message.Status,
+	)
 	if err != nil {
 		return err
 	}
@@ -163,17 +165,13 @@ func (d *db) updateStatusMessage(ctx context.Context, status core.MessageStatus,
 	}
 
 	_, err = d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), args...)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (d *db) getMessages(ctx context.Context, filter core.FilterMessage) (core.Messages, error) {
 	var (
-		messages = make(core.Messages, 0)
-		query    = "SELECT * FROM topic_messages"
+		messages = make(core.Messages, 0, filter.Limit)                       // Pre-allocate capacity
+		query    = "SELECT id, topic_id, message, status FROM topic_messages" // Only select needed columns
 	)
 
 	clause, arg := filter.Filter("AND")
