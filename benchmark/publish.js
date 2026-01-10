@@ -1,6 +1,7 @@
 import http from 'k6/http';
+import { check } from 'k6';
 
-export default function() {
+export default function () {
     const url = 'http://localhost:8080/topics/cart/messages'
     const payload = JSON.stringify({
         message: 'test publishing message'
@@ -12,5 +13,9 @@ export default function() {
         }
     }
 
-    http.post(url, payload,  params)
+    const res = http.post(url, payload, params)
+
+    check(res, {
+        'status is 2xx': (r) => r.status >= 200 && r.status < 300,
+    })
 }

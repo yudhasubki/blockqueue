@@ -13,7 +13,6 @@ import (
 	"github.com/lesismal/nbio/nbhttp"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	blockqueue "github.com/yudhasubki/blockqueue"
-	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	"github.com/yudhasubki/blockqueue/pkg/postgre"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 	"github.com/yudhasubki/blockqueue/pkg/turso"
@@ -67,6 +66,8 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	case "sqlite", "":
 		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
 			BusyTimeout: cfg.SQLite.BusyTimeout,
+			CacheSize:   cfg.SQLite.CacheSize,
+			MmapSize:    cfg.SQLite.MmapSize,
 		})
 		if err != nil {
 			slog.Error("failed to open database", "error", err)
@@ -76,20 +77,24 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 		driver = sqlite
 	}
 
-	etcd, err := etcd.New(
-		cfg.Etcd.Path,
-		etcd.WithSync(cfg.Etcd.Sync),
-	)
-	if err != nil {
-		slog.Error("failed to open etcd database", "error", err)
-		return err
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 
-	stream := blockqueue.New(driver, etcd, blockqueue.BlockQueueOption{
-		ProducerPartitionNumber: cfg.Job.ProducerPartition,
-		ConsumerPartitionNumber: cfg.Job.ConsumerPartition,
+	// Parse WriteBuffer config
+	wbConfig := blockqueue.WriteBufferConfig{}
+	if cfg.WriteBuffer.BatchSize > 0 {
+		wbConfig.BatchSize = cfg.WriteBuffer.BatchSize
+	}
+	if cfg.WriteBuffer.BufferSize > 0 {
+		wbConfig.BufferSize = cfg.WriteBuffer.BufferSize
+	}
+	if cfg.WriteBuffer.FlushInterval != "" {
+		if d, err := time.ParseDuration(cfg.WriteBuffer.FlushInterval); err == nil {
+			wbConfig.FlushInterval = d
+		}
+	}
+
+	stream := blockqueue.New(driver, blockqueue.BlockQueueOption{
+		WriteBufferConfig: wbConfig,
 	})
 
 	err = stream.Run(ctx)
@@ -128,7 +133,6 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	engine.Stop()
 	stream.Close()
 	driver.Close()
-	etcd.Close()
 
 	// handling graceful shutdown
 	time.Sleep(cfg.Http.Shutdown)

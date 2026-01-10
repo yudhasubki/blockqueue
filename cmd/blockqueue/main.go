@@ -67,14 +67,13 @@ The commands are:
 }
 
 type Config struct {
-	Etcd    EtcdConfig    `yaml:"etcd"`
-	Http    HttpConfig    `yaml:"http"`
-	Logging LoggingConfig `yaml:"logging"`
-	SQLite  SQLiteConfig  `yaml:"sqlite"`
-	Turso   TursoConfig   `yaml:"turso"`
-	PgSQL   PostgreConfig `yaml:"pgsql"`
-	Job     JobConfig     `yaml:"job"`
-	Metric  MetricConfig  `yaml:"metric"`
+	Http        HttpConfig        `yaml:"http"`
+	Logging     LoggingConfig     `yaml:"logging"`
+	SQLite      SQLiteConfig      `yaml:"sqlite"`
+	Turso       TursoConfig       `yaml:"turso"`
+	PgSQL       PostgreConfig     `yaml:"pgsql"`
+	Metric      MetricConfig      `yaml:"metric"`
+	WriteBuffer WriteBufferConfig `yaml:"write_buffer"`
 }
 
 func ReadConfigFile(filename string) (_ Config, err error) {
@@ -147,6 +146,8 @@ type LoggingConfig struct {
 type SQLiteConfig struct {
 	DatabaseName string `yaml:"db_name"`
 	BusyTimeout  int    `yaml:"busy_timeout"`
+	CacheSize    int    `yaml:"cache_size"` // KB (negative = KB, positive = pages)
+	MmapSize     int64  `yaml:"mmap_size"`  // Memory-mapped I/O size in bytes
 }
 
 type TursoConfig struct {
@@ -163,14 +164,11 @@ type PostgreConfig struct {
 	MaxOpenConns int    `yaml:"max_open_conns"`
 	MaxIdleConns int    `yaml:"max_idle_conns"`
 }
-type EtcdConfig struct {
-	Path string `yaml:"path"`
-	Sync bool   `yaml:"sync"`
-}
 
-type JobConfig struct {
-	ProducerPartition int `yaml:"producer_partition"`
-	ConsumerPartition int `yaml:"consumer_partition"`
+type WriteBufferConfig struct {
+	BatchSize     int    `yaml:"batch_size"`
+	FlushInterval string `yaml:"flush_interval"`
+	BufferSize    int    `yaml:"buffer_size"`
 }
 
 type MetricConfig struct {

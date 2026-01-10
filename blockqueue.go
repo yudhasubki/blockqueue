@@ -2,19 +2,18 @@ package blockqueue
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
-	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	bqio "github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
-	"github.com/yudhasubki/eventpool"
 )
 
 var (
@@ -22,13 +21,13 @@ var (
 )
 
 type BlockQueue[V chan bqio.ResponseMessages] struct {
-	mtx       *cas.SpinLock
-	serverCtx context.Context
-	jobs      map[string]*Job[V]
-	kv        *kv
-	db        *db
-	pool      *eventpool.EventpoolPartition
-	Opt       BlockQueueOption
+	mtx         *cas.SpinLock
+	serverCtx   context.Context
+	cancel      context.CancelFunc
+	jobs        map[string]*Job[V]
+	db          *db
+	writeBuffer *WriteBuffer
+	Opt         BlockQueueOption
 }
 
 func init() {
@@ -36,28 +35,17 @@ func init() {
 }
 
 type BlockQueueOption struct {
-	ProducerPartitionNumber int
-	ConsumerPartitionNumber int
+	WriteBufferConfig  WriteBufferConfig
+	CheckpointInterval time.Duration // Default: 30s
 }
 
-func New[V chan bqio.ResponseMessages](db Driver, kv *etcd.Etcd, opt BlockQueueOption) *BlockQueue[V] {
+func New[V chan bqio.ResponseMessages](driver Driver, opt BlockQueueOption) *BlockQueue[V] {
 	blockqueue := &BlockQueue[V]{
-		db:   newDb(db),
+		db:   newDb(driver),
 		mtx:  cas.New(),
 		jobs: make(map[string]*Job[V]),
-		kv:   newKv(kv),
 		Opt:  opt,
 	}
-	pool := eventpool.NewPartition(opt.ProducerPartitionNumber)
-	pool.Submit(opt.ConsumerPartitionNumber, eventpool.EventpoolListener{
-		Name:       "store_job",
-		Subscriber: blockqueue.storeJob,
-		Opts: []eventpool.SubscriberConfigFunc{
-			eventpool.BufferSize(20000),
-		},
-	})
-	pool.Run()
-	blockqueue.pool = pool
 
 	return blockqueue
 }
@@ -68,16 +56,64 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 		return err
 	}
 
+	// Create context with cancel for graceful shutdown
+	qCtx, cancel := context.WithCancel(ctx)
+	q.serverCtx = qCtx
+	q.cancel = cancel
+
+	// Initialize write buffer
+	wbConfig := q.Opt.WriteBufferConfig
+	if wbConfig.BatchSize == 0 && wbConfig.FlushInterval == 0 && wbConfig.BufferSize == 0 {
+		wbConfig = DefaultWriteBufferConfig()
+	}
+	q.writeBuffer = NewWriteBuffer(qCtx, q.db, wbConfig)
+
+	// Start checkpoint goroutine to prevent WAL bloat
+	go q.startCheckpointer()
+
 	for _, topic := range topics {
-		job, err := newJob[V](ctx, topic, q.db, q.kv, q.Opt)
+		job, err := newJob[V](qCtx, topic, q.db)
 		if err != nil {
 			return err
 		}
 		q.jobs[topic.Name] = job
 	}
-	q.serverCtx = ctx
 
 	return nil
+}
+
+// startCheckpointer runs periodic WAL checkpoints (SQLite only)
+func (q *BlockQueue[V]) startCheckpointer() {
+	// Only run for SQLite - PostgreSQL handles this automatically
+	if q.db.Database.Conn().DriverName() != "sqlite3" {
+		return
+	}
+
+	interval := q.Opt.CheckpointInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-q.serverCtx.Done():
+			// Final checkpoint on shutdown
+			_, err := q.db.Database.Conn().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			if err != nil {
+				slog.Error("error final checkpoint", logPrefixErr, err)
+			}
+			return
+		case <-ticker.C:
+			// Passive checkpoint - doesn't block readers/writers
+			_, err := q.db.Database.Conn().Exec("PRAGMA wal_checkpoint(PASSIVE)")
+			if err != nil {
+				slog.Error("error checkpoint", logPrefixErr, err)
+			}
+		}
+	}
 }
 
 func (q *BlockQueue[V]) GetTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
@@ -142,7 +178,7 @@ func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscriber
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
 
-	job, err := newJob[V](q.serverCtx, topic, q.db, q.kv, q.Opt)
+	job, err := newJob[V](q.serverCtx, topic, q.db)
 	if err != nil {
 		return err
 	}
@@ -181,12 +217,13 @@ func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request b
 		return ErrJobNotFound
 	}
 
-	q.pool.Publish("*", uuid.NewString(), eventpool.SendJson(core.Message{
-		Id:      uuid.New(),
-		TopicId: topic.Id,
-		Message: request.Message,
-		Status:  core.MessageStatusWaiting,
-	}))
+	// Generate unique message ID with timestamp prefix
+	messageId := fmt.Sprintf("%d_%s", time.Now().UnixNano(), uuid.NewString()[:8])
+
+	// Use write buffer for batched inserts (better throughput)
+	q.writeBuffer.Enqueue(topic.Id, messageId, request.Message)
+
+	go metric.MessagePublished.Inc()
 
 	return nil
 }
@@ -248,20 +285,13 @@ func (q *BlockQueue[V]) getJob(topic core.Topic) (*Job[V], bool) {
 	return job, true
 }
 
-func (q *BlockQueue[V]) storeJob(name string, message []byte) error {
-	var request core.Message
-	err := json.Unmarshal(message, &request)
-	if err != nil {
-		return err
-	}
-
-	go metric.MessagePublished.Inc()
-
-	return q.db.createMessages(context.TODO(), request)
-}
-
 func (q *BlockQueue[V]) Close() {
-	q.pool.Close()
+	if q.cancel != nil {
+		q.cancel()
+	}
+	if q.writeBuffer != nil {
+		q.writeBuffer.Close()
+	}
 }
 
 func (q *BlockQueue[V]) getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {

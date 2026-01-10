@@ -1,3 +1,5 @@
+// Package main demonstrates basic BlockQueue library usage
+// This example shows how to create a topic, publish messages, and consume them
 package main
 
 import (
@@ -7,77 +9,95 @@ import (
 	"time"
 
 	"github.com/yudhasubki/blockqueue"
-	"github.com/yudhasubki/blockqueue/pkg/etcd"
 	"github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/sqlite"
 )
 
 func main() {
-	db, err := sqlite.New("example", sqlite.Config{
-		BusyTimeout: 5,
+	// 1. Initialize database driver
+	db, err := sqlite.New("example.db", sqlite.Config{
+		BusyTimeout: 5000,
 	})
 	if err != nil {
-		panic(err)
-	}
-
-	etcd, err := etcd.New("etcdb")
-	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	ctx := context.Background()
-	stream := blockqueue.New(db, etcd, blockqueue.BlockQueueOption{
-		ProducerPartitionNumber: 16,
-		ConsumerPartitionNumber: 16,
+
+	// 2. Create BlockQueue instance
+	stream := blockqueue.New(db, blockqueue.BlockQueueOption{
+		WriteBufferConfig: blockqueue.WriteBufferConfig{
+			BatchSize:     100,
+			FlushInterval: 100 * time.Millisecond,
+			BufferSize:    1000,
+		},
 	})
 
-	err = stream.Run(ctx)
-	if err != nil {
-		panic(err)
+	if err := stream.Run(ctx); err != nil {
+		log.Fatal(err)
 	}
+	defer stream.Close()
 
+	// 3. Define topic and subscriber
 	request := io.Topic{
-		Name: "test",
+		Name: "notifications",
 		Subscribers: io.Subscribers{
 			{
-				Name: "test_subscriber",
+				Name: "email_sender",
+				Option: io.SubscriberOpt{
+					MaxAttempts:        3,
+					VisibilityDuration: "1m",
+				},
 			},
 		},
 	}
 
 	topic := request.Topic()
-
-	err = stream.AddJob(ctx, topic, request.Subscriber(topic.Id))
-	if err != nil {
-		panic(err)
+	if err := stream.AddJob(ctx, topic, request.Subscriber(topic.Id)); err != nil {
+		log.Fatal(err)
 	}
+	log.Printf("Created topic: %s with subscriber: email_sender", topic.Name)
 
+	// 4. Start consumer in background
+	done := make(chan bool)
 	go func() {
-		for {
-			response, err := stream.Read(context.Background(), topic, "test_subscriber")
+		count := 0
+		for count < 5 {
+			messages, err := stream.Read(ctx, topic, "email_sender")
 			if err != nil {
-				log.Printf("error %v", err)
+				log.Printf("Read error: %v", err)
 				continue
 			}
 
-			for _, r := range response {
-				log.Println("Response Message : ", r.Message)
-				err = stream.Ack(context.Background(), topic, "test_subscriber", r.Id)
-				if err != nil {
-					log.Printf("error ack message : %v", err)
+			for _, msg := range messages {
+				log.Printf("Received: %s", msg.Message)
+
+				// Simulate processing
+				time.Sleep(50 * time.Millisecond)
+
+				if err := stream.Ack(ctx, topic, "email_sender", msg.Id); err != nil {
+					log.Printf("Ack error: %v", err)
 					continue
 				}
-
-				log.Println("success ack message")
+				log.Printf("Processed and acknowledged message")
+				count++
 			}
 		}
+		done <- true
 	}()
 
-	for i := 0; i < 10; i++ {
-		stream.Publish(ctx, topic, io.Publish{
-			Message: fmt.Sprintf("Test %v", i),
-		})
+	// 5. Publish messages
+	for i := 1; i <= 5; i++ {
+		msg := fmt.Sprintf("Notification #%d: Hello World", i)
+		stream.Publish(ctx, topic, io.Publish{Message: msg})
+		log.Printf("Published: %s", msg)
 	}
 
-	time.Sleep(5 * time.Second)
+	// 6. Wait for consumer to finish
+	select {
+	case <-done:
+		log.Println("All messages processed")
+	case <-time.After(10 * time.Second):
+		log.Println("Timeout waiting for messages")
+	}
 }

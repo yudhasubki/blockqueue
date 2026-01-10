@@ -2,10 +2,16 @@ package blockqueue
 
 import (
 	"context"
+	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/pkg/core"
+)
+
+var (
+	ErrMessageNotFound = errors.New("message not found")
 )
 
 type Driver interface {
@@ -217,4 +223,155 @@ func (d *db) tx(ctx context.Context, fn func(ctx context.Context, tx *sqlx.Tx) e
 	}
 
 	return tx.Commit()
+}
+
+// SubscriberMessage represents a message in the subscriber queue
+type SubscriberMessage struct {
+	Id           int64     `db:"id"`
+	SubscriberId uuid.UUID `db:"subscriber_id"`
+	TopicId      uuid.UUID `db:"topic_id"`
+	MessageId    string    `db:"message_id"`
+	Message      string    `db:"message"`
+	Status       string    `db:"status"`
+	RetryCount   int       `db:"retry_count"`
+	VisibleAt    time.Time `db:"visible_at"`
+	CreatedAt    time.Time `db:"created_at"`
+}
+
+type SubscriberMessages []SubscriberMessage
+
+// SubscriberQueueStats holds queue statistics
+type SubscriberQueueStats struct {
+	Pending   int
+	Delivered int
+}
+
+// enqueueToSubscribers inserts messages to all active subscribers for a topic
+func (d *db) enqueueToSubscribers(ctx context.Context, topicId uuid.UUID, messageId string, message string) error {
+	query := `
+		INSERT INTO subscriber_messages (subscriber_id, topic_id, message_id, message, status, visible_at)
+		SELECT ts.id, ts.topic_id, ?, ?, 'pending', CURRENT_TIMESTAMP
+		FROM topic_subscribers ts
+		WHERE ts.topic_id = ? AND ts.deleted_at IS NULL
+	`
+	_, err := d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), messageId, message, topicId)
+	return err
+}
+
+// dequeueMessages fetches and marks messages as delivered atomically
+func (d *db) dequeueMessages(ctx context.Context, subscriberId uuid.UUID, limit int, visibilityDuration time.Duration) (SubscriberMessages, error) {
+	messages := make(SubscriberMessages, 0)
+
+	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		// Select pending messages that are visible
+		selectQuery := `
+			SELECT id, subscriber_id, topic_id, message_id, message, status, retry_count, visible_at, created_at
+			FROM subscriber_messages
+			WHERE subscriber_id = ? AND status = 'pending' AND visible_at <= CURRENT_TIMESTAMP
+			ORDER BY created_at ASC
+			LIMIT ?
+		`
+		err := tx.SelectContext(ctx, &messages, tx.Rebind(selectQuery), subscriberId, limit)
+		if err != nil {
+			return err
+		}
+
+		if len(messages) == 0 {
+			return nil
+		}
+
+		// Collect IDs and update to delivered with visibility timeout
+		ids := make([]int64, 0, len(messages))
+		for _, m := range messages {
+			ids = append(ids, m.Id)
+		}
+
+		visibleAt := time.Now().Add(visibilityDuration)
+		updateQuery, args, err := sqlx.In(
+			"UPDATE subscriber_messages SET status = 'delivered', visible_at = ? WHERE id IN (?)",
+			visibleAt, ids,
+		)
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.ExecContext(ctx, tx.Rebind(updateQuery), args...)
+		return err
+	})
+
+	return messages, err
+}
+
+// ackSubscriberMessage deletes a message after successful processing
+func (d *db) ackSubscriberMessage(ctx context.Context, subscriberId uuid.UUID, messageId string) error {
+	result, err := d.Database.Conn().ExecContext(ctx,
+		"DELETE FROM subscriber_messages WHERE subscriber_id = ? AND message_id = ?",
+		subscriberId, messageId,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
+// getSubscriberQueueStats returns pending and delivered message counts
+func (d *db) getSubscriberQueueStats(ctx context.Context, subscriberId uuid.UUID) (SubscriberQueueStats, error) {
+	var stats SubscriberQueueStats
+
+	err := d.Database.Conn().GetContext(ctx, &stats.Pending,
+		"SELECT COUNT(*) FROM subscriber_messages WHERE subscriber_id = ? AND status = 'pending'",
+		subscriberId,
+	)
+	if err != nil {
+		return stats, err
+	}
+
+	err = d.Database.Conn().GetContext(ctx, &stats.Delivered,
+		"SELECT COUNT(*) FROM subscriber_messages WHERE subscriber_id = ? AND status = 'delivered'",
+		subscriberId,
+	)
+	return stats, err
+}
+
+// requeueExpiredMessages moves expired delivered messages back to pending, or deletes if max retries exceeded
+func (d *db) requeueExpiredMessages(ctx context.Context, subscriberId uuid.UUID, maxRetries int, visibilityDuration time.Duration) error {
+	// Delete messages that exceeded max retries
+	_, err := d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("DELETE FROM subscriber_messages WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP AND retry_count >= ?"),
+		subscriberId, maxRetries,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Requeue messages that are still under retry limit
+	visibleAt := time.Now().Add(visibilityDuration)
+	_, err = d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = retry_count + 1, visible_at = ? WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP"),
+		visibleAt, subscriberId,
+	)
+	return err
+}
+
+// deleteSubscriberMessages deletes all messages for a subscriber
+func (d *db) deleteSubscriberMessages(ctx context.Context, subscriberId uuid.UUID) error {
+	_, err := d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("DELETE FROM subscriber_messages WHERE subscriber_id = ?"),
+		subscriberId,
+	)
+	return err
+}
+
+// deleteTopicMessages deletes all messages for a topic
+func (d *db) deleteTopicMessages(ctx context.Context, topicId uuid.UUID) error {
+	_, err := d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("DELETE FROM subscriber_messages WHERE topic_id = ?"),
+		topicId,
+	)
+	return err
 }

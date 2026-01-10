@@ -8,6 +8,8 @@ logging:
 sqlite:
   db_name: "blockqueue"
   busy_timeout: 5000
+  cache_size: -4000   # 4MB page cache (negative = KB)
+  mmap_size: 0        
 turso:
   url: "libsql://tursodatabase-username.turso.io"
 pgsql:
@@ -19,11 +21,9 @@ pgsql:
   timezone: "UTC"
   max_open_conns: 10
   max_idle_conns: 10
-job:
-  producer_partition: 16
-  consumer_partition: 16
-etcd:
-  path: "etcdb"
-  sync: false
+write_buffer:
+  batch_size: 100          # Messages per batch
+  flush_interval: "100ms"  # Max time before flush
+  buffer_size: 10000       # Channel buffer size
 metric:
   enable: false

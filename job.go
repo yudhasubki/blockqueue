@@ -2,23 +2,18 @@ package blockqueue
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/nutsdb/nutsdb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/yudhasubki/blockqueue/pkg/cas"
 	"github.com/yudhasubki/blockqueue/pkg/core"
 	"github.com/yudhasubki/blockqueue/pkg/io"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
-	"github.com/yudhasubki/eventpool"
 	"gopkg.in/guregu/null.v4"
-)
-
-const (
-	bufferSizeJob = 5000
 )
 
 type Job[V chan io.ResponseMessages] struct {
@@ -26,45 +21,33 @@ type Job[V chan io.ResponseMessages] struct {
 	Name string
 
 	db         *db
-	kv         *kv
 	ctx        context.Context
 	cancelFunc context.CancelFunc
-	pool       *eventpool.EventpoolPartition
 	mtx        *cas.SpinLock
 	listeners  map[uuid.UUID]*Listener[V]
-	message    chan bool
 	metric     *jobMetric
-	opt        BlockQueueOption
 }
 
 type jobMetric struct {
 	message *prometheus.CounterVec
 }
 
-func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, db *db, kv *kv, opt BlockQueueOption) (*Job[V], error) {
+func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.Topic, database *db) (*Job[V], error) {
 	ctx, cancel := context.WithCancel(serverCtx)
 	job := &Job[V]{
 		Id:         topic.Id,
 		Name:       topic.Name,
-		db:         db,
-		kv:         kv,
+		db:         database,
 		cancelFunc: cancel,
 		ctx:        ctx,
-		message:    make(chan bool, 20000),
 		mtx:        cas.New(),
-		pool:       eventpool.NewPartition(opt.ProducerPartitionNumber),
 		metric: &jobMetric{
 			message: metric.MessagePublishedTopic(topic.Name),
 		},
 	}
 	prometheus.Register(job.metric.message)
 
-	err := job.createBucket()
-	if err != nil {
-		return nil, err
-	}
-
-	subscribers, err := db.getSubscribers(serverCtx, core.FilterSubscriber{
+	subscribers, err := database.getSubscribers(serverCtx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
 	})
 	if err != nil {
@@ -73,7 +56,12 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 
 	listeners := make(map[uuid.UUID]*Listener[V])
 	for _, subscriber := range subscribers {
-		listener, err := newListener[V](serverCtx, topic.Name, subscriber, job.kv)
+		subscriberInfo, err := parseSubscriberInfo(subscriber)
+		if err != nil {
+			return &Job[V]{}, err
+		}
+
+		listener, err := newListener[V](serverCtx, topic.Name, subscriberInfo, database)
 		if err != nil {
 			return &Job[V]{}, err
 		}
@@ -82,33 +70,40 @@ func newJob[V chan io.ResponseMessages](serverCtx context.Context, topic core.To
 	}
 	job.listeners = listeners
 
-	eventpoolListeners := make([]eventpool.EventpoolListener, 0, len(listeners))
-	for _, listener := range listeners {
-		eventpoolListeners = append(eventpoolListeners, eventpool.EventpoolListener{
-			Name:       listener.Id,
-			Subscriber: listener.jobCatcher,
-			Opts: []eventpool.SubscriberConfigFunc{
-				eventpool.BufferSize(bufferSizeJob),
-			},
-		})
-	}
-
-	job.pool.Submit(opt.ConsumerPartitionNumber, eventpoolListeners...)
-	job.pool.Run()
-
-	go job.fetchWaitingJob()
+	// Start context watcher for graceful shutdown
+	go job.watchContext()
 
 	return job, nil
 }
 
-func (job *Job[V]) createBucket() error {
-	return job.kv.readBucketTx(func(tx *nutsdb.Tx) error {
-		return job.kv.createTxBucket(tx, nutsdb.DataStructureList, job.Name)
-	})
+// parseSubscriberInfo parses subscriber option into SubscriberInfo
+func parseSubscriberInfo(subscriber core.Subscriber) (SubscriberInfo, error) {
+	option := core.SubscriberOpt{}
+	err := json.Unmarshal(subscriber.Option, &option)
+	if err != nil {
+		return SubscriberInfo{}, err
+	}
+
+	visibilityDuration, err := time.ParseDuration(option.VisibilityDuration)
+	if err != nil {
+		return SubscriberInfo{}, err
+	}
+
+	return SubscriberInfo{
+		Id:                 subscriber.Id,
+		Name:               subscriber.Name,
+		MaxAttempts:        option.MaxAttempts,
+		VisibilityDuration: visibilityDuration,
+	}, nil
 }
 
-func (job *Job[V]) trigger() {
-	job.message <- true
+func (job *Job[V]) watchContext() {
+	<-job.ctx.Done()
+	slog.Info(
+		"signal cancel received. job entering shutdown status.",
+		logPrefixTopic, job.Name,
+	)
+	job.close()
 }
 
 func (job *Job[V]) ackMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
@@ -133,24 +128,20 @@ func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
 		return err
 	}
 
-	eventpoolListeners := make([]eventpool.EventpoolListener, 0)
 	for _, subscriber := range subscribers {
 		if _, exist := job.listeners[subscriber.Id]; !exist {
-			listener, err := newListener[V](job.ctx, topic.Name, subscriber, job.kv)
+			subscriberInfo, err := parseSubscriberInfo(subscriber)
+			if err != nil {
+				return err
+			}
+
+			listener, err := newListener[V](job.ctx, topic.Name, subscriberInfo, job.db)
 			if err != nil {
 				return err
 			}
 			job.listeners[subscriber.Id] = listener
-
-			eventpoolListeners = append(eventpoolListeners, eventpool.EventpoolListener{
-				Name:       listener.Id,
-				Subscriber: listener.jobCatcher,
-				Opts:       []eventpool.SubscriberConfigFunc{},
-			})
 		}
 	}
-
-	job.pool.SubmitOnFlight(10, eventpoolListeners...)
 
 	return nil
 }
@@ -180,6 +171,9 @@ func (job *Job[V]) deleteListener(ctx context.Context, topic core.Topic, subscri
 		return err
 	}
 
+	// Invalidate subscriber cache for this topic
+	InvalidateSubscriberCache(job.Id)
+
 	listener.remove()
 	delete(job.listeners, subscriber.Id)
 
@@ -196,7 +190,12 @@ func (job *Job[V]) getListenersStatus(ctx context.Context, topic core.Topic) (io
 
 	subscriberMessages := make(io.SubscriberMessages, 0)
 	for _, subscriber := range subscribers {
-		message, err := job.listeners[subscriber.Id].messages()
+		listener, exist := job.listeners[subscriber.Id]
+		if !exist {
+			continue
+		}
+
+		message, err := listener.messages()
 		if err != nil {
 			return io.SubscriberMessages{}, err
 		}
@@ -276,7 +275,6 @@ func (job *Job[V]) remove() {
 	)
 
 	job.cancelFunc()
-	job.pool.Close()
 
 	for _, listener := range job.listeners {
 		listener.remove()
@@ -292,82 +290,15 @@ func (job *Job[V]) remove() {
 	prometheus.Unregister(job.metric.message)
 }
 
-func (job *Job[V]) fetchWaitingJob() {
-	for {
-		ticker := time.NewTicker(1 * time.Second)
-		select {
-		case <-job.ctx.Done():
-			slog.Info(
-				"signal cancel received. dispatcher waiting job entered shutdown status.",
-				logPrefixTopic, job.Name,
-			)
-			job.pool.Close()
-			job.close()
-
-			return
-		case <-ticker.C:
-			err := job.dispatchJob()
-			if err != nil {
-				slog.Error(
-					"error dispatching job to the listener",
-					logPrefixTopic, job.Name,
-					logPrefixErr, err,
-				)
-			}
-		}
-	}
-}
-
-func (job *Job[V]) dispatchJob() error {
-	ctx := context.Background()
-	messages, err := job.db.getMessages(ctx, core.FilterMessage{
-		TopicId: []uuid.UUID{job.Id},
-		Status:  []core.MessageStatus{core.MessageStatusWaiting},
-		Offset:  1,
-		Limit:   100,
-	})
+func (job *Job[V]) delete() error {
+	// Delete all subscriber messages for this topic
+	err := job.db.deleteTopicMessages(context.TODO(), job.Id)
 	if err != nil {
 		slog.Error(
-			"error fetching message",
+			"error delete topic messages",
 			logPrefixTopic, job.Name,
-			logPrefixMessageStatus, core.MessageStatusWaiting,
 			logPrefixErr, err,
 		)
-		return err
-	}
-
-	if len(messages) == 0 {
-		return nil
-	}
-
-	if len(messages) > 0 {
-		err = job.db.updateStatusMessage(ctx, core.MessageStatusDelivered, messages.Ids()...)
-		if err != nil {
-			slog.Error(
-				"error update status message",
-				logPrefixTopic, job.Name,
-				logPrefixMessageStatus, core.MessageStatusDelivered,
-			)
-			return nil
-		}
-
-		job.pool.Publish("*", job.Id.String(), eventpool.SendJson(messages))
-		go job.metric.message.WithLabelValues(job.Name).Inc()
-	}
-
-	return nil
-}
-
-func (job *Job[V]) delete() error {
-	err := job.kv.updateBucketTx(func(tx *nutsdb.Tx) error {
-		return tx.DeleteBucket(nutsdb.DataStructureList, job.Name)
-	})
-	if err != nil {
-		slog.Error(
-			"error remove bucket",
-			logPrefixBucket, job.Name,
-		)
-		return err
 	}
 
 	return job.db.tx(context.TODO(), func(ctx context.Context, tx *sqlx.Tx) error {
