@@ -140,6 +140,19 @@ func (q *BlockQueue[V]) BatchPublish(ctx context.Context, topic core.Topic, requ
 	return q.batchPublish(ctx, topic, request)
 }
 
+func (q *BlockQueue[V]) GetTopic(topicName string) (core.Topic, bool) {
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
+	job, exist := q.jobs[topicName]
+	if !exist {
+		return core.Topic{}, false
+	}
+	return core.Topic{
+		Id:   job.Id,
+		Name: job.Name,
+	}, true
+}
+
 func (q *BlockQueue[V]) BatchAck(ctx context.Context, topic core.Topic, subscriberName string, messageIds []string) error {
 	return q.batchAck(ctx, topic, subscriberName, messageIds)
 }

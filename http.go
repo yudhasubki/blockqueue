@@ -354,18 +354,8 @@ func (h *Http) topicExist(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topicName := chi.URLParam(r, "topicName")
 
-		topics, err := h.Stream.getTopics(r.Context(), core.FilterTopic{
-			Name: []string{topicName},
-		})
-		if err != nil {
-			httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
-				Error:   err.Error(),
-				Message: httpresponse.MessageFailure,
-			})
-			return
-		}
-
-		if len(topics) == 0 {
+		topic, exist := h.Stream.GetTopic(topicName)
+		if !exist {
 			httpresponse.Write(w, http.StatusNotFound, &httpresponse.Response{
 				Error:   "topic not found",
 				Message: httpresponse.MessageNotFound,
@@ -373,7 +363,7 @@ func (h *Http) topicExist(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), topicIdKey, topics[0])
+		ctx := context.WithValue(r.Context(), topicIdKey, topic)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
