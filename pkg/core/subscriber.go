@@ -10,13 +10,13 @@ import (
 )
 
 type Subscriber struct {
-	Id        uuid.UUID       `db:"id"`
-	TopicId   uuid.UUID       `db:"topic_id"`
-	TopicName string          `db:"topic_name"`
-	Name      string          `db:"name"`
-	Option    json.RawMessage `db:"option"`
-	CreatedAt string          `db:"created_at"`
-	DeletedAt null.String     `db:"deleted_at"`
+	Id        uuid.UUID       `db:"id" json:"id"`
+	TopicId   uuid.UUID       `db:"topic_id" json:"topic_id"`
+	TopicName string          `db:"topic_name" json:"topic_name"`
+	Name      string          `db:"name" json:"name"`
+	Option    json.RawMessage `db:"option" json:"option"`
+	CreatedAt string          `db:"created_at" json:"created_at"`
+	DeletedAt null.String     `db:"deleted_at" json:"deleted_at"`
 }
 
 func (s Subscriber) Bucket() string {

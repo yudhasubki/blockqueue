@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -70,6 +71,21 @@ func main() {
 	// Start consumer
 	go consume(ctx, stream, topic)
 
+	// Start HTTP Server for UI
+	go func() {
+		// Use default UI path ("./ui") if running from root, or relative if running from example dir
+		// For simplicity, we assume running from root or we can try to guess.
+		// Let's assume default "./ui" is fine if running from root.
+		httpStream := &blockqueue.Http{
+			Stream: stream,
+			UIPath: "./ui",
+		}
+		log.Println("Starting UI at http://localhost:8080")
+		if err := http.ListenAndServe(":8080", httpStream.Router()); err != nil {
+			log.Printf("HTTP Server failed: %v", err)
+		}
+	}()
+
 	// Publish messages
 	for i := 1; i <= 10; i++ {
 		msg := fmt.Sprintf(`{"order_id": %d, "product": "item-%d"}`, i, i)
@@ -84,8 +100,9 @@ func main() {
 	select {
 	case <-sigCh:
 		log.Println("Shutting down...")
-	case <-time.After(10 * time.Second):
-		log.Println("Timeout, shutting down...")
+		// Remove timeout to keep UI running
+		// case <-time.After(10 * time.Second):
+		// 	log.Println("Timeout, shutting down...")
 	}
 
 	cancel()
@@ -100,7 +117,8 @@ func consume(ctx context.Context, stream *blockqueue.BlockQueue[chan io.Response
 		default:
 			messages, err := stream.Read(ctx, topic, "order_processor")
 			if err != nil {
-				log.Printf("read error: %v", err)
+				// Reduce log spam for read error (timeout)
+				// log.Printf("read error: %v", err)
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}

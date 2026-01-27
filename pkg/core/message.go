@@ -17,11 +17,11 @@ const (
 )
 
 type Message struct {
-	Id        uuid.UUID     `db:"id"`
-	TopicId   uuid.UUID     `db:"topic_id"`
-	Message   string        `db:"message"`
-	Status    MessageStatus `db:"status"`
-	CreatedAt string        `db:"created_at"`
+	Id        uuid.UUID     `db:"id" json:"id"`
+	TopicId   uuid.UUID     `db:"topic_id" json:"topic_id"`
+	Message   string        `db:"message" json:"message"`
+	Status    MessageStatus `db:"status" json:"status"`
+	CreatedAt string        `db:"created_at" json:"created_at"`
 }
 
 type Messages []Message

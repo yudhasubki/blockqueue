@@ -218,6 +218,7 @@ func (job *Job[V]) getListenersStatus(ctx context.Context, topic core.Topic) (io
 			return io.SubscriberMessages{}, err
 		}
 		subscriberMessages = append(subscriberMessages, io.SubscriberMessage{
+			TopicId:            subscriber.TopicId,
 			Name:               message.Name,
 			UnpublishedMessage: message.UnpublishMessage,
 			UnackedMessage:     message.UnackMessage,

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BlockQueue Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="fa-solid fa-cubes-stacked"></i>
+                BlockQueue
+            </div>
+            
+            <div class="nav-section">
+                <div class="nav-header">Topics</div>
+                <div class="topic-list" id="topicList">
+                    <!-- Topics will be injected here -->
+                </div>
+            </div>
+
+            <button class="create-topic-btn" onclick="openModal('createTopicModal')">
+                <i class="fa-solid fa-plus"></i> New Topic
+            </button>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div id="dashboardView">
+                <div class="empty-state">
+                    <i class="fa-solid fa-wind"></i>
+                    <h2>Select a topic to view details</h2>
+                    <p>Or create a new one to get started</p>
+                </div>
+            </div>
+
+            <div id="topicView" style="display: none;">
+                <div class="header">
+                    <div>
+                        <h1 id="currentTopicName">Topic Name</h1>
+                        <div class="header-meta">
+                            <span id="topicId">ID: ...</span>
+                        </div>
+                    </div>
+                    <div class="actions" style="display: flex; gap: 0.5rem;">
+                         <button class="btn btn-primary btn-sm" onclick="openModal('publishModal')">
+                            <i class="fa-solid fa-paper-plane"></i> Publish
+                        </button>
+                         <button class="btn btn-sm" onclick="openModal('createSubscriberModal')">
+                            <i class="fa-solid fa-user-plus"></i> Add Subscriber
+                        </button>
+                        <button class="btn btn-danger btn-sm" onclick="deleteTopic()">
+                            <i class="fa-solid fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid-cols-3">
+                    <div class="card">
+                        <div class="card-title">Total Subscribers</div>
+                        <div class="card-value" id="statsSubscribers">0</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Pending Messages</div>
+                        <div class="card-value" id="statsPending">0</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-title">Unacked Messages</div>
+                        <div class="card-value" id="statsUnacked">0</div>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h2 class="section-title" style="margin-bottom: 1rem; font-size: 1.25rem;">Subscribers</h2>
+                    <div class="subscriber-list" id="subscriberList">
+                        <!-- Subscribers injected here -->
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modals -->
+    <div id="createTopicModal" class="modal-overlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Create New Topic</h3>
+                <button class="close-modal" onclick="closeModal('createTopicModal')">&times;</button>
+            </div>
+            <form id="createTopicForm" onsubmit="handleCreateTopic(event)">
+                <div class="form-group">
+                    <label>Topic Name</label>
+                    <input type="text" name="name" required placeholder="e.g. orders-processed">
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%">Create Topic</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="publishModal" class="modal-overlay">
+        <div class="modal">
+             <div class="modal-header">
+                <h3 class="modal-title">Publish Message</h3>
+                <button class="close-modal" onclick="closeModal('publishModal')">&times;</button>
+            </div>
+             <form id="publishForm" onsubmit="handlePublish(event)">
+                <div class="form-group">
+                    <label>Message Content</label>
+                    <textarea name="message" required rows="4" placeholder="Enter JSON or text message..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Delay (optional)</label>
+                    <input type="text" name="delay" placeholder="e.g. 5s, 10m, 1h">
+                </div>
+                <!-- TODO: Batch support in UI if needed -->
+                <button type="submit" class="btn btn-primary" style="width: 100%">Publish</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="createSubscriberModal" class="modal-overlay">
+         <div class="modal">
+            <div class="modal-header">
+                <h3 class="modal-title">Add Subscriber</h3>
+                <button class="close-modal" onclick="closeModal('createSubscriberModal')">&times;</button>
+            </div>
+            <form id="createSubscriberForm" onsubmit="handleCreateSubscriber(event)">
+                <div class="form-group">
+                    <label>Subscriber Name</label>
+                    <input type="text" name="name" required placeholder="e.g. order-service-worker">
+                </div>
+                 <div class="form-group">
+                    <label>Max Attempts</label>
+                    <input type="number" name="max_attempts" value="3" min="1">
+                </div>
+                <div class="form-group">
+                    <label>Visibility Duration</label>
+                    <input type="text" name="visibility_duration" value="30s" placeholder="e.g. 30s">
+                </div>
+                 <button type="submit" class="btn btn-primary" style="width: 100%">Add Subscriber</button>
+            </form>
+        </div>
+    </div>
+    
+    <div id="dlqModal" class="modal-overlay">
+        <div class="modal" style="max-width: 800px;">
+             <div class="modal-header">
+                <h3 class="modal-title">Dead Letter Queue</h3>
+                <button class="close-modal" onclick="closeModal('dlqModal')">&times;</button>
+            </div>
+            <div id="dlqContent" style="max-height: 60vh; overflow-y: auto; margin-bottom: 1rem;">
+                <!-- DLQ messages here -->
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

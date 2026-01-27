@@ -8,10 +8,10 @@ import (
 )
 
 type Topic struct {
-	Id        uuid.UUID   `db:"id"`
-	Name      string      `db:"name"`
-	CreatedAt string      `db:"created_at"`
-	DeletedAt null.String `db:"deleted_at"`
+	Id        uuid.UUID   `db:"id" json:"id"`
+	Name      string      `db:"name" json:"name"`
+	CreatedAt string      `db:"created_at" json:"created_at"`
+	DeletedAt null.String `db:"deleted_at" json:"deleted_at"`
 }
 
 func (t Topic) Empty() bool {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,6 +16,7 @@ import (
 
 type Http struct {
 	Stream *BlockQueue[chan io.ResponseMessages]
+	UIPath string
 }
 
 type ctxKeyTopicName string
@@ -27,6 +29,7 @@ func (h *Http) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Route("/topics", func(r chi.Router) {
+		r.Get("/", h.getTopics)
 		r.Post("/", h.createTopic)
 
 		r.Group(func(r chi.Router) {
@@ -44,6 +47,21 @@ func (h *Http) Router() http.Handler {
 			r.Get("/{topicName}/subscribers/{subscriberName}/dlq", h.getDeadLetterMessages)
 			r.Post("/{topicName}/subscribers/{subscriberName}/dlq/{messageId}/replay", h.replayDeadLetterMessage)
 		})
+	})
+
+	// Serve UI
+	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		uiPath := h.UIPath
+		if uiPath == "" {
+			uiPath = "./ui"
+		}
+		fs := http.FileServer(http.Dir(uiPath))
+		// Serve index.html for root, otherwise serve file
+		if r.URL.Path == "/" {
+			http.ServeFile(w, r, filepath.Join(uiPath, "index.html"))
+			return
+		}
+		fs.ServeHTTP(w, r)
 	})
 
 	return r
@@ -411,6 +429,22 @@ func (h *Http) replayDeadLetterMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Message: httpresponse.MessageSuccess,
+	})
+}
+
+func (h *Http) getTopics(w http.ResponseWriter, r *http.Request) {
+	topics, err := h.Stream.getTopics(r.Context(), core.FilterTopic{})
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Data:    topics,
 		Message: httpresponse.MessageSuccess,
 	})
 }
