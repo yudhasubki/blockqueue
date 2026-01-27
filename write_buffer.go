@@ -28,6 +28,7 @@ type writeRequest struct {
 	TopicId   uuid.UUID
 	MessageId string
 	Message   string
+	VisibleAt time.Time
 }
 
 // WriteBufferConfig holds configuration for the write buffer
@@ -76,12 +77,13 @@ func NewWriteBuffer(ctx context.Context, database *db, config WriteBufferConfig)
 }
 
 // Enqueue adds a message to the buffer for batch insertion
-func (w *WriteBuffer) Enqueue(topicId uuid.UUID, messageId, message string) {
+func (w *WriteBuffer) Enqueue(topicId uuid.UUID, messageId, message string, delay time.Duration) {
 	select {
 	case w.messages <- writeRequest{
 		TopicId:   topicId,
 		MessageId: messageId,
 		Message:   message,
+		VisibleAt: time.Now().UTC().Add(delay).Truncate(time.Second),
 	}:
 	case <-w.ctx.Done():
 		slog.Warn("write buffer closed, message dropped",
@@ -191,14 +193,14 @@ func (d *db) batchEnqueueToSubscribers(ctx context.Context, requests []writeRequ
 
 			// Build multi-row INSERT statement
 			// INSERT INTO subscriber_messages (subscriber_id, topic_id, message_id, message, status, visible_at)
-			// VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP), (...), ...
+			// VALUES (?, ?, ?, ?, 'pending', ?), (...), ...
 			valueStrings := make([]string, 0, len(topicRequests)*len(subscribers))
-			valueArgs := make([]interface{}, 0, len(topicRequests)*len(subscribers)*4)
+			valueArgs := make([]interface{}, 0, len(topicRequests)*len(subscribers)*5)
 
 			for _, req := range topicRequests {
 				for _, subId := range subscribers {
-					valueStrings = append(valueStrings, "(?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)")
-					valueArgs = append(valueArgs, subId, topicId, req.MessageId, req.Message)
+					valueStrings = append(valueStrings, "(?, ?, ?, ?, 'pending', ?)")
+					valueArgs = append(valueArgs, subId, topicId, req.MessageId, req.Message, req.VisibleAt.Format("2006-01-02 15:04:05"))
 				}
 			}
 

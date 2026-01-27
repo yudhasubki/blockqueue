@@ -10,8 +10,10 @@ import (
 type MessageStatus string
 
 const (
-	MessageStatusWaiting   MessageStatus = "waiting"
-	MessageStatusDelivered MessageStatus = "delivered"
+	MessageStatusWaiting    MessageStatus = "waiting"
+	MessageStatusDelivered  MessageStatus = "delivered"
+	MessageStatusPending    MessageStatus = "pending"
+	MessageStatusDeadLetter MessageStatus = "dead_letter"
 )
 
 type Message struct {

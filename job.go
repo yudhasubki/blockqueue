@@ -120,6 +120,24 @@ func (job *Job[V]) ackMessage(ctx context.Context, topic core.Topic, subscriberN
 	return listener.deleteRetryMessage(messageId)
 }
 
+func (job *Job[V]) ackMessages(ctx context.Context, topic core.Topic, subscriberName string, messageIds []string) error {
+	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
+	if err != nil {
+		return err
+	}
+
+	listener, exist := job.getListeners(subscriber.Id)
+	if !exist {
+		return ErrListenerNotFound
+	}
+
+	for _, msgId := range messageIds {
+		listener.deleteRetryMessage(msgId)
+	}
+
+	return job.db.ackSubscriberMessages(ctx, subscriber.Id, messageIds)
+}
+
 func (job *Job[V]) addListener(ctx context.Context, topic core.Topic) error {
 	subscribers, err := job.db.getSubscribers(ctx, core.FilterSubscriber{
 		TopicId: []uuid.UUID{topic.Id},
@@ -323,4 +341,35 @@ func (job *Job[V]) delete() error {
 
 		return nil
 	})
+}
+
+func (job *Job[V]) getDeadLetterMessages(ctx context.Context, topic core.Topic, subscriberName string, limit, offset int) (io.ResponseMessages, error) {
+	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
+	if err != nil {
+		return io.ResponseMessages{}, err
+	}
+
+	messages, err := job.db.getDeadLetterMessages(ctx, subscriber.Id, limit, offset)
+	if err != nil {
+		return io.ResponseMessages{}, err
+	}
+
+	response := make(io.ResponseMessages, 0)
+	for _, msg := range messages {
+		response = append(response, io.ResponseMessage{
+			Id:      msg.MessageId,
+			Message: msg.Message,
+		})
+	}
+
+	return response, nil
+}
+
+func (job *Job[V]) restoreDeadLetterMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
+	if err != nil {
+		return err
+	}
+
+	return job.db.restoreDeadLetterMessage(ctx, subscriber.Id, messageId)
 }

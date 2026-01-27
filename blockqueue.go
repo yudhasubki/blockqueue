@@ -136,6 +136,14 @@ func (q *BlockQueue[V]) Publish(ctx context.Context, topic core.Topic, request b
 	return q.publish(ctx, topic, request)
 }
 
+func (q *BlockQueue[V]) BatchPublish(ctx context.Context, topic core.Topic, request []bqio.Publish) error {
+	return q.batchPublish(ctx, topic, request)
+}
+
+func (q *BlockQueue[V]) BatchAck(ctx context.Context, topic core.Topic, subscriberName string, messageIds []string) error {
+	return q.batchAck(ctx, topic, subscriberName, messageIds)
+}
+
 func (q *BlockQueue[V]) GetSubscribersStatus(ctx context.Context, topic core.Topic) (bqio.SubscriberMessages, error) {
 	return q.getSubscribersStatus(ctx, topic)
 }
@@ -217,13 +225,58 @@ func (q *BlockQueue[V]) publish(ctx context.Context, topic core.Topic, request b
 		return ErrJobNotFound
 	}
 
+	// Calculate delay
+	var delay time.Duration
+	if request.Delay != "" {
+		parsed, err := time.ParseDuration(request.Delay)
+		if err != nil {
+			return err
+		}
+		delay = parsed
+	}
+
 	// Generate unique message ID with timestamp prefix
 	messageId := fmt.Sprintf("%d_%s", time.Now().UnixNano(), uuid.NewString()[:8])
 
 	// Use write buffer for batched inserts (better throughput)
-	q.writeBuffer.Enqueue(topic.Id, messageId, request.Message)
+	q.writeBuffer.Enqueue(topic.Id, messageId, request.Message, delay)
 
 	go metric.MessagePublished.Inc()
+
+	return nil
+}
+
+func (q *BlockQueue[V]) batchAck(ctx context.Context, topic core.Topic, subscriberName string, messageIds []string) error {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return ErrJobNotFound
+	}
+
+	return job.ackMessages(ctx, topic, subscriberName, messageIds)
+}
+
+func (q *BlockQueue[V]) batchPublish(ctx context.Context, topic core.Topic, requests []bqio.Publish) error {
+	_, exist := q.getJob(topic)
+	if !exist {
+		return ErrJobNotFound
+	}
+
+	for _, req := range requests {
+		// Calculate delay
+		var delay time.Duration
+		if req.Delay != "" {
+			parsed, err := time.ParseDuration(req.Delay)
+			if err != nil {
+				return err
+			}
+			delay = parsed
+		}
+
+		// Generate unique message ID with timestamp prefix
+		messageId := fmt.Sprintf("%d_%s", time.Now().UnixNano(), uuid.NewString()[:8])
+		q.writeBuffer.Enqueue(topic.Id, messageId, req.Message, delay)
+		go metric.MessagePublished.Inc()
+	}
 
 	return nil
 }
@@ -296,4 +349,20 @@ func (q *BlockQueue[V]) Close() {
 
 func (q *BlockQueue[V]) getTopics(ctx context.Context, filter core.FilterTopic) (core.Topics, error) {
 	return q.db.getTopics(ctx, filter)
+}
+
+func (q *BlockQueue[V]) GetDeadLetterMessages(ctx context.Context, topic core.Topic, subscriberName string, limit, offset int) (bqio.ResponseMessages, error) {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return bqio.ResponseMessages{}, ErrJobNotFound
+	}
+	return job.getDeadLetterMessages(ctx, topic, subscriberName, limit, offset)
+}
+
+func (q *BlockQueue[V]) RestoreDeadLetterMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return ErrJobNotFound
+	}
+	return job.restoreDeadLetterMessage(ctx, topic, subscriberName, messageId)
 }

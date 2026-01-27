@@ -249,11 +249,11 @@ func TestDB_RequeueExpiredMessages(t *testing.T) {
 		err = database.requeueExpiredMessages(ctx, subscriberId, 3, 30*time.Second)
 		require.NoError(t, err)
 
-		// Verify message was deleted
-		var count int
-		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE message_id = ?", messageId)
+		// Verify message was moved to dead_letter
+		var status string
+		err = sqliteDb.Database.Get(&status, "SELECT status FROM subscriber_messages WHERE message_id = ?", messageId)
 		require.NoError(t, err)
-		require.Equal(t, 0, count, "message exceeding max retries should be deleted")
+		require.Equal(t, "dead_letter", status, "message exceeding max retries should be moved to dead_letter")
 	})
 }
 
@@ -362,5 +362,118 @@ func TestDB_BatchEnqueueToSubscribers(t *testing.T) {
 		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE topic_id = ?", topicId)
 		require.NoError(t, err)
 		require.Equal(t, 10, count)
+	})
+}
+
+func TestDB_BatchAckSubscriberMessages(t *testing.T) {
+	t.Run("deletes multiple messages on batch ack", func(t *testing.T) {
+		dbName := "test_db_batch_ack_" + uuid.NewString()[:8]
+		database, sqliteDb, topicId, subscriberId, cleanup := setupDBTestEnv(t, dbName)
+		defer cleanup()
+
+		ctx := context.Background()
+
+		// Enqueue 3 messages
+		msgIds := make([]string, 3)
+		for i := 0; i < 3; i++ {
+			msgIds[i] = uuid.NewString()
+			err := database.enqueueToSubscribers(ctx, topicId, msgIds[i], "test message")
+			require.NoError(t, err)
+		}
+
+		// Batch Ack
+		err := database.ackSubscriberMessages(ctx, subscriberId, msgIds)
+		require.NoError(t, err)
+
+		// Verify all deleted
+		var count int
+		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE subscriber_id = ?", subscriberId)
+		require.NoError(t, err)
+		require.Equal(t, 0, count)
+	})
+}
+
+func TestDB_DLQ(t *testing.T) {
+	t.Run("moves expired max retry messages to DLQ", func(t *testing.T) {
+		dbName := "test_db_dlq_" + uuid.NewString()[:8]
+		database, sqliteDb, topicId, subscriberId, cleanup := setupDBTestEnv(t, dbName)
+		defer cleanup()
+
+		ctx := context.Background()
+		messageId := uuid.NewString()
+
+		// Enqueue
+		err := database.enqueueToSubscribers(ctx, topicId, messageId, "test dlq")
+		require.NoError(t, err)
+
+		// Set to max retry and expired
+		_, err = sqliteDb.Database.Exec(
+			"UPDATE subscriber_messages SET status = 'delivered', retry_count = 5, visible_at = datetime('now', '-1 minute') WHERE message_id = ?",
+			messageId,
+		)
+		require.NoError(t, err)
+
+		// Requeue (limit 3)
+		err = database.requeueExpiredMessages(ctx, subscriberId, 3, 30*time.Second)
+		require.NoError(t, err)
+
+		// Verify is dead letter
+		var status string
+		err = sqliteDb.Database.Get(&status, "SELECT status FROM subscriber_messages WHERE message_id = ?", messageId)
+		require.NoError(t, err)
+		require.Equal(t, "dead_letter", status)
+	})
+
+	t.Run("retrieves DLQ messages", func(t *testing.T) {
+		dbName := "test_db_getdlq_" + uuid.NewString()[:8]
+		database, sqliteDb, topicId, subscriberId, cleanup := setupDBTestEnv(t, dbName)
+		defer cleanup()
+
+		ctx := context.Background()
+		messageId := uuid.NewString()
+
+		// Manually insert dead letter
+		_, err := sqliteDb.Database.Exec(
+			"INSERT INTO subscriber_messages (subscriber_id, topic_id, message_id, message, status, created_at) VALUES (?, ?, ?, ?, 'dead_letter', CURRENT_TIMESTAMP)",
+			subscriberId, topicId, messageId, "dead message",
+		)
+		require.NoError(t, err)
+
+		// Get DLQ
+		messages, err := database.getDeadLetterMessages(ctx, subscriberId, 10, 0)
+		require.NoError(t, err)
+		require.Len(t, messages, 1)
+		require.Equal(t, messageId, messages[0].MessageId)
+	})
+
+	t.Run("restores DLQ message to pending", func(t *testing.T) {
+		dbName := "test_db_restoredlq_" + uuid.NewString()[:8]
+		database, sqliteDb, topicId, subscriberId, cleanup := setupDBTestEnv(t, dbName)
+		defer cleanup()
+
+		ctx := context.Background()
+		messageId := uuid.NewString()
+
+		// Manually insert dead letter
+		_, err := sqliteDb.Database.Exec(
+			"INSERT INTO subscriber_messages (subscriber_id, topic_id, message_id, message, status, created_at, retry_count) VALUES (?, ?, ?, ?, 'dead_letter', CURRENT_TIMESTAMP, 5)",
+			subscriberId, topicId, messageId, "dead message",
+		)
+		require.NoError(t, err)
+
+		// Restore
+		err = database.restoreDeadLetterMessage(ctx, subscriberId, messageId)
+		require.NoError(t, err)
+
+		// Verify status pending and retry 0
+		var status string
+		var retryCount int
+		err = sqliteDb.Database.Get(&status, "SELECT status FROM subscriber_messages WHERE message_id = ?", messageId)
+		require.NoError(t, err)
+		require.Equal(t, "pending", status)
+
+		err = sqliteDb.Database.Get(&retryCount, "SELECT retry_count FROM subscriber_messages WHERE message_id = ?", messageId)
+		require.NoError(t, err)
+		require.Equal(t, 0, retryCount)
 	})
 }

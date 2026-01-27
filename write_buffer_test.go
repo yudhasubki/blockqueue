@@ -62,7 +62,7 @@ func TestWriteBuffer_BatchFlush(t *testing.T) {
 
 		// Enqueue exactly batch size messages
 		for i := 0; i < 5; i++ {
-			wb.Enqueue(topicId, uuid.NewString(), "test message")
+			wb.Enqueue(topicId, uuid.NewString(), "test message", 0)
 		}
 
 		// Wait for flush
@@ -110,7 +110,7 @@ func TestWriteBuffer_TimeFlush(t *testing.T) {
 
 		// Enqueue less than batch size
 		for i := 0; i < 3; i++ {
-			wb.Enqueue(topicId, uuid.NewString(), "test message")
+			wb.Enqueue(topicId, uuid.NewString(), "test message", 0)
 		}
 
 		// Wait for time-based flush
@@ -156,7 +156,7 @@ func TestWriteBuffer_GracefulClose(t *testing.T) {
 
 		// Enqueue messages
 		for i := 0; i < 7; i++ {
-			wb.Enqueue(topicId, uuid.NewString(), "test message")
+			wb.Enqueue(topicId, uuid.NewString(), "test message", 0)
 		}
 
 		// Small delay to ensure messages are in the channel
@@ -221,8 +221,8 @@ func TestWriteBuffer_MultiTopic(t *testing.T) {
 
 		// Enqueue to both topics
 		for i := 0; i < 3; i++ {
-			wb.Enqueue(topic1Id, uuid.NewString(), "topic1 message")
-			wb.Enqueue(topic2Id, uuid.NewString(), "topic2 message")
+			wb.Enqueue(topic1Id, uuid.NewString(), "topic1 message", 0)
+			wb.Enqueue(topic2Id, uuid.NewString(), "topic2 message", 0)
 		}
 
 		// Wait for flush
@@ -281,7 +281,7 @@ func TestWriteBuffer_Concurrent(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < msgCount/goroutines; i++ {
-					wb.Enqueue(topicId, uuid.NewString(), "concurrent message")
+					wb.Enqueue(topicId, uuid.NewString(), "concurrent message", 0)
 				}
 			}()
 		}

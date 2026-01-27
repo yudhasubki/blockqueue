@@ -33,12 +33,16 @@ func (h *Http) Router() http.Handler {
 			r.Use(h.topicExist)
 			r.Delete("/{topicName}", h.deleteTopic)
 			r.Post("/{topicName}/messages", h.publish)
+			r.Post("/{topicName}/messages/batch", h.batchPublish)
 
 			r.Get("/{topicName}/subscribers", h.getSubscribers)
 			r.Post("/{topicName}/subscribers", h.createSubscriber)
 			r.Delete("/{topicName}/subscribers/{subscriberName}", h.deleteSubscriber)
 			r.Get("/{topicName}/subscribers/{subscriberName}", h.readSubscriber)
 			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/{messageId}", h.ackMessage)
+			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/batch", h.batchAckMessage)
+			r.Get("/{topicName}/subscribers/{subscriberName}/dlq", h.getDeadLetterMessages)
+			r.Post("/{topicName}/subscribers/{subscriberName}/dlq/{messageId}/replay", h.replayDeadLetterMessage)
 		})
 	})
 
@@ -162,6 +166,36 @@ func (h *Http) publish(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Http) batchPublish(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic   = h.getTopic(r.Context())
+		request []io.Publish
+	)
+
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		slog.Error("[BatchPublish][json.NewDecoder] error decode message", "error", err)
+		httpresponse.Write(w, http.StatusBadRequest, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	err = h.Stream.BatchPublish(r.Context(), topic, request)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Message: httpresponse.MessageSuccess,
+	})
+}
+
 // GetSubscribers is endpoint to get metadata of subscribers before it claimed to consumer bucket
 func (h *Http) getSubscribers(w http.ResponseWriter, r *http.Request) {
 	var (
@@ -268,6 +302,36 @@ func (h *Http) ackMessage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Http) batchAckMessage(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+		request    []string
+	)
+
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		httpresponse.Write(w, http.StatusBadRequest, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	err = h.Stream.BatchAck(r.Context(), topic, subscriber, request)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Message: httpresponse.MessageSuccess,
+	})
+}
+
 func (h *Http) topicExist(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topicName := chi.URLParam(r, "topicName")
@@ -307,4 +371,46 @@ func (h *Http) getTopic(ctx context.Context) core.Topic {
 	}
 
 	return core.Topic{}
+}
+
+func (h *Http) getDeadLetterMessages(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+	)
+
+	messages, err := h.Stream.GetDeadLetterMessages(r.Context(), topic, subscriber, 100, 0)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Data:    messages,
+		Message: httpresponse.MessageSuccess,
+	})
+}
+
+func (h *Http) replayDeadLetterMessage(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+		messageId  = chi.URLParam(r, "messageId")
+	)
+
+	err := h.Stream.RestoreDeadLetterMessage(r.Context(), topic, subscriber, messageId)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Message: httpresponse.MessageSuccess,
+	})
 }

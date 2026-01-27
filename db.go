@@ -319,6 +319,32 @@ func (d *db) ackSubscriberMessage(ctx context.Context, subscriberId uuid.UUID, m
 	return nil
 }
 
+// ackSubscriberMessages deletes multiple messages after successful processing
+func (d *db) ackSubscriberMessages(ctx context.Context, subscriberId uuid.UUID, messageIds []string) error {
+	if len(messageIds) == 0 {
+		return nil
+	}
+
+	query, args, err := sqlx.In(
+		"DELETE FROM subscriber_messages WHERE subscriber_id = ? AND message_id IN (?)",
+		subscriberId, messageIds,
+	)
+	if err != nil {
+		return err
+	}
+
+	result, err := d.Database.Conn().ExecContext(ctx, d.Database.Conn().Rebind(query), args...)
+	if err != nil {
+		return err
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
 // getSubscriberQueueStats returns pending and delivered message counts
 func (d *db) getSubscriberQueueStats(ctx context.Context, subscriberId uuid.UUID) (SubscriberQueueStats, error) {
 	var stats SubscriberQueueStats
@@ -340,9 +366,9 @@ func (d *db) getSubscriberQueueStats(ctx context.Context, subscriberId uuid.UUID
 
 // requeueExpiredMessages moves expired delivered messages back to pending, or deletes if max retries exceeded
 func (d *db) requeueExpiredMessages(ctx context.Context, subscriberId uuid.UUID, maxRetries int, visibilityDuration time.Duration) error {
-	// Delete messages that exceeded max retries
+	// Move messages that exceeded max retries to dead letter
 	_, err := d.Database.Conn().ExecContext(ctx,
-		d.Database.Conn().Rebind("DELETE FROM subscriber_messages WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP AND retry_count >= ?"),
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'dead_letter' WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP AND retry_count >= ?"),
 		subscriberId, maxRetries,
 	)
 	if err != nil {
@@ -374,4 +400,32 @@ func (d *db) deleteTopicMessages(ctx context.Context, topicId uuid.UUID) error {
 		topicId,
 	)
 	return err
+}
+
+// getDeadLetterMessages retrieves messages in dead_letter status
+func (d *db) getDeadLetterMessages(ctx context.Context, subscriberId uuid.UUID, limit int, offset int) (SubscriberMessages, error) {
+	messages := make(SubscriberMessages, 0)
+	err := d.Database.Conn().SelectContext(ctx, &messages,
+		d.Database.Conn().Rebind("SELECT * FROM subscriber_messages WHERE subscriber_id = ? AND status = 'dead_letter' ORDER BY created_at DESC LIMIT ? OFFSET ?"),
+		subscriberId, limit, offset,
+	)
+	return messages, err
+}
+
+// restoreDeadLetterMessage moves a dead letter message back to pending
+func (d *db) restoreDeadLetterMessage(ctx context.Context, subscriberId uuid.UUID, messageId string) error {
+	result, err := d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = 0, visible_at = CURRENT_TIMESTAMP WHERE subscriber_id = ? AND message_id = ? AND status = 'dead_letter'"),
+		subscriberId, messageId,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrMessageNotFound
+	}
+
+	return nil
 }
