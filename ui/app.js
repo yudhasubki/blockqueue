@@ -345,7 +345,9 @@ async function openInspect(subscriberName) {
                     </div>
                     <div style="display: flex; gap: 0.5rem; align-items: center;">
                         <span class="status-badge ${m.status === 'pending' ? 'warning' : 'success'}">${m.status}</span>
-                        ${m.retry_count > 0 ? `<span class="status-badge warning" title="Retries"><i class="fa-solid fa-rotate-right"></i> ${m.retry_count}</span>` : ''}
+                         <button class="btn btn-sm btn-primary" onclick="ackMessage('${subscriberName}', '${m.id}')" title="Ack Message" style="padding: 0.2rem 0.6rem; font-size: 0.7rem;">
+                            <i class="fa-solid fa-check"></i> Ack
+                        </button>
                     </div>
                 </div>
                 <div style="background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 0.5rem; width: 100%; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem;">${m.message}</div>
@@ -359,6 +361,25 @@ async function openInspect(subscriberName) {
 
     } catch (err) {
         content.innerHTML = `<div style="color:var(--error-color)">Error: ${err.message}</div>`;
+    }
+}
+
+async function ackMessage(subscriberName, messageId) {
+    if (!confirm('Are you sure you want to ACK (delete) this message?')) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/messages/${messageId}`, {
+            method: 'DELETE'
+        });
+        if (!res.ok) throw new Error('Failed to ack message');
+
+        showToast('Message acknowledged');
+        // Refresh list
+        openInspect(subscriberName);
+        // Refresh stats
+        selectTopic(currentTopic.name);
+    } catch (err) {
+        showToast('Error acking message: ' + err.message, 'error');
     }
 }
 
@@ -403,4 +424,5 @@ window.deleteSubscriber = deleteSubscriber;
 window.openDLQ = openDLQ;
 window.openInspect = openInspect;
 window.replayDLQ = replayDLQ;
+window.ackMessage = ackMessage;
 selectTopic = selectTopic; // Make sure this is accessible for topic list click
