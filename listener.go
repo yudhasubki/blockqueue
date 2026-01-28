@@ -64,6 +64,7 @@ type Listener[V chan blockio.ResponseMessages] struct {
 	option     listenerOption
 	response   chan chan eventListener
 	metric     *listenerMetric
+	signal     chan struct{}
 }
 
 type listenerOption struct {
@@ -104,6 +105,7 @@ func newListener[V chan blockio.ResponseMessages](serverCtx context.Context, job
 			totalEnqueue:         metric.TotalFlightRequestQueueSubscriber(jobId, subscriber.Name),
 			totalConsumedMessage: metric.TotalConsumedMessage(jobId, subscriber.Name),
 		},
+		signal: make(chan struct{}, 1),
 	}
 	prometheus.Register(listener.metric.totalEnqueue)
 	prometheus.Register(listener.metric.totalConsumedMessage)
@@ -303,6 +305,8 @@ func (listener *Listener[V]) watcher() {
 				"shutdown", listener.onShutdown,
 			)
 			return
+		case <-listener.signal:
+			// Signal received, proceed to poll immediate
 		case <-ticker.C:
 			ticker.Stop()
 
@@ -379,5 +383,12 @@ func (listener *Listener[V]) retryWatcher() {
 
 			time.Sleep(1 * time.Second)
 		}
+	}
+}
+
+func (listener *Listener[V]) Notify() {
+	select {
+	case listener.signal <- struct{}{}:
+	default:
 	}
 }

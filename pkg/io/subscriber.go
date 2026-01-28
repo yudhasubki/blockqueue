@@ -39,13 +39,9 @@ func (s *SubscriberOpt) Marshal() []byte {
 		s.MaxAttempts = 1
 	}
 
-	parse, err := time.ParseDuration(s.VisibilityDuration)
+	_, err := time.ParseDuration(s.VisibilityDuration)
 	if err != nil {
 		s.VisibilityDuration = "5m"
-	} else {
-		if parse.Minutes() < 5 {
-			s.VisibilityDuration = "1m"
-		}
 	}
 
 	b, _ := json.Marshal(s)

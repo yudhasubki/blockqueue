@@ -37,6 +37,7 @@ func init() {
 type BlockQueueOption struct {
 	WriteBufferConfig  WriteBufferConfig
 	CheckpointInterval time.Duration // Default: 30s
+	RetentionPeriod    time.Duration // Default: 7d
 }
 
 func New[V chan bqio.ResponseMessages](driver Driver, opt BlockQueueOption) *BlockQueue[V] {
@@ -66,10 +67,12 @@ func (q *BlockQueue[V]) Run(ctx context.Context) error {
 	if wbConfig.BatchSize == 0 && wbConfig.FlushInterval == 0 && wbConfig.BufferSize == 0 {
 		wbConfig = DefaultWriteBufferConfig()
 	}
+	wbConfig.Notify = q.notify
 	q.writeBuffer = NewWriteBuffer(qCtx, q.db, wbConfig)
 
 	// Start checkpoint goroutine to prevent WAL bloat
 	go q.startCheckpointer()
+	go q.startPruner()
 
 	for _, topic := range topics {
 		job, err := newJob[V](qCtx, topic, q.db)
@@ -111,6 +114,30 @@ func (q *BlockQueue[V]) startCheckpointer() {
 			_, err := q.db.Database.Conn().Exec("PRAGMA wal_checkpoint(PASSIVE)")
 			if err != nil {
 				slog.Error("error checkpoint", logPrefixErr, err)
+			}
+		}
+	}
+}
+
+// startPruner runs periodic cleanup of processed messages
+func (q *BlockQueue[V]) startPruner() {
+	retention := q.Opt.RetentionPeriod
+	if retention <= 0 {
+		retention = 7 * 24 * time.Hour // Default 7 days
+	}
+
+	// Run every hour
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-q.serverCtx.Done():
+			return
+		case <-ticker.C:
+			err := q.db.pruneProcessedMessages(q.serverCtx, retention)
+			if err != nil {
+				slog.Error("error pruning messages", logPrefixErr, err)
 			}
 		}
 	}
@@ -180,9 +207,11 @@ func (q *BlockQueue[V]) addJob(ctx context.Context, topic core.Topic, subscriber
 			return err
 		}
 
-		err = q.db.createTxSubscribers(ctx, tx, subscribers)
-		if err != nil {
-			return err
+		if len(subscribers) > 0 {
+			err = q.db.createTxSubscribers(ctx, tx, subscribers)
+			if err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -372,10 +401,32 @@ func (q *BlockQueue[V]) GetDeadLetterMessages(ctx context.Context, topic core.To
 	return job.getDeadLetterMessages(ctx, topic, subscriberName, limit, offset)
 }
 
+func (q *BlockQueue[V]) GetUnackedMessages(ctx context.Context, topic core.Topic, subscriberName string, limit, offset int) (bqio.ResponseMessages, error) {
+	job, exist := q.getJob(topic)
+	if !exist {
+		return bqio.ResponseMessages{}, ErrJobNotFound
+	}
+	return job.getUnackedMessages(ctx, topic, subscriberName, limit, offset)
+}
+
 func (q *BlockQueue[V]) RestoreDeadLetterMessage(ctx context.Context, topic core.Topic, subscriberName, messageId string) error {
 	job, exist := q.getJob(topic)
 	if !exist {
 		return ErrJobNotFound
 	}
 	return job.restoreDeadLetterMessage(ctx, topic, subscriberName, messageId)
+}
+
+func (q *BlockQueue[V]) notify(topicId uuid.UUID) {
+	go func() {
+		q.mtx.Lock()
+		defer q.mtx.Unlock()
+
+		for _, job := range q.jobs {
+			if job.Id == topicId {
+				job.Notify()
+				break
+			}
+		}
+	}()
 }

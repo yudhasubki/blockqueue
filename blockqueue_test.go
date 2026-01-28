@@ -325,9 +325,6 @@ func TestBlockQueuePublishAndRead(t *testing.T) {
 		})
 	})
 
-	// Note: Full end-to-end requeue via retryWatcher is complex to test reliably
-	// due to timing dependencies. The db layer test (TestDB_RequeueExpiredMessages)
-	// validates the core requeue logic. This test verifies the visibility status change.
 	t.Run("visibility timeout - message status changes on dequeue", func(t *testing.T) {
 		dbName := "test_requeue_" + fmt.Sprintf("%d", time.Now().UnixNano())
 		sqliteDb, err := sqlite.New(dbName, sqlite.Config{

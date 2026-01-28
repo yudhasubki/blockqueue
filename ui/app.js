@@ -24,19 +24,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Navigation & Topics
 async function fetchTopics() {
-    // There is no direct "list all topics" endpoint in the provided http.go
-    // It seems we only have getTopics by name filter or accessing specific topic
-    // Wait, the http.go implementation of createTopic checks if topic exists using Stream.getTopics.
-    // However, there is no public endpoint exposed to list ALL topics without filter.
-    // I might need to update http.go to allow listing all topics if no filter provided.
-    // For now, let's assume I'll add `GET /topics` support to http.go or I mock it.
-    // Actually, `http.go` has `r.Route("/topics", ...)` but NO `r.Get("/", ...)` to list all.
-    // It only has `r.Post("/", h.createTopic)`.
-
-    // WORKAROUND: For this demo, since I cannot list topics easily without modifying backend to support it,
-    // I will modify backend to support listing topics.
-    // For now in JS, I will proceed assuming the endpoint will exist.
-
     try {
         const res = await fetch(`${API_BASE}/topics`);
         if (res.ok) {
@@ -60,24 +47,14 @@ function renderTopics() {
 }
 
 async function selectTopic(name) {
-    // Because we don't have full topic list initially maybe, or to get fresh details
-    // We can use the check endpoint or just switch view if we have data.
-    // Since http.go uses topicName param for all operations, we store the name.
-
     // We need to fetch subscribers status which gives us topic metadata + subscribers
     try {
         const res = await fetch(`${API_BASE}/topics/${name}/subscribers`);
         if (!res.ok) throw new Error('Failed to load topic details');
 
         const response = await res.json();
-        // The endpoint returns `[]io.SubscriberStatus`
-        // We'll assume the topic exists if we get data.
 
         const statusData = response.data || [];
-
-        // Find topic info from our local list if available, or construct it
-        // Since getSubscribersStatus returns data grouped by subscriber, we need to aggregate or finding the topic id from somewhere.
-        // Actually `io.SubscriberStatus` contains `TopicId`.
 
         const topicId = statusData.length > 0 ? statusData[0].topic_id : 'Unknown'; /* We need to fix this in backend if topic has no subscribers */
 
@@ -129,7 +106,10 @@ function renderSubscribers(subscribers) {
                     ${s.unacked_message}
                 </div>
                 <div class="stat-item">
-                    <button class="btn btn-sm btn-danger" onclick="openDLQ('${s.name}')" title="View Dead Letter Queue">
+                     <button class="btn btn-sm btn-primary" onclick="openInspect('${s.name}')" title="Inspect Queue">
+                         <i class="fa-solid fa-eye"></i> Peek
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick="openDLQ('${s.name}')" title="View Dead Letter Queue" style="margin-left: 0.5rem">
                          <i class="fa-solid fa-skull"></i> DLQ
                     </button>
                      <button class="btn btn-sm btn-danger" onclick="deleteSubscriber('${s.name}')" title="Delete Subscriber" style="margin-left: 0.5rem">
@@ -160,8 +140,9 @@ async function handleCreateTopic(e) {
         e.target.reset();
         fetchTopics(); // Reload list
         selectTopic(name);
+        showToast('Topic created!');
     } catch (err) {
-        alert('Error creating topic: ' + err.message);
+        showToast('Error creating topic: ' + err.message, 'error');
     }
 }
 
@@ -176,14 +157,22 @@ async function deleteTopic() {
         dashboardView.style.display = 'flex';
         topicView.style.display = 'none';
         fetchTopics();
+        showToast('Topic deleted');
     } catch (err) {
-        alert('Error deleting topic: ' + err.message);
+        showToast('Error deleting topic: ' + err.message, 'error');
     }
 }
 
 async function handlePublish(e) {
     e.preventDefault();
     if (!currentTopic) return;
+
+    const btn = e.target.querySelector('button[type="submit"]');
+    const originalText = btn.innerHTML;
+
+    // Set loading state
+    btn.classList.add('loading');
+    btn.innerHTML = ''; // Hide text/icon, spinner shown via CSS
 
     const formData = new FormData(e.target);
     const message = formData.get('message');
@@ -203,17 +192,46 @@ async function handlePublish(e) {
 
         closeModal('publishModal');
         e.target.reset();
-        selectTopic(currentTopic.name); // Refresh stats
 
-        // Show success toast (mock)
-        const btn = document.querySelector('button[type="submit"]');
-        const originalText = btn.innerText;
-        btn.innerText = 'Published!';
-        setTimeout(() => btn.innerText = originalText, 1000);
+        showToast('Message published successfully!', 'success');
+
+        // Small delay to ensure DB write is visible in stats
+        setTimeout(() => {
+            selectTopic(currentTopic.name);
+        }, 300);
 
     } catch (err) {
-        alert('Error publishing: ' + err.message);
+        showToast('Error publishing: ' + err.message, 'error');
+    } finally {
+        // Reset button
+        btn.classList.remove('loading');
+        btn.innerHTML = originalText;
     }
+}
+
+function showToast(message, type = 'success') {
+    const container = document.getElementById('toastContainer');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+
+    const icon = type === 'success'
+        ? '<i class="fa-solid fa-circle-check"></i>'
+        : '<i class="fa-solid fa-circle-exclamation"></i>';
+
+    toast.innerHTML = `${icon} <span>${message}</span>`;
+
+    container.appendChild(toast);
+
+    // Trigger animation
+    requestAnimationFrame(() => {
+        toast.classList.add('show');
+    });
+
+    // Remove after 3s
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
 }
 
 async function handleCreateSubscriber(e) {
@@ -230,31 +248,21 @@ async function handleCreateSubscriber(e) {
     try {
         const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers`, {
             method: 'POST',
-            body: JSON.stringify({
+            body: JSON.stringify([{
                 name,
-                subscribers: [{ name, option }] // The API expects nested structure based on payload on http.go?
-                // Checking http.go createSubscriber:
-                // it decodes `io.Subscribers` which is `[]Subscriber`.
-                // inside it accepts `request.Subscriber(topic.Id)`.
-                // Wait, the API `POST /step1/subscribers` expects `io.Subscribers` JSON?
-                // Let's check `io.Subscribers` struct.
-                // It seems to be `type Subscribers []Subscriber`.
-            }),
+                option
+            }]),
             headers: { 'Content-Type': 'application/json' }
         });
-
-        // Actually, looking at `http.go`:
-        // err := json.NewDecoder(r.Body).Decode(&request) -> request is io.Subscribers
-        // io.Subscribers is likely a list.
-        // So we should send `[{ "name": "...", "option": {...} }]`
 
         if (!res.ok) throw new Error(await res.text());
 
         closeModal('createSubscriberModal');
         e.target.reset();
         selectTopic(currentTopic.name);
+        showToast('Subscriber created');
     } catch (err) {
-        alert('Error creating subscriber: ' + err.message);
+        showToast('Error creating subscriber: ' + err.message, 'error');
     }
 }
 
@@ -265,8 +273,9 @@ async function deleteSubscriber(name) {
         const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${name}`, { method: 'DELETE' });
         if (!res.ok) throw new Error(await res.text());
         selectTopic(currentTopic.name);
+        showToast('Subscriber deleted');
     } catch (err) {
-        alert('Error deleting subscriber: ' + err.message);
+        showToast('Error deleting subscriber: ' + err.message, 'error');
     }
 }
 
@@ -307,6 +316,52 @@ async function openDLQ(subscriberName) {
     }
 }
 
+async function openInspect(subscriberName) {
+    const modal = document.getElementById('inspectModal');
+    const content = document.getElementById('inspectContent');
+    content.innerHTML = '<div style="text-align:center">Loading...</div>';
+    openModal('inspectModal');
+
+    try {
+        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/messages`);
+        if (!res.ok) throw new Error('Failed to fetch messages');
+
+        const response = await res.json();
+        const messages = response.data || [];
+
+        if (messages.length === 0) {
+            content.innerHTML = '<div style="text-align:center; padding: 2rem;">Queue is empty (no pending/delivered messages)</div>';
+            return;
+        }
+
+        content.innerHTML = messages.map(m => `
+            <div class="subscriber-card" style="margin-bottom: 0.5rem; flex-direction: column; align-items: flex-start;">
+                <div style="width: 100%; display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.5rem;">
+                     <div>
+                        <div style="font-family:monospace; font-size:0.75rem; opacity:0.6">${m.id}</div>
+                        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.1rem;">
+                            <i class="fa-regular fa-clock"></i> ${new Date(m.created_at).toLocaleString()}
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <span class="status-badge ${m.status === 'pending' ? 'warning' : 'success'}">${m.status}</span>
+                        ${m.retry_count > 0 ? `<span class="status-badge warning" title="Retries"><i class="fa-solid fa-rotate-right"></i> ${m.retry_count}</span>` : ''}
+                    </div>
+                </div>
+                <div style="background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 0.5rem; width: 100%; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem;">${m.message}</div>
+                ${m.status === 'delivered' ? `
+                    <div style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--accent-color);">
+                        <i class="fa-solid fa-stopwatch"></i> Visible again at: ${new Date(m.visible_at).toLocaleTimeString()}
+                    </div>
+                ` : ''}
+            </div>
+        `).join('');
+
+    } catch (err) {
+        content.innerHTML = `<div style="color:var(--error-color)">Error: ${err.message}</div>`;
+    }
+}
+
 async function replayDLQ(subscriberName, messageId) {
     try {
         const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/dlq/${messageId}/replay`, {
@@ -318,8 +373,9 @@ async function replayDLQ(subscriberName, messageId) {
         openDLQ(subscriberName);
         // Refresh stats
         selectTopic(currentTopic.name);
+        showToast('Message replayed');
     } catch (err) {
-        alert('Error replaying message: ' + err.message);
+        showToast('Error replaying message: ' + err.message, 'error');
     }
 }
 
@@ -345,5 +401,6 @@ window.handleCreateSubscriber = handleCreateSubscriber;
 window.deleteTopic = deleteTopic;
 window.deleteSubscriber = deleteSubscriber;
 window.openDLQ = openDLQ;
+window.openInspect = openInspect;
 window.replayDLQ = replayDLQ;
 selectTopic = selectTopic; // Make sure this is accessible for topic list click

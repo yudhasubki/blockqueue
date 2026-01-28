@@ -330,6 +330,7 @@ func runBenchMigrate(b *testing.B, db *sqlite.SQLite) {
 		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_poll ON subscriber_messages(subscriber_id, status, visible_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_ack ON subscriber_messages(message_id, subscriber_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_topic ON subscriber_messages(topic_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_pending ON subscriber_messages(subscriber_id, visible_at) WHERE status = 'pending'`,
 	}
 
 	for _, migration := range migrations {

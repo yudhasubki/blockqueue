@@ -126,13 +126,9 @@ func (job *Job[V]) ackMessages(ctx context.Context, topic core.Topic, subscriber
 		return err
 	}
 
-	listener, exist := job.getListeners(subscriber.Id)
+	_, exist := job.getListeners(subscriber.Id)
 	if !exist {
 		return ErrListenerNotFound
-	}
-
-	for _, msgId := range messageIds {
-		listener.deleteRetryMessage(msgId)
 	}
 
 	return job.db.ackSubscriberMessages(ctx, subscriber.Id, messageIds)
@@ -358,8 +354,38 @@ func (job *Job[V]) getDeadLetterMessages(ctx context.Context, topic core.Topic, 
 	response := make(io.ResponseMessages, 0)
 	for _, msg := range messages {
 		response = append(response, io.ResponseMessage{
-			Id:      msg.MessageId,
-			Message: msg.Message,
+			Id:         msg.MessageId,
+			Message:    msg.Message,
+			Status:     msg.Status,
+			RetryCount: msg.RetryCount,
+			VisibleAt:  msg.VisibleAt.Format(time.RFC3339),
+			CreatedAt:  msg.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	return response, nil
+}
+
+func (job *Job[V]) getUnackedMessages(ctx context.Context, topic core.Topic, subscriberName string, limit, offset int) (io.ResponseMessages, error) {
+	subscriber, err := job.getSubscribers(ctx, topic, subscriberName)
+	if err != nil {
+		return io.ResponseMessages{}, err
+	}
+
+	messages, err := job.db.getUnackedMessages(ctx, subscriber.Id, limit, offset)
+	if err != nil {
+		return io.ResponseMessages{}, err
+	}
+
+	response := make(io.ResponseMessages, 0)
+	for _, msg := range messages {
+		response = append(response, io.ResponseMessage{
+			Id:         msg.MessageId,
+			Message:    msg.Message,
+			Status:     msg.Status,
+			RetryCount: msg.RetryCount,
+			VisibleAt:  msg.VisibleAt.Format(time.RFC3339),
+			CreatedAt:  msg.CreatedAt.Format(time.RFC3339),
 		})
 	}
 
@@ -373,4 +399,13 @@ func (job *Job[V]) restoreDeadLetterMessage(ctx context.Context, topic core.Topi
 	}
 
 	return job.db.restoreDeadLetterMessage(ctx, subscriber.Id, messageId)
+}
+
+func (job *Job[V]) Notify() {
+	job.mtx.Lock()
+	defer job.mtx.Unlock()
+
+	for _, listener := range job.listeners {
+		listener.Notify()
+	}
 }

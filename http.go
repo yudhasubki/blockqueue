@@ -45,6 +45,7 @@ func (h *Http) Router() http.Handler {
 			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/{messageId}", h.ackMessage)
 			r.Delete("/{topicName}/subscribers/{subscriberName}/messages/batch", h.batchAckMessage)
 			r.Get("/{topicName}/subscribers/{subscriberName}/dlq", h.getDeadLetterMessages)
+			r.Get("/{topicName}/subscribers/{subscriberName}/messages", h.getUnackedMessages)
 			r.Post("/{topicName}/subscribers/{subscriberName}/dlq/{messageId}/replay", h.replayDeadLetterMessage)
 		})
 	})
@@ -435,6 +436,27 @@ func (h *Http) getTopics(w http.ResponseWriter, r *http.Request) {
 
 	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
 		Data:    topics,
+		Message: httpresponse.MessageSuccess,
+	})
+}
+
+func (h *Http) getUnackedMessages(w http.ResponseWriter, r *http.Request) {
+	var (
+		topic      = h.getTopic(r.Context())
+		subscriber = chi.URLParam(r, "subscriberName")
+	)
+
+	messages, err := h.Stream.GetUnackedMessages(r.Context(), topic, subscriber, 100, 0)
+	if err != nil {
+		httpresponse.Write(w, http.StatusInternalServerError, &httpresponse.Response{
+			Error:   err.Error(),
+			Message: httpresponse.MessageFailure,
+		})
+		return
+	}
+
+	httpresponse.Write(w, http.StatusOK, &httpresponse.Response{
+		Data:    messages,
 		Message: httpresponse.MessageSuccess,
 	})
 }

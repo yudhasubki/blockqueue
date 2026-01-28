@@ -3,6 +3,7 @@ package blockqueue
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -261,17 +262,18 @@ func (d *db) enqueueToSubscribers(ctx context.Context, topicId uuid.UUID, messag
 // dequeueMessages fetches and marks messages as delivered atomically
 func (d *db) dequeueMessages(ctx context.Context, subscriberId uuid.UUID, limit int, visibilityDuration time.Duration) (SubscriberMessages, error) {
 	messages := make(SubscriberMessages, 0)
+	now := time.Now()
 
 	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		// Select pending messages that are visible
 		selectQuery := `
 			SELECT id, subscriber_id, topic_id, message_id, message, status, retry_count, visible_at, created_at
 			FROM subscriber_messages
-			WHERE subscriber_id = ? AND status = 'pending' AND visible_at <= CURRENT_TIMESTAMP
+			WHERE subscriber_id = ? AND status = 'pending' AND visible_at <= ?
 			ORDER BY created_at ASC
 			LIMIT ?
 		`
-		err := tx.SelectContext(ctx, &messages, tx.Rebind(selectQuery), subscriberId, limit)
+		err := tx.SelectContext(ctx, &messages, tx.Rebind(selectQuery), subscriberId, now, limit)
 		if err != nil {
 			return err
 		}
@@ -288,7 +290,7 @@ func (d *db) dequeueMessages(ctx context.Context, subscriberId uuid.UUID, limit 
 
 		visibleAt := time.Now().Add(visibilityDuration)
 		updateQuery, args, err := sqlx.In(
-			"UPDATE subscriber_messages SET status = 'delivered', visible_at = ? WHERE id IN (?)",
+			"UPDATE subscriber_messages SET status = 'delivered', visible_at = ?, retry_count = retry_count + 1 WHERE id IN (?)",
 			visibleAt, ids,
 		)
 		if err != nil {
@@ -305,7 +307,7 @@ func (d *db) dequeueMessages(ctx context.Context, subscriberId uuid.UUID, limit 
 // ackSubscriberMessage deletes a message after successful processing
 func (d *db) ackSubscriberMessage(ctx context.Context, subscriberId uuid.UUID, messageId string) error {
 	result, err := d.Database.Conn().ExecContext(ctx,
-		"DELETE FROM subscriber_messages WHERE subscriber_id = ? AND message_id = ?",
+		"UPDATE subscriber_messages SET status = 'processed' WHERE subscriber_id = ? AND message_id = ?",
 		subscriberId, messageId,
 	)
 	if err != nil {
@@ -326,7 +328,7 @@ func (d *db) ackSubscriberMessages(ctx context.Context, subscriberId uuid.UUID, 
 	}
 
 	query, args, err := sqlx.In(
-		"DELETE FROM subscriber_messages WHERE subscriber_id = ? AND message_id IN (?)",
+		"UPDATE subscriber_messages SET status = 'processed' WHERE subscriber_id = ? AND message_id IN (?)",
 		subscriberId, messageIds,
 	)
 	if err != nil {
@@ -366,20 +368,22 @@ func (d *db) getSubscriberQueueStats(ctx context.Context, subscriberId uuid.UUID
 
 // requeueExpiredMessages moves expired delivered messages back to pending, or deletes if max retries exceeded
 func (d *db) requeueExpiredMessages(ctx context.Context, subscriberId uuid.UUID, maxRetries int, visibilityDuration time.Duration) error {
+	now := time.Now()
+
 	// Move messages that exceeded max retries to dead letter
 	_, err := d.Database.Conn().ExecContext(ctx,
-		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'dead_letter' WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP AND retry_count >= ?"),
-		subscriberId, maxRetries,
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'dead_letter' WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= ? AND retry_count >= ?"),
+		subscriberId, now, maxRetries,
 	)
 	if err != nil {
 		return err
 	}
 
 	// Requeue messages that are still under retry limit
-	visibleAt := time.Now().Add(visibilityDuration)
+	visibleAt := now.Add(visibilityDuration)
 	_, err = d.Database.Conn().ExecContext(ctx,
-		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = retry_count + 1, visible_at = ? WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= CURRENT_TIMESTAMP"),
-		visibleAt, subscriberId,
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = retry_count + 1, visible_at = ? WHERE subscriber_id = ? AND status = 'delivered' AND visible_at <= ?"),
+		visibleAt, subscriberId, now,
 	)
 	return err
 }
@@ -412,11 +416,21 @@ func (d *db) getDeadLetterMessages(ctx context.Context, subscriberId uuid.UUID, 
 	return messages, err
 }
 
+// getUnackedMessages retrieves messages in pending or delivered status
+func (d *db) getUnackedMessages(ctx context.Context, subscriberId uuid.UUID, limit int, offset int) (SubscriberMessages, error) {
+	messages := make(SubscriberMessages, 0)
+	err := d.Database.Conn().SelectContext(ctx, &messages,
+		d.Database.Conn().Rebind("SELECT * FROM subscriber_messages WHERE subscriber_id = ? AND status IN ('pending', 'delivered') ORDER BY created_at ASC LIMIT ? OFFSET ?"),
+		subscriberId, limit, offset,
+	)
+	return messages, err
+}
+
 // restoreDeadLetterMessage moves a dead letter message back to pending
 func (d *db) restoreDeadLetterMessage(ctx context.Context, subscriberId uuid.UUID, messageId string) error {
 	result, err := d.Database.Conn().ExecContext(ctx,
-		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = 0, visible_at = CURRENT_TIMESTAMP WHERE subscriber_id = ? AND message_id = ? AND status = 'dead_letter'"),
-		subscriberId, messageId,
+		d.Database.Conn().Rebind("UPDATE subscriber_messages SET status = 'pending', retry_count = 0, visible_at = ? WHERE subscriber_id = ? AND message_id = ? AND status = 'dead_letter'"),
+		time.Now(), subscriberId, messageId,
 	)
 	if err != nil {
 		return err
@@ -425,6 +439,25 @@ func (d *db) restoreDeadLetterMessage(ctx context.Context, subscriberId uuid.UUI
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return ErrMessageNotFound
+	}
+
+	return nil
+}
+
+// pruneProcessedMessages deletes processed messages older than the retention duration
+func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration) error {
+	threshold := time.Now().Add(-retention)
+	result, err := d.Database.Conn().ExecContext(ctx,
+		d.Database.Conn().Rebind("DELETE FROM subscriber_messages WHERE status = 'processed' AND created_at < ?"),
+		threshold,
+	)
+	if err != nil {
+		return err
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows > 0 {
+		slog.Info("Pruned Processed Messages", "count", rows, "threshold", threshold)
 	}
 
 	return nil

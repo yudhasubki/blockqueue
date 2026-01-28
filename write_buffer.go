@@ -21,6 +21,7 @@ type WriteBuffer struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	notify        func(topicId uuid.UUID)
 }
 
 // writeRequest represents a single message to be enqueued
@@ -36,6 +37,7 @@ type WriteBufferConfig struct {
 	BatchSize     int           // Max messages before flush (default: 100)
 	FlushInterval time.Duration // Max time before flush (default: 50ms)
 	BufferSize    int           // Channel buffer size (default: 10000)
+	Notify        func(topicId uuid.UUID)
 }
 
 // DefaultWriteBufferConfig returns sensible defaults
@@ -44,6 +46,7 @@ func DefaultWriteBufferConfig() WriteBufferConfig {
 		BatchSize:     100,
 		FlushInterval: 50 * time.Millisecond,
 		BufferSize:    10000,
+		Notify:        func(topicId uuid.UUID) {}, // No-op default
 	}
 }
 
@@ -68,6 +71,7 @@ func NewWriteBuffer(ctx context.Context, database *db, config WriteBufferConfig)
 		flushInterval: config.FlushInterval,
 		ctx:           bufCtx,
 		cancel:        cancel,
+		notify:        config.Notify,
 	}
 
 	wb.wg.Add(1)
@@ -164,6 +168,17 @@ func (w *WriteBuffer) flush(batch []writeRequest) {
 		slog.Debug("write buffer flushed",
 			"batch_size", len(batch),
 		)
+
+		// Notify subscribers
+		if w.notify != nil {
+			uniqueTopics := make(map[uuid.UUID]struct{})
+			for _, req := range batch {
+				uniqueTopics[req.TopicId] = struct{}{}
+			}
+			for topicId := range uniqueTopics {
+				w.notify(topicId)
+			}
+		}
 	}
 }
 
@@ -191,9 +206,6 @@ func (d *db) batchEnqueueToSubscribers(ctx context.Context, requests []writeRequ
 				continue
 			}
 
-			// Build multi-row INSERT statement
-			// INSERT INTO subscriber_messages (subscriber_id, topic_id, message_id, message, status, visible_at)
-			// VALUES (?, ?, ?, ?, 'pending', ?), (...), ...
 			valueStrings := make([]string, 0, len(topicRequests)*len(subscribers))
 			valueArgs := make([]interface{}, 0, len(topicRequests)*len(subscribers)*5)
 
