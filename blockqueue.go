@@ -139,6 +139,13 @@ func (q *BlockQueue[V]) startPruner() {
 			if err != nil {
 				slog.Error("error pruning messages", logPrefixErr, err)
 			}
+
+			// Run incremental vacuum to reclaim space (SQLite only)
+			if q.db.Database.Conn().DriverName() == "sqlite3" {
+				if _, err := q.db.Database.Conn().Exec("PRAGMA incremental_vacuum"); err != nil {
+					slog.Error("error running incremental vacuum", logPrefixErr, err)
+				}
+			}
 		}
 	}
 }

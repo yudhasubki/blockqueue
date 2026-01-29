@@ -28,6 +28,14 @@ const (
 func (h *Http) Router() http.Handler {
 	r := chi.NewRouter()
 
+	h.Attach(r)
+
+	return r
+}
+
+// Attach mounts the BlockQueue API and UI to the provided chi.Router.
+// Useful for embedding BlockQueue into an existing application.
+func (h *Http) Attach(r chi.Router) {
 	r.Route("/topics", func(r chi.Router) {
 		r.Get("/", h.getTopics)
 		r.Post("/", h.createTopic)
@@ -56,16 +64,14 @@ func (h *Http) Router() http.Handler {
 		if uiPath == "" {
 			uiPath = "./ui"
 		}
-		fs := http.FileServer(http.Dir(uiPath))
-		// Serve index.html for root, otherwise serve file
-		if r.URL.Path == "/" {
-			http.ServeFile(w, r, filepath.Join(uiPath, "index.html"))
-			return
-		}
-		fs.ServeHTTP(w, r)
-	})
 
-	return r
+		path := chi.URLParam(r, "*")
+		if path == "" || path == "/" {
+			path = "index.html"
+		}
+
+		http.ServeFile(w, r, filepath.Join(uiPath, path))
+	})
 }
 
 func (h *Http) createTopic(w http.ResponseWriter, r *http.Request) {

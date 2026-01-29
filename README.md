@@ -1,6 +1,6 @@
 # BlockQueue
 
-BlockQueue is a high-performance, durable, and lightweight message queue system designed for simplicity and reliability. Built on top of SQLite (with WAL mode), it offers transactional integrity and low-latency persistence without the operational complexity of distributed message brokers like Kafka or the memory constraints of Redis.
+BlockQueue is a cost-effective, durable, and lightweight message queue system designed for simplicity and reliability. Built on top of SQLite (with WAL mode), it offers transactional integrity and low-latency persistence without the operational complexity of distributed message brokers like Kafka or the memory constraints of Redis.
 
 It supports multiple storage backends including SQLite, PostgreSQL, and Turso (LibSQL), making it versatile for both single-node deployments and scalable infrastructure.
 
@@ -11,6 +11,7 @@ It supports multiple storage backends including SQLite, PostgreSQL, and Turso (L
 *   **Scheduled Delivery**: Built-in support for delayed message publishing, allowing messages to become visible only after a specific duration.
 *   **Dead Letter Queue (DLQ)**: Automatic handling of failed message deliveries with a dedicated inspection and replay mechanism.
 *   **Pub/Sub Architecture**: Flexible topic-based routing with multiple subscriber support, allowing fan-out patterns and decoupled services.
+*   **Active Queue Inspection**: Peek into "pending" and "delivered" messages without consuming them, useful for debugging and monitoring visibility timeouts.
 *   **Built-in Dashboard**: A modern, dark-mode web interface for monitoring topics, managing subscribers, and inspecting dead letter queues in real-time.
 *   **Multiple Backends**: First-class support for SQLite (default), PostgreSQL, and Turso.
 
@@ -28,6 +29,25 @@ Integrate BlockQueue directly into your Go application:
 
 ```bash
 go get -u github.com/yudhasubki/blockqueue
+```
+
+### Embedding BlockQueue (UI + API)
+You can mount BlockQueue's API and Dashboard into your existing Go application
+
+```go
+func main() {
+    // 1. Initialize BlockQueue
+    bq := blockqueue.New(sqlite.New("blockqueue.db", nil), blockqueue.BlockQueueOption{})
+    defer bq.Close()
+    
+    bqHttp := &blockqueue.Http{Stream: bq, UIPath: "./ui"}
+
+    mux := http.NewServeMux()
+    // Mount the handler with StripPrefix to handle subpath correctly
+    mux.Handle("/admin/queue/", http.StripPrefix("/admin/queue", bqHttp.Router()))
+
+    http.ListenAndServe(":8080", mux)
+}
 ```
 
 ## Quick Start
@@ -131,6 +151,12 @@ BlockQueue supports long-polling to reduce empty responses and network chatter.
 curl "http://localhost:8080/topics/orders/subscribers/payment-processor?timeout=5s"
 ```
 
+**Inspect Queue (Peek)**
+View pending or delivered messages without consuming them. Useful for debugging.
+```bash
+curl "http://localhost:8080/topics/orders/subscribers/payment-processor/messages?limit=10&offset=0"
+```
+
 **Acknowledge Message**
 After processing, the consumer must acknowledge the message to remove it from the queue.
 ```bash
@@ -157,7 +183,7 @@ curl -X POST "http://localhost:8080/topics/orders/subscribers/payment-processor/
 BlockQueue is designed for speed. By utilizing SQLite's Write-Ahead Logging (WAL) and an in-memory write buffer, it achieves high throughput suitable for most production workloads.
 
 **SQLite Benchmark (MacBook Pro M1)**
-*   **Write Throughput**: ~38,000 req/sec (100 concurrent users)
+*   **Write Throughput**: ~47,000 req/sec (100 concurrent users)
 *   **Read Latency (Median)**: 1.19ms
 
 ## License

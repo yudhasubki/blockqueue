@@ -57,6 +57,11 @@ func New(dbName string, config Config) (*SQLite, error) {
 	}
 	db.SetConnMaxIdleTime(connMaxIdleTime)
 
+	// Enable incremental vacuum to keep file size in check for queue workload
+	if _, err := db.Exec("PRAGMA auto_vacuum = incremental"); err != nil {
+		return &SQLite{}, fmt.Errorf("failed to set auto_vacuum: %w", err)
+	}
+
 	return &SQLite{
 		Database: db,
 	}, nil

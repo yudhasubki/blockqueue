@@ -1,4 +1,4 @@
-const API_BASE = window.location.origin;
+const API_BASE = ".";
 
 // State
 let currentTopic = null;

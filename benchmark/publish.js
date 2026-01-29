@@ -2,7 +2,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 
 export default function () {
-    const url = 'http://localhost:8080/topics/cart/messages'
+    const url = 'http://localhost:8090/topics/cart/messages'
     const payload = JSON.stringify({
         message: 'test publishing message'
     })

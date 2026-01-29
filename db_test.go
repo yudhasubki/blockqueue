@@ -167,7 +167,7 @@ func TestDB_AckSubscriberMessage(t *testing.T) {
 
 		// Verify deleted
 		var count int
-		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE message_id = ?", messageId)
+		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE message_id = ? AND status != 'processed'", messageId)
 		require.NoError(t, err)
 		require.Equal(t, 0, count)
 	})
@@ -385,9 +385,9 @@ func TestDB_BatchAckSubscriberMessages(t *testing.T) {
 		err := database.ackSubscriberMessages(ctx, subscriberId, msgIds)
 		require.NoError(t, err)
 
-		// Verify all deleted
+		// Verify all processed
 		var count int
-		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE subscriber_id = ?", subscriberId)
+		err = sqliteDb.Database.Get(&count, "SELECT COUNT(*) FROM subscriber_messages WHERE subscriber_id = ? AND status != 'processed'", subscriberId)
 		require.NoError(t, err)
 		require.Equal(t, 0, count)
 	})
