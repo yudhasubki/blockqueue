@@ -572,7 +572,11 @@ func TestLogicalTopicDeletionRejectsAdmissionBeforePhysicalCleanup(t *testing.T)
 }
 
 func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {
-	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "topic-fence.db"), sqlite.Config{BusyTimeout: 1})
+	// The artificial write lock is held long enough to force the writer into
+	// its retry path. Once released, allow ordinary one-row SQLite writes to
+	// serialize instead of turning race-detector scheduling overhead into a
+	// second, unrelated lock failure.
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "topic-fence.db"), sqlite.Config{BusyTimeout: 100})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
 		BatchSize: 100, FlushInterval: time.Millisecond,
