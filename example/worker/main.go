@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -21,13 +22,19 @@ type fulfillOrder struct {
 }
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	driver, err := sqlite.Open("worker-example.db", sqlite.Config{})
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("open sqlite: %w", err)
 	}
 	queue := blockqueue.New(driver, blockqueue.Options{})
 	if err := queue.Run(context.Background()); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("run queue: %w", err)
 	}
 	defer queue.Close()
 
@@ -37,7 +44,7 @@ func main() {
 			fulfilled_at DATETIME NOT NULL
 		)
 	`); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("create business table: %w", err)
 	}
 
 	topic := blockqueue.NewTopic("orders")
@@ -48,18 +55,18 @@ func main() {
 	})
 	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
 		if !errors.Is(err, blockqueue.ErrResourceConflict) {
-			log.Fatal(err)
+			return fmt.Errorf("create topic: %w", err)
 		}
 		existing, ok := queue.GetTopic(topic.Name)
 		if !ok {
-			log.Fatal("worker-example.db reported a topic conflict but the topic is unavailable")
+			return errors.New("worker-example.db reported a topic conflict but the topic is unavailable")
 		}
 		topic = existing
 		subscriber.TopicID = existing.ID
 		log.Print("reusing existing orders topic")
 		statuses, statusErr := queue.GetSubscribersStatus(context.Background(), topic)
 		if statusErr != nil {
-			log.Fatal(statusErr)
+			return fmt.Errorf("read subscriber status: %w", statusErr)
 		}
 		found := false
 		for _, status := range statuses {
@@ -72,7 +79,7 @@ func main() {
 			if err := queue.CreateSubscribers(
 				context.Background(), topic, blockqueue.Subscribers{subscriber},
 			); err != nil {
-				log.Fatal(err)
+				return fmt.Errorf("create subscriber: %w", err)
 			}
 		}
 	}
@@ -97,20 +104,23 @@ func main() {
 		blockworker.Options{Concurrency: 4},
 	)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("create worker: %w", err)
 	}
 
 	if _, err := queue.PublishDurable(context.Background(), topic, blockqueue.Message{
 		Message:        `{"order_id":"order-1022"}`,
 		IdempotencyKey: "fulfill-order-1022-" + time.Now().UTC().Format("20060102T150405.000000000"),
 	}); err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("publish order: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Print("worker running; press Ctrl-C to drain and stop")
-	if err := runner.Run(ctx); err != nil {
-		log.Fatal(err)
-	}
+	workerErr := runner.Run(ctx)
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelShutdown()
+	shutdownErr := queue.Shutdown(shutdownCtx)
+	return errors.Join(workerErr, shutdownErr)
 }

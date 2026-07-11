@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/yudhasubki/blockqueue"><img src="https://pkg.go.dev/badge/github.com/yudhasubki/blockqueue.svg" alt="Go Reference"></a>
-  <img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/Go-1.25.12%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25.12+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
 </p>
 
@@ -184,7 +184,7 @@ instead of repeating non-idempotent application logic.
 The runnable [transactional example](example/transactional) shows both commits
 against one SQLite database, including receipt-fenced consumer completion.
 
-## Go worker runtime (v0.3 development)
+## Go worker runtime (v0.3)
 
 The importable `worker` package turns the delivery API into a bounded consumer
 runtime. It never owns or hides the queue lifecycle: start `Queue` first, run
@@ -257,9 +257,9 @@ duration uses `ok`, `error`, `panic`, and `cancel_requested` return semantics.
 NACK errors and cancellation reasons are normalized to valid UTF-8 and bounded
 to 16 KiB before they cross the worker client or persistence boundary.
 
-The runnable [worker example](example/worker) demonstrates typed JSON handling
-and transactional completion against SQLite. This package is currently on
-`main` for v0.3 and is not part of the published v0.2.0 module.
+The runnable [worker example](example/worker) demonstrates typed JSON handling,
+transactional completion, graceful worker drain, and ordered queue shutdown
+against SQLite. The package is part of the v0.3 public API.
 
 ## Run the HTTP server
 
@@ -377,10 +377,11 @@ configure `WriteTimeout` to at least 65 seconds.
 - Built-in authentication and exactly-once execution are outside the project
   scope. Protect the HTTP server with a private network or reverse proxy.
 
-v0.2 is the durable embedded/HTTP fan-out core. The typed Go worker runtime is
-being developed on `main`. PostgreSQL nodes elect one advisory-lock leader for
-retention and topology cleanup; claims, lease reaping, and scheduler ownership
-remain distributed and receipt/lease fenced.
+v0.2 established the durable embedded/HTTP fan-out core. v0.3 adds the typed Go
+worker runtime without changing the queue's delivery contract. PostgreSQL nodes
+elect one advisory-lock leader for retention and topology cleanup; claims,
+lease reaping, and scheduler ownership remain distributed and receipt/lease
+fenced.
 
 ## Storage and durability
 
@@ -442,11 +443,12 @@ For component boundaries and lock ownership, see
 
 ## Roadmap
 
-- v0.2.x: optional in-process event subscription, tracing hooks, and focused
-  test helpers without changing the schema.
-- v0.3 (in development): stabilize the typed Go worker API, tracing hooks, and
-  multi-worker operational tooling.
-- v0.4: versioned workflow/DAG orchestration as a separate layer over the queue.
+- v0.3: typed workers, bounded concurrency, lease heartbeats, transactional
+  completion, cancellation, batched completion, metrics, and group supervision.
+- v0.3.x: release hardening and focused test helpers without schema changes.
+- v0.4: tracing hooks and cross-language HTTP client ergonomics.
+- Later: versioned workflow/DAG orchestration as a separate layer over the
+  queue, after the scheduler and worker runtime have production evidence.
 
 ## License
 

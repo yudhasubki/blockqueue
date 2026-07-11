@@ -10,6 +10,7 @@ From the repository root:
 go run ./example/worker
 ```
 
-Press Ctrl-C after the job is processed. The example intentionally uses
-`worker-example.db`; subsequent runs safely reuse its topic and idempotent
+Press Ctrl-C after the job is processed. The worker stops claiming, drains its
+active handlers, and only then shuts down the queue. The example intentionally
+uses `worker-example.db`; subsequent runs safely reuse its topic and idempotent
 business table.

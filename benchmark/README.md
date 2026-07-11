@@ -54,6 +54,26 @@ These numbers establish the first comparable baseline for the new paths, so the
 5% regression gate applies to subsequent revisions rather than being inferred
 against a different pre-v0.2 workload.
 
+The 2026-07-12 v0.3 release-candidate run used Go 1.25.12, PostgreSQL 16.9,
+strict durability, `-benchtime=10x`, and five fresh databases/schemas on the
+same Apple M1 host:
+
+| Operation | SQLite median | PostgreSQL median | Unit |
+| --- | ---:| ---:| --- |
+| PublishDurable | 0.201 ms | 0.985 ms | one committed message |
+| PublishAsync | 1.554 us | 1.638 us | one process-local admission |
+| BatchPublishDurable100 | 1.884 ms | 3.666 ms | one committed 100-message batch |
+| Claim100 | 2.342 ms | 8.091 ms | one 100-message claim |
+| BatchAck100 | 2.925 ms | 10.895 ms | one 100-message transaction |
+| BatchNack100 | 4.804 ms | 4.276 ms | one 100-message transaction plus error history |
+| NackFailure | 0.183 ms | 0.773 ms | one NACK plus error-history insert |
+
+Every case verified its exact canonical-message and delivery counts. Against
+the seed table, the largest regression was SQLite `BatchNack100` at 0.27%, so
+the release-candidate run passed the 5% gate. A less noisy five-trial
+`-benchtime=100x` diagnostic measured claim plus ACK at 0.496 ms on SQLite and
+0.778 ms on PostgreSQL.
+
 Caller-owned SQLite transactions intentionally hold its single writer lock.
 The diagnostic benchmark measures how directly that hold time appears in a
 queued durable writer barrier:
@@ -156,6 +176,21 @@ the no-more-than-5% regression gate while preserving the async group-commit
 window. A separate current verification trial shut down with exactly 280,510
 canonical messages and 280,510 delivery rows for 280,510 successful responses.
 
+The 2026-07-12 v0.3 release-candidate rerun used the same balanced profile,
+k6 0.36.0, 100 VUs, and five fresh 10-second cycles:
+
+| Trial | req/s | median | p95 | p99.9 | persisted messages/deliveries |
+| --- | ---:| ---:| ---:| ---:| ---:|
+| 1 | 36,725 | 1.24 ms | 6.64 ms | 30.11 ms | 367,658 / 367,658 |
+| 2 | 35,069 | 1.27 ms | 7.00 ms | 40.15 ms | 350,817 / 350,817 |
+| 3 | 36,410 | 1.25 ms | 6.73 ms | 31.83 ms | 364,330 / 364,330 |
+| 4 | 37,332 | 1.20 ms | 6.68 ms | 29.02 ms | 373,582 / 373,582 |
+| 5 | 37,095 | 1.21 ms | 6.61 ms | 28.93 ms | 371,168 / 371,168 |
+| **Median** | **36,725** | **1.24 ms** | **6.68 ms** | **30.11 ms** | **exact in every trial** |
+
+The full spread is retained. The median is 3.18% below the latest
+comparable 37,932 req/s result and therefore remains inside the 5% gate.
+
 Batch burst:
 
 ```bash
@@ -233,6 +268,21 @@ throughput is 1.36% below the previous 10,859 msg/s baseline and remains inside
 the 5% release gate. The wide trial range is retained deliberately: the load
 generator, server, and PostgreSQL shared one development host, so this is a
 local regression baseline rather than a general PostgreSQL capacity claim.
+
+The 2026-07-12 v0.3 release-candidate rerun used the same strict committed
+profile and five fresh database cycles:
+
+| Trial | committed msg/s | median | p95 | p99.9 | persisted messages/deliveries |
+| --- | ---:| ---:| ---:| ---:| ---:|
+| 1 | 14,160 | 6.40 ms | 10.85 ms | 48.74 ms | 141,806 / 141,806 |
+| 2 | 14,977 | 6.15 ms | 9.68 ms | 37.67 ms | 149,910 / 149,910 |
+| 3 | 13,677 | 6.17 ms | 12.74 ms | 49.61 ms | 136,936 / 136,936 |
+| 4 | 9,658 | 6.55 ms | 34.02 ms | 91.51 ms | 96,751 / 96,751 |
+| 5 | 14,188 | 6.32 ms | 11.32 ms | 48.19 ms | 142,089 / 142,089 |
+| **Median** | **14,160** | **6.32 ms** | **11.32 ms** | **48.74 ms** | **exact in every trial** |
+
+The noisy fourth trial is retained. Median committed throughput is 32.20%
+above the previous 10,711 msg/s baseline, with no HTTP failures.
 
 Run a sustained async trial and verify both tables through a separate PostgreSQL
 connection. Keep the verifier URL in an environment variable so credentials are
