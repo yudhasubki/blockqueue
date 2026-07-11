@@ -25,7 +25,7 @@ func setupTestDB(t *testing.T, dbName string) (*sqlite.Driver, func()) {
 	require.NoError(t, Migrate(context.Background(), sqliteDB))
 
 	cleanup := func() {
-		sqliteDB.Close()
+		require.NoError(t, sqliteDB.Close())
 	}
 
 	return sqliteDB, cleanup
@@ -121,6 +121,62 @@ func TestWriter_TimeFlush(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 3, count, "expected 3 messages to be flushed by timer")
 	})
+}
+
+func TestWriterKeepsAsyncOnlyAdmissionInGroupCommitWindow(t *testing.T) {
+	dbName := "test_wb_async_window_" + uuid.NewString()[:8]
+	sqliteDB, cleanup := setupTestDB(t, dbName)
+	defer cleanup()
+	topicID := uuid.New()
+	subscriberID := uuid.New()
+	_, err := testDB(sqliteDB).Exec("INSERT INTO topics (id, name) VALUES (?, ?)", topicID, "async-window")
+	require.NoError(t, err)
+	_, err = testDB(sqliteDB).Exec(
+		"INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (?, ?, ?, ?)",
+		subscriberID, topicID, "worker", `{"max_attempts":3,"visibility_duration":"30s"}`,
+	)
+	require.NoError(t, err)
+
+	buffer := newWriter(context.Background(), newDb(sqliteDB), WriterOptions{
+		BatchSize: 100, FlushInterval: 200 * time.Millisecond,
+	})
+	defer buffer.Close()
+	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
+		TopicID: topicID, MessageID: newMessageID(), Message: "async group commit", VisibleAt: time.Now().UTC(),
+	}}))
+	time.Sleep(30 * time.Millisecond)
+	var count int
+	require.NoError(t, testDB(sqliteDB).Get(&count, "SELECT COUNT(*) FROM messages WHERE topic_id = ?", topicID))
+	require.Zero(t, count, "async-only admission must retain the configured group-commit window")
+	require.Eventually(t, func() bool {
+		return testDB(sqliteDB).Get(&count, "SELECT COUNT(*) FROM messages WHERE topic_id = ?", topicID) == nil && count == 1
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestWriterFlushesIdleDurableAdmissionBeforeLongInterval(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "idle-flush.db"), sqlite.Config{})
+	require.NoError(t, err)
+	queue := New(driver, Options{Writer: WriterOptions{
+		BatchSize: 100, FlushInterval: 5 * time.Second,
+	}})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("idle-flush")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1m",
+	})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		require.NoError(t, queue.Shutdown(ctx))
+	})
+
+	started := time.Now()
+	receipt, err := queue.PublishDurable(context.Background(), topic, Message{Message: "flush now"})
+	require.NoError(t, err)
+	require.Equal(t, "persisted", receipt.State)
+	require.Less(t, time.Since(started), time.Second,
+		"idle durable admission must not wait for the five-second flush interval")
 }
 
 func TestWriter_GracefulClose(t *testing.T) {

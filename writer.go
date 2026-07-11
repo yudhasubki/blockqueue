@@ -438,6 +438,7 @@ func (w *writer) run() {
 
 	pending := make([]*writeAdmission, 0, w.batchSize)
 	pendingMessages := 0
+	pendingDurable := false
 	flush := func() bool {
 		if len(pending) == 0 {
 			return true
@@ -445,25 +446,53 @@ func (w *writer) run() {
 		ok := w.flush(pending)
 		pending = pending[:0]
 		pendingMessages = 0
+		pendingDurable = false
 		return ok
+	}
+	processAdmission := func(admission *writeAdmission) (ok, groupComplete bool) {
+		if admission.barrier != nil {
+			if flush() {
+				admission.barrier <- nil
+				return true, true
+			}
+			admission.barrier <- ErrWriterDrainTimeout
+			return false, true
+		}
+		pending = append(pending, admission)
+		pendingMessages += len(admission.requests)
+		pendingDurable = pendingDurable || admission.result != nil
+		if pendingMessages >= w.batchSize {
+			return flush(), true
+		}
+		return true, false
 	}
 
 	for {
 		select {
 		case admission := <-w.queue:
-			if admission.barrier != nil {
-				if flush() {
-					admission.barrier <- nil
-				} else {
-					admission.barrier <- ErrWriterDrainTimeout
-					return
-				}
-				continue
-			}
-			pending = append(pending, admission)
-			pendingMessages += len(admission.requests)
-			if pendingMessages >= w.batchSize && !flush() {
+			ok, complete := processAdmission(admission)
+			if !ok {
 				return
+			}
+			// Coalesce everything already admitted before touching storage. When
+			// the channel drains, flush immediately only if a durable caller is
+			// waiting. Async-only cohorts retain the configured group-commit
+			// window; flushing those eagerly collapses HTTP ingress throughput.
+			for !complete {
+				select {
+				case admission = <-w.queue:
+					ok, complete = processAdmission(admission)
+					if !ok {
+						return
+					}
+				default:
+					if pendingDurable {
+						if !flush() {
+							return
+						}
+					}
+					complete = true
+				}
 			}
 		case <-ticker.C:
 			if !flush() {

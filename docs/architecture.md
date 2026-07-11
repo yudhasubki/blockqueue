@@ -52,9 +52,15 @@ HTTP /v1 -> httpapi.Service port --------┘
 The database is authoritative for durable state and delivery ownership. Memory
 contains only immutable routing snapshots and bounded admitted writes.
 
-1. `Queue.admissionMu` serializes topology mutations against publisher
-   admission. A destructive mutation installs a writer barrier before its
-   database transaction.
+1. `Queue.admissionMu` fences lifecycle shutdown against admission. Each
+   `topicRuntime` has its own admission RW fence: a destructive mutation takes
+   only that topic's write fence, installs a writer barrier, and then commits
+   its database transaction. Publisher admission on unrelated topics remains
+   available while the barrier drains. Registered control operations are
+   included in graceful shutdown before the database closes.
+   `PublishTx` bypasses this process-local writer fence because its caller-owned
+   transaction is already fenced by the authoritative topic row lock; this
+   avoids lock inversion when one transaction publishes more than once.
 2. A publisher fences affected topic rows in sorted UUID order, verifies that
    the topic and at least one subscriber still exist, inserts canonical
    messages, and fans out delivery rows in the same transaction. PostgreSQL
@@ -154,7 +160,8 @@ rather than being implied by the current contract.
 The optional server binary uses the standard `net/http` server with explicit
 header, idle, and long-poll-compatible write timeouts. It binds to
 `127.0.0.1` by default; public deployments should remain behind an authenticated
-reverse proxy.
+reverse proxy. Embedded routers may install a principal resolver followed by
+authorization middleware; neither is enabled implicitly.
 
 ## Lifecycle
 

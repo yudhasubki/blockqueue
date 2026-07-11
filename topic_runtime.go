@@ -15,12 +15,13 @@ import (
 // topicRuntime is an in-memory routing snapshot. Database transactions remain
 // authoritative for persistence and delivery ownership.
 type topicRuntime struct {
-	id       uuid.UUID
-	name     string
-	paused   atomic.Bool
-	deleted  atomic.Bool
-	registry atomic.Pointer[subscriberRegistry]
-	mu       sync.Mutex
+	id          uuid.UUID
+	name        string
+	paused      atomic.Bool
+	deleted     atomic.Bool
+	registry    atomic.Pointer[subscriberRegistry]
+	mu          sync.Mutex
+	admissionMu sync.RWMutex
 }
 
 type subscriberRegistry struct {
@@ -127,8 +128,8 @@ func validResourceName(name string) bool {
 }
 
 // addPreparedSubscribers cannot fail. Callers validate the candidate snapshot
-// before committing the database mutation and serialize topology changes with
-// Queue.admissionMu.
+// before committing the database mutation. Callers serialize topology changes
+// with topicRuntime.admissionMu and the queue registry mutex.
 func (topic *topicRuntime) addPreparedSubscribers(prepared []*subscriberRuntime) {
 	topic.mu.Lock()
 	defer topic.mu.Unlock()

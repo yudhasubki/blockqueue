@@ -84,8 +84,8 @@ func (q *Queue) reloadRuntime(ctx context.Context) error {
 		next.byID[runtime.id] = runtime
 	}
 
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	if q.topologyVersion.Load() != version {
 		// A local topology commit won the race. A later reconciliation will
 		// observe it; never replace the registry with this stale DB snapshot.

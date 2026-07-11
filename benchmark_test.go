@@ -19,6 +19,17 @@ type benchmarkBackend struct {
 }
 
 func forEachBenchmarkBackend(b *testing.B, run func(*testing.B, *Queue, Topic)) {
+	forEachBenchmarkBackendWithWriter(b, WriterOptions{
+		BatchSize: 100, FlushInterval: time.Millisecond,
+		MaxPendingMessages: 200_000, MaxPendingBytes: 512 << 20,
+	}, run)
+}
+
+func forEachBenchmarkBackendWithWriter(
+	b *testing.B,
+	writerOptions WriterOptions,
+	run func(*testing.B, *Queue, Topic),
+) {
 	b.Helper()
 	backends := []benchmarkBackend{{
 		name: "sqlite",
@@ -53,18 +64,15 @@ func forEachBenchmarkBackend(b *testing.B, run func(*testing.B, *Queue, Topic)) 
 	for _, backend := range backends {
 		backend := backend
 		b.Run(backend.name, func(b *testing.B) {
-			queue, topic := benchmarkQueue(b, backend.open(b))
+			queue, topic := benchmarkQueue(b, backend.open(b), writerOptions)
 			run(b, queue, topic)
 		})
 	}
 }
 
-func benchmarkQueue(b *testing.B, driver store.Driver) (*Queue, Topic) {
+func benchmarkQueue(b *testing.B, driver store.Driver, writerOptions WriterOptions) (*Queue, Topic) {
 	b.Helper()
-	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 100, FlushInterval: time.Millisecond,
-		MaxPendingMessages: 200_000, MaxPendingBytes: 512 << 20,
-	}})
+	queue := New(driver, Options{Writer: writerOptions})
 	if err := queue.Run(context.Background()); err != nil {
 		b.Fatal(err)
 	}
@@ -92,6 +100,26 @@ func BenchmarkPublishDurable(b *testing.B) {
 		b.ResetTimer()
 		for index := 0; index < b.N; index++ {
 			if _, err := queue.Publish(ctx, topic, Message{Message: "benchmark message"}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N))
+	})
+}
+
+// BenchmarkPublishDurableIdle isolates the commit latency of a single durable
+// admission when no other publisher is available for group commit.
+func BenchmarkPublishDurableIdle(b *testing.B) {
+	forEachBenchmarkBackendWithWriter(b, WriterOptions{
+		BatchSize: 100, FlushInterval: 50 * time.Millisecond,
+		MaxPendingMessages: 200_000, MaxPendingBytes: 512 << 20,
+	}, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for index := 0; index < b.N; index++ {
+			if _, err := queue.Publish(ctx, topic, Message{Message: "idle durable benchmark"}); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -165,6 +193,138 @@ func BenchmarkClaim100(b *testing.B) {
 		b.StopTimer()
 		verifyBenchmarkRows(b, queue, int64(b.N*100))
 	})
+}
+
+const largeScheduleHistoryRows = 1_000_000
+
+// BenchmarkClaim100WithMillionScheduleRuns is opt-in because its fixture is
+// intentionally large. It proves claim latency is independent of historical
+// schedule_runs growth and guards against reintroducing a global run sweep.
+func BenchmarkClaim100WithMillionScheduleRuns(b *testing.B) {
+	if os.Getenv("BLOCKQUEUE_BENCH_LARGE_HISTORY") != "1" {
+		b.Skip("set BLOCKQUEUE_BENCH_LARGE_HISTORY=1 to seed one million schedule runs")
+	}
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
+			Name: "large-history", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "history",
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		seedScheduleRunHistory(b, queue, schedule.ID, largeScheduleHistoryRows)
+
+		ctx := context.Background()
+		const warmupRows = 1000
+		warmup := make([]Message, warmupRows)
+		for index := range warmup {
+			warmup[index].Message = "large-history cache warmup"
+		}
+		if _, err := queue.BatchPublish(ctx, topic, warmup); err != nil {
+			b.Fatal(err)
+		}
+		for start := 0; start < warmupRows; start += 100 {
+			claimed, err := queue.Claim(ctx, topic, "worker", 100, time.Minute)
+			if err != nil || len(claimed) != 100 {
+				b.Fatalf("warmup claim: count=%d err=%v", len(claimed), err)
+			}
+			items := make([]BatchAckItem, len(claimed))
+			for index, delivery := range claimed {
+				items[index] = BatchAckItem{MessageID: delivery.ID, ReceiptToken: delivery.ReceiptToken}
+			}
+			for _, result := range queue.BatchAckDeliveries(ctx, topic, "worker", items) {
+				if result.Status != "processed" {
+					b.Fatalf("warmup ACK: %+v", result)
+				}
+			}
+		}
+		for iteration := 0; iteration < b.N; iteration++ {
+			batch := make([]Message, 100)
+			for index := range batch {
+				batch[index].Message = "claim with large schedule history"
+			}
+			if _, err := queue.BatchPublish(ctx, topic, batch); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportMetric(largeScheduleHistoryRows, "history_rows")
+		b.ReportAllocs()
+		b.SetBytes(100)
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			messages, err := queue.Claim(ctx, topic, "worker", 100, time.Minute)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(messages) != 100 {
+				b.Fatalf("claim count=%d", len(messages))
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(warmupRows+b.N*100))
+	})
+}
+
+func seedScheduleRunHistory(b *testing.B, queue *Queue, scheduleID string, rows int) {
+	b.Helper()
+	var query string
+	switch queue.db.dialect.kind() {
+	case store.DialectSQLite:
+		query = queue.db.Conn().Rebind(`
+			WITH RECURSIVE sequence(value) AS (
+				SELECT 1
+				UNION ALL
+				SELECT value + 1 FROM sequence WHERE value < ?
+			)
+			INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status, created_at, finished_at)
+			SELECT printf('00000000-0000-4000-8000-%012x', value), ?,
+			       datetime('2020-01-01', '+' || value || ' seconds'), 'completed',
+			       datetime('2020-01-01', '+' || value || ' seconds'),
+			       datetime('2020-01-01', '+' || value || ' seconds')
+			FROM sequence`)
+	case store.DialectPostgres:
+		query = queue.db.Conn().Rebind(`
+			INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status, created_at, finished_at)
+			SELECT ('00000000-0000-4000-8000-' || lpad(to_hex(value), 12, '0'))::uuid,
+			       ?, TIMESTAMPTZ '2020-01-01 00:00:00+00' + value * INTERVAL '1 second',
+			       'completed', TIMESTAMPTZ '2020-01-01 00:00:00+00' + value * INTERVAL '1 second',
+			       TIMESTAMPTZ '2020-01-01 00:00:00+00' + value * INTERVAL '1 second'
+			FROM generate_series(1, CAST(? AS INTEGER)) AS value`)
+	default:
+		b.Fatalf("unsupported benchmark dialect %q", queue.db.dialect.kind())
+	}
+	args := []any{rows, scheduleID}
+	if queue.db.dialect.kind() == store.DialectPostgres {
+		args = []any{scheduleID, rows}
+	}
+	if _, err := queue.db.Conn().Exec(query, args...); err != nil {
+		b.Fatal(err)
+	}
+	var actual int
+	if err := queue.db.Conn().Get(&actual, queue.db.Conn().Rebind(
+		"SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = ?"), scheduleID); err != nil {
+		b.Fatal(err)
+	}
+	if actual != rows {
+		b.Fatalf("schedule history rows=%d expected=%d", actual, rows)
+	}
+	// The fixture represents retained history accumulated over months, not one
+	// giant uncheckpointed deployment transaction. Normalize storage state
+	// before timing so the benchmark measures index coupling, not fixture WAL.
+	if queue.db.dialect.kind() == store.DialectSQLite {
+		if _, err := queue.db.checkpointSQLite(context.Background(), sqliteCheckpointTruncate); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := queue.db.Conn().Exec("ANALYZE schedule_runs"); err != nil {
+			b.Fatal(err)
+		}
+	} else {
+		if _, err := queue.db.Conn().Exec("VACUUM (ANALYZE) schedule_runs"); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := queue.db.Conn().Exec("CHECKPOINT"); err != nil {
+			b.Logf("PostgreSQL CHECKPOINT skipped (grant pg_checkpoint for fully normalized fixtures): %v", err)
+		}
+	}
 }
 
 func BenchmarkClaimAndAck(b *testing.B) {
@@ -279,7 +439,10 @@ func BenchmarkSQLiteCallerTransactionContention(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			queue, topic := benchmarkQueue(b, driver)
+			queue, topic := benchmarkQueue(b, driver, WriterOptions{
+				BatchSize: 100, FlushInterval: time.Millisecond,
+				MaxPendingMessages: 200_000, MaxPendingBytes: 512 << 20,
+			})
 			ctx := context.Background()
 
 			b.ResetTimer()

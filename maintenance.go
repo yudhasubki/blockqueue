@@ -32,16 +32,32 @@ func (q *Queue) startCheckpointer() {
 			if elapsed < interval {
 				continue
 			}
-			pending := int64(0)
-			if q.writer != nil {
-				pending, _ = q.writer.Pending()
-			}
-			if pending > int64(q.writer.batchSize) && elapsed < 2*time.Minute {
+			if q.shouldDeferCheckpoint(elapsed) {
 				continue
 			}
 			q.checkpointSQLite(q.serverCtx, sqliteCheckpointPassive)
 			lastCheckpoint = time.Now()
 		}
+	}
+}
+
+func (q *Queue) shouldDeferCheckpoint(elapsed time.Duration) bool {
+	if q.writer == nil || elapsed >= 2*time.Minute {
+		return false
+	}
+	pending, _ := q.writer.Pending()
+	return pending > int64(q.writer.batchSize)
+}
+
+// waitForMaintenanceRetry prevents a due row from turning a transient write
+// failure into a hot loop. The injected clock keeps scheduler tests fully
+// deterministic while production uses the real clock.
+func waitForMaintenanceRetry(ctx context.Context, clock Clock) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-clock.After(time.Second):
+		return true
 	}
 }
 

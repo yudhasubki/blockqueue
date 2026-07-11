@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -175,6 +177,10 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	} else {
 		receipt, err = h.service.PublishAsync(r.Context(), topicFrom(r.Context()), request.command())
+	}
+	if err == nil && status == http.StatusAccepted {
+		location := strings.TrimSuffix(r.URL.EscapedPath(), "/") + "/" + url.PathEscape(receipt.MessageID)
+		w.Header().Set("Location", location)
 	}
 	h.respond(w, status, receipt, err)
 }

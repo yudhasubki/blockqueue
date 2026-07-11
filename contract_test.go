@@ -167,6 +167,32 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.NoError(t, queue.AckDelivery(context.Background(), priorityTopic, prioritySubscriber.Name,
 		delayedClaim[0].ID, delayedClaim[0].ReceiptToken))
 
+	snoozeTopic, snoozeSubscriber := createContractTopic(t, queue, "contract-snooze", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+	})
+	snoozeReceipt, err := queue.PublishDurable(context.Background(), snoozeTopic, Message{Message: "snooze without failure"})
+	require.NoError(t, err)
+	snoozeClaim, err := queue.Claim(context.Background(), snoozeTopic, snoozeSubscriber.Name, 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, snoozeClaim, 1)
+	_, err = queue.SnoozeDelivery(context.Background(), snoozeTopic, snoozeSubscriber.Name,
+		snoozeClaim[0].ID, snoozeClaim[0].ReceiptToken, 25*time.Millisecond)
+	require.NoError(t, err)
+	snoozeStatus, err := queue.GetMessageStatus(context.Background(), snoozeTopic, snoozeReceipt.MessageID)
+	require.NoError(t, err)
+	require.Equal(t, 1, snoozeStatus.Deliveries[0].DeliveryCount)
+	require.Zero(t, snoozeStatus.Deliveries[0].FailureCount)
+	require.Equal(t, "pending", snoozeStatus.Deliveries[0].Status)
+	require.ErrorIs(t, queue.AckDelivery(context.Background(), snoozeTopic, snoozeSubscriber.Name,
+		snoozeClaim[0].ID, snoozeClaim[0].ReceiptToken), ErrLeaseLost)
+	snoozeContext, snoozeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	snoozedAgain, err := queue.ClaimWait(snoozeContext, snoozeTopic, snoozeSubscriber.Name, 1, time.Second)
+	snoozeCancel()
+	require.NoError(t, err)
+	require.Len(t, snoozedAgain, 1)
+	require.NoError(t, queue.AckDelivery(context.Background(), snoozeTopic, snoozeSubscriber.Name,
+		snoozedAgain[0].ID, snoozedAgain[0].ReceiptToken))
+
 	require.NoError(t, queue.PauseTopic(context.Background(), priorityTopic))
 	pausedTopicMessage, err := queue.PublishDurable(context.Background(), priorityTopic, Message{Message: "topic-paused"})
 	require.NoError(t, err)
@@ -229,6 +255,44 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.NoError(t, err)
 	require.Len(t, errorHistory.Errors, 4, "DLQ replay must start a new failure cycle without losing history")
 
+	policyTopic, policySubscriber := createContractTopic(t, queue, "contract-retry-policy", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		RetryPolicy: RetryPolicy{InitialDelay: "200ms", MaxDelay: "200ms", Multiplier: 2, Jitter: 0.2},
+	})
+	policyReceipt, err := queue.PublishDurable(context.Background(), policyTopic, Message{Message: "policy retry"})
+	require.NoError(t, err)
+	policyClaim, err := queue.Claim(context.Background(), policyTopic, policySubscriber.Name, 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, policyClaim, 1)
+	failedAt := time.Now().UTC()
+	require.NoError(t, queue.NackDelivery(context.Background(), policyTopic, policySubscriber.Name,
+		policyClaim[0].ID, policyClaim[0].ReceiptToken, 0, "policy delay"))
+	policyStatus, err := queue.GetMessageStatus(context.Background(), policyTopic, policyReceipt.MessageID)
+	require.NoError(t, err)
+	policyDelay := policyStatus.Deliveries[0].VisibleAt.Sub(failedAt)
+	require.GreaterOrEqual(t, policyDelay, 100*time.Millisecond)
+	require.LessOrEqual(t, policyDelay, 350*time.Millisecond)
+	require.Equal(t, 1, policyStatus.Deliveries[0].FailureCount)
+
+	retentionTopic, retentionSubscriber := createContractTopic(t, queue, "contract-error-retention", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+	})
+	retentionReceipt, err := queue.PublishDurable(context.Background(), retentionTopic, Message{Message: "cascade error history"})
+	require.NoError(t, err)
+	retentionClaim, err := queue.Claim(context.Background(), retentionTopic, retentionSubscriber.Name, 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, retentionClaim, 1)
+	require.NoError(t, queue.NackDelivery(context.Background(), retentionTopic, retentionSubscriber.Name,
+		retentionClaim[0].ID, retentionClaim[0].ReceiptToken, time.Hour, "retained until delivery removal"))
+	var retainedErrors int
+	require.NoError(t, queue.db.Conn().Get(&retainedErrors, queue.db.Conn().Rebind(
+		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
+	require.Equal(t, 1, retainedErrors)
+	require.NoError(t, queue.DeleteSubscriber(context.Background(), retentionTopic, retentionSubscriber.Name))
+	require.NoError(t, queue.db.Conn().Get(&retainedErrors, queue.db.Conn().Rebind(
+		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
+	require.Zero(t, retainedErrors, "failure history retention must follow its delivery row")
+
 	concurrentTopic, concurrentSubscriber := createContractTopic(t, queue, "contract-concurrent-claim", SubscriberOptions{
 		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
 	})
@@ -267,6 +331,62 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Equal(t, concurrentReceipt.MessageID, owner.ID)
 	require.NoError(t, queue.AckDelivery(context.Background(), concurrentTopic, concurrentSubscriber.Name,
 		owner.ID, owner.ReceiptToken))
+
+	terminalTopic, terminalSubscriber := createContractTopic(t, queue, "contract-terminal-race", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+	})
+	terminalReceipt, err := queue.PublishDurable(context.Background(), terminalTopic, Message{Message: "one terminal owner"})
+	require.NoError(t, err)
+	terminalClaim, err := queue.Claim(context.Background(), terminalTopic, terminalSubscriber.Name, 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, terminalClaim, 1)
+	type terminalResult struct {
+		operation string
+		err       error
+	}
+	terminalResults := make(chan terminalResult, 3)
+	startTerminal := make(chan struct{})
+	var terminalWorkers sync.WaitGroup
+	for operation, execute := range map[string]func() error{
+		"ack": func() error {
+			return queue.AckDelivery(context.Background(), terminalTopic, terminalSubscriber.Name,
+				terminalClaim[0].ID, terminalClaim[0].ReceiptToken)
+		},
+		"nack": func() error {
+			return queue.NackDelivery(context.Background(), terminalTopic, terminalSubscriber.Name,
+				terminalClaim[0].ID, terminalClaim[0].ReceiptToken, time.Hour, "terminal race")
+		},
+		"cancel": func() error {
+			return queue.CancelClaimedDelivery(context.Background(), terminalTopic, terminalSubscriber.Name,
+				terminalClaim[0].ID, terminalClaim[0].ReceiptToken, "terminal race")
+		},
+	} {
+		operation, execute := operation, execute
+		terminalWorkers.Add(1)
+		go func() {
+			defer terminalWorkers.Done()
+			<-startTerminal
+			terminalResults <- terminalResult{operation: operation, err: execute()}
+		}()
+	}
+	close(startTerminal)
+	terminalWorkers.Wait()
+	close(terminalResults)
+	winner := ""
+	for result := range terminalResults {
+		if result.err == nil {
+			require.Empty(t, winner, "more than one terminal operation succeeded")
+			winner = result.operation
+			continue
+		}
+		require.ErrorIs(t, result.err, ErrLeaseLost)
+	}
+	require.NotEmpty(t, winner)
+	terminalStatus, err := queue.GetMessageStatus(context.Background(), terminalTopic, terminalReceipt.MessageID)
+	require.NoError(t, err)
+	require.Len(t, terminalStatus.Deliveries, 1)
+	expectedTerminalStatus := map[string]string{"ack": "processed", "nack": "pending", "cancel": "cancelled"}[winner]
+	require.Equal(t, expectedTerminalStatus, terminalStatus.Deliveries[0].Status)
 
 	batchTopic, batchSubscriber := createContractTopic(t, queue, "contract-batch-result", SubscriberOptions{
 		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
@@ -404,6 +524,9 @@ func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Dr
 	database := testDB(driver)
 	_, err := database.ExecContext(ctx, "CREATE TABLE contract_business_records (id VARCHAR(36) PRIMARY KEY)")
 	require.NoError(t, err)
+	observer, err := database.Connx(ctx)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, observer.Close()) }()
 
 	tx, err := driver.DB().BeginTx(ctx, nil)
 	require.NoError(t, err)
@@ -412,6 +535,10 @@ func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Dr
 	receipt, err := queue.PublishTx(ctx, tx, topic, Message{Message: "transaction-commit"})
 	require.NoError(t, err)
 	require.Equal(t, "staged", receipt.State)
+	var visibleBeforeCommit int
+	require.NoError(t, observer.GetContext(ctx, &visibleBeforeCommit,
+		database.Rebind("SELECT COUNT(*) FROM messages WHERE id = ?"), receipt.MessageID))
+	require.Zero(t, visibleBeforeCommit, "staged rows must not be visible before caller commit")
 	require.NoError(t, tx.Commit())
 
 	tx, err = driver.DB().BeginTx(ctx, nil)
@@ -508,6 +635,10 @@ func runPostgresTopologyFenceContract(t *testing.T, queue *Queue, driver store.D
 		require.Failf(t, "mutation bypassed topology fence", "error=%v", err)
 	case <-time.After(100 * time.Millisecond):
 	}
+	secondReceipt, err := queue.PublishTx(ctx, tx, topic, Message{Message: "same caller transaction"})
+	require.NoError(t, err,
+		"caller-owned transactions rely on the database row fence and must not deadlock on the process-local writer fence")
+	require.Equal(t, "staged", secondReceipt.State)
 	require.NoError(t, tx.Commit())
 	require.NoError(t, <-mutationResult)
 }

@@ -40,7 +40,11 @@ func TestBalancedDurabilityIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer driver.Close()
+	defer func() {
+		if err := driver.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	var synchronous int
 	if err := driver.DB().QueryRow("PRAGMA synchronous").Scan(&synchronous); err != nil {
 		t.Fatal(err)

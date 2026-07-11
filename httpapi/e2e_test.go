@@ -146,7 +146,7 @@ func requireHTTPStatus(
 	}
 	response, err := client.Do(request)
 	require.NoError(t, err)
-	defer response.Body.Close()
+	defer func() { require.NoError(t, response.Body.Close()) }()
 	responseBody, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
 	require.Equal(t, wantStatus, response.StatusCode, string(responseBody))

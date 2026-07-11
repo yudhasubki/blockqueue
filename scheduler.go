@@ -242,10 +242,8 @@ func (q *Queue) startScheduler() {
 			}
 			q.schedulerHealthy.Store(false)
 			slog.Error("scheduler next-run query failed", "error", err)
-			select {
-			case <-q.serverCtx.Done():
+			if !waitForMaintenanceRetry(q.serverCtx, clock) {
 				return
-			case <-clock.After(time.Second):
 			}
 			continue
 		}
@@ -269,6 +267,7 @@ func (q *Queue) startScheduler() {
 			continue
 		case <-clock.After(wait):
 		}
+		claimFailed := false
 		for {
 			schedule, claimed, err := q.db.claimDueSchedule(q.serverCtx, q.schedulerOwner, clock.Now(), defaultScheduleLease)
 			if err != nil {
@@ -277,6 +276,7 @@ func (q *Queue) startScheduler() {
 				}
 				q.schedulerHealthy.Store(false)
 				slog.Error("scheduler claim failed", "error", err)
+				claimFailed = true
 				break
 			}
 			if !claimed {
@@ -299,6 +299,9 @@ func (q *Queue) startScheduler() {
 					metric.SchedulerOperations.WithLabelValues("published", "success").Inc()
 				}
 			}
+		}
+		if claimFailed && !waitForMaintenanceRetry(q.serverCtx, clock) {
+			return
 		}
 	}
 }

@@ -327,7 +327,11 @@ The complete OpenAPI 3.1 contract is served at `/openapi.json`. Errors use
 message status, delivery/message cancellation, snooze, and delivery error
 history. Database transaction methods are intentionally Go-only: a remote HTTP
 request cannot join the caller's local transaction; cross-database systems
-should publish through an application outbox.
+should use the documented [transactional outbox relay](docs/http-outbox.md).
+Async single-message publish returns a `Location` header for the canonical
+message status resource. Embedders can install `AuthMiddleware`, a typed
+`PrincipalResolver`, or both; the standalone binary remains loopback-only by
+default.
 
 ## Delivery contract
 
@@ -362,8 +366,13 @@ roadmap item rather than hidden behavior in the release.
 | Turso/libSQL | Experimental | Smoke-test scope only | Backend dependent |
 
 Set `store.DurabilityBalanced` explicitly when lower latency is more important
-than the strict default. Async admission has no local disk spool; use durable
-publish when a successful response must imply a committed transaction.
+than the strict default. SQLite balanced mode uses `synchronous=NORMAL`: the
+database remains consistent, but the newest acknowledged commits can roll back
+after power loss. PostgreSQL balanced mode uses `synchronous_commit=local`: it
+still waits for local WAL flush, but does not wait for synchronous replicas, so
+a failover can lose an acknowledged commit. Async admission has no local disk
+spool; use durable publish when a successful response must imply a committed
+transaction.
 Processed deliveries are retained for seven days and schedule-run history for
 30 days by default. Dead letters are retained indefinitely unless
 `Options.DeadLetterRetention` is set explicitly.
@@ -376,6 +385,10 @@ go test -race ./...
 go vet ./...
 go test -run '^$' -bench . -benchmem ./...
 ```
+
+An embedding `http.Server` should set `WriteTimeout` to at least 65 seconds:
+the HTTP claim contract permits a 60-second long poll and needs response-write
+headroom. The standalone binary applies this floor by default.
 
 The SQLite and PostgreSQL contract suite is shared. PostgreSQL tests create a
 random schema per run, remove it during cleanup, and refuse a database whose

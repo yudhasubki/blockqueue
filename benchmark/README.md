@@ -65,6 +65,40 @@ It runs 10 ms, 100 ms, and 1 s hold cases. This is a documented contention cost,
 not a throughput gate: application callbacks should contain only short local
 database work and must not perform network I/O.
 
+To verify that historical scheduler growth never returns to the claim hot path,
+run the opt-in one-million-row fixture with fixed trials:
+
+```bash
+BLOCKQUEUE_BENCH_LARGE_HISTORY=1 \
+  go test -run '^$' -bench '^BenchmarkClaim100WithMillionScheduleRuns/sqlite$' \
+  -benchtime=100x -count=5 .
+
+BLOCKQUEUE_BENCH_LARGE_HISTORY=1 \
+BLOCKQUEUE_BENCH_POSTGRES_URL='postgres://.../blockqueue_bench?sslmode=disable' \
+  go test -run '^$' -bench '^BenchmarkClaim100WithMillionScheduleRuns/postgres$' \
+  -benchtime=100x -count=5 .
+```
+
+Compare the five-trial median and tail spread with `BenchmarkClaim100` from the
+same machine. The median regression gate is 5%; retain every raw trial because
+local PostgreSQL tail variance can be wider than the median.
+
+The 2026-07-11 Apple M1 validation used paired trials after normalizing fixture
+WAL and statistics. SQLite measured 5.85 ms/op without history and 5.95 ms/op
+with 1,000,000 runs (`+1.7%`). PostgreSQL measured 52.51 ms/op without history
+and 52.94 ms/op with 1,000,000 runs (`+0.8%`). PostgreSQL absolute latency
+changed after repeatedly creating and dropping multi-million-row schemas, but
+the paired history/no-history comparison remained within the 5% gate; never
+compare a warmed pre-fixture trial against a post-fixture trial.
+
+The same audit recorded fixed-count before/after hot-path medians. SQLite
+`Claim100` improved from 6.28 to 6.02 ms (`-4.1%`), single claim+ACK from 0.62
+to 0.50 ms (`-18.8%`), and `BatchAck100` stayed flat at 19.08/19.10 ms.
+PostgreSQL stayed within noise: 27.82/27.91 ms, 0.90/0.91 ms, and 56.60/56.30
+ms respectively. Idle durable publish with a 50 ms configured flush interval
+fell from 50.2 ms to 0.18 ms because durable waiters trigger an immediate
+drain-to-empty flush; async-only traffic retains the batching window.
+
 ## HTTP/k6 benchmark: SQLite
 
 Run from the repository root with a fresh database:
@@ -104,6 +138,20 @@ Historical SQLite balanced HTTP acceptance run (Apple M1, darwin/arm64,
 The comparable baseline is 41,128 req/s. The median regression is 1.49%, which
 passes the 5% gate. Every request succeeded and shutdown drained all admitted
 messages before row counts were checked.
+
+The 2026-07-11 audit changes were also measured against an archived `HEAD`
+snapshot on the same busy host, alternating fresh databases to remove machine
+state as a confounder:
+
+| Build | five-trial req/s | median req/s | median latency | median p95 | median p99.9 |
+|---|---|---:|---:|---:|---:|
+| archived `HEAD` | 36,522 / 36,993 / 31,504 / 37,718 / 38,288 | 36,993 | 1.18 ms | 6.56 ms | 32.26 ms |
+| current | 36,844 / 33,881 / 37,983 / 38,356 / 37,932 | 37,932 | 1.17 ms | 6.36 ms | 30.78 ms |
+
+Current throughput is 2.54% higher, so the adaptive durable flush change passes
+the no-more-than-5% regression gate while preserving the async group-commit
+window. A separate current verification trial shut down with exactly 280,510
+canonical messages and 280,510 delivery rows for 280,510 successful responses.
 
 Batch burst:
 

@@ -72,13 +72,16 @@ func (q *Queue) BatchPublishTx(ctx context.Context, tx *sql.Tx, topic Topic, req
 		return PublishReceipts{}, nil
 	}
 
-	q.admissionMu.RLock()
 	runtime, exists := q.getTopicRuntime(topic)
-	q.admissionMu.RUnlock()
 	if !exists {
 		return nil, ErrTopicNotFound
 	}
-	if runtime.deleted.Load() {
+	q.admissionMu.RLock()
+	defer q.admissionMu.RUnlock()
+	if err := q.requireTransactionAllowed(tx); err != nil {
+		return nil, err
+	}
+	if current := q.registry.Load().byName[topic.Name]; current != runtime || runtime.deleted.Load() {
 		return nil, ErrTopicNotFound
 	}
 

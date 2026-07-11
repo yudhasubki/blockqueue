@@ -4,19 +4,57 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/httpapi"
 	"github.com/yudhasubki/blockqueue/internal/testdb"
 	"github.com/yudhasubki/blockqueue/store"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
+
+func TestAsyncPublishReturnsResolvableLocation(t *testing.T) {
+	_, handler := setupHTTPQueue(t)
+	publish := httptest.NewRecorder()
+	handler.ServeHTTP(publish, httptest.NewRequest(
+		http.MethodPost, "/v1/topics/orders/messages", bytes.NewBufferString(`{"message":"async location"}`),
+	))
+	if publish.Code != http.StatusAccepted {
+		t.Fatalf("publish status=%d body=%s", publish.Code, publish.Body.String())
+	}
+	var receipt struct {
+		Data blockqueue.PublishReceipt `json:"data"`
+	}
+	if err := json.Unmarshal(publish.Body.Bytes(), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	expected := "/v1/topics/orders/messages/" + receipt.Data.MessageID
+	if location := publish.Header().Get("Location"); location != expected {
+		t.Fatalf("Location=%q expected=%q", location, expected)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		status := httptest.NewRecorder()
+		handler.ServeHTTP(status, httptest.NewRequest(http.MethodGet, expected, nil))
+		if status.Code == http.StatusOK {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Location did not become resolvable: status=%d body=%s", status.Code, status.Body.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 
 func TestHTTPDeliveryControlsAndProblemDetails(t *testing.T) {
 	queue, handler := setupHTTPQueue(t)
@@ -128,13 +166,22 @@ func TestHTTPDeliveryControlsAndProblemDetails(t *testing.T) {
 func TestOpenAPIAndPluggableAuthentication(t *testing.T) {
 	queue, _ := setupHTTPQueue(t)
 	authCalls := 0
+	resolverCalls := 0
 	handler := httpapi.Router(queue, httpapi.Options{
 		DisableUI: true,
+		PrincipalResolver: func(request *http.Request) (string, error) {
+			resolverCalls++
+			if request.Header.Get("Authorization") == "" {
+				return "", errors.New("missing credentials")
+			}
+			return "user-42", nil
+		},
 		AuthMiddleware: func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				authCalls++
-				if r.Header.Get("Authorization") == "" {
-					w.WriteHeader(http.StatusUnauthorized)
+				principal, ok := httpapi.PrincipalFromContext(r.Context())
+				if !ok || principal != "user-42" {
+					w.WriteHeader(http.StatusForbidden)
 					return
 				}
 				next.ServeHTTP(w, r)
@@ -172,9 +219,73 @@ func TestOpenAPIAndPluggableAuthentication(t *testing.T) {
 	}
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/v1/topics", nil))
-	if unauthorized.Code != http.StatusUnauthorized || authCalls != 1 {
-		t.Fatalf("auth status=%d calls=%d", unauthorized.Code, authCalls)
+	if unauthorized.Code != http.StatusUnauthorized || authCalls != 0 || resolverCalls != 1 {
+		t.Fatalf("auth status=%d auth_calls=%d resolver_calls=%d", unauthorized.Code, authCalls, resolverCalls)
 	}
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/v1/topics", nil)
+	authorizedRequest.Header.Set("Authorization", "Bearer test")
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, authorizedRequest)
+	if authorized.Code != http.StatusOK || authCalls != 1 || resolverCalls != 2 {
+		t.Fatalf("authorized status=%d auth_calls=%d resolver_calls=%d body=%s",
+			authorized.Code, authCalls, resolverCalls, authorized.Body.String())
+	}
+}
+
+func TestOpenAPIRouteMethodCoverageIsBidirectional(t *testing.T) {
+	queue, handler := setupHTTPQueue(t)
+	_ = queue
+	routes, ok := handler.(chi.Routes)
+	if !ok {
+		t.Fatal("HTTP router does not expose chi route metadata")
+	}
+	actual := make(map[string]struct{})
+	if err := chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if route == "/v1" || strings.HasPrefix(route, "/v1/") {
+			path := strings.TrimPrefix(route, "/v1")
+			actual[strings.ToLower(method)+" "+path] = struct{}{}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	openapi := httptest.NewRecorder()
+	handler.ServeHTTP(openapi, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	var document struct {
+		Paths map[string]map[string]json.RawMessage `json:"paths"`
+	}
+	if err := json.Unmarshal(openapi.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+	expected := make(map[string]struct{})
+	methods := map[string]struct{}{
+		"get": {}, "post": {}, "put": {}, "patch": {}, "delete": {},
+	}
+	for path, item := range document.Paths {
+		for method := range item {
+			if _, isMethod := methods[method]; isMethod {
+				expected[method+" "+path] = struct{}{}
+			}
+		}
+	}
+
+	missing := setDifference(expected, actual)
+	extra := setDifference(actual, expected)
+	if len(missing) > 0 || len(extra) > 0 {
+		t.Fatalf("route/OpenAPI mismatch\nmissing routes: %v\nundocumented routes: %v", missing, extra)
+	}
+}
+
+func setDifference(left, right map[string]struct{}) []string {
+	result := make([]string, 0)
+	for item := range left {
+		if _, exists := right[item]; !exists {
+			result = append(result, item)
+		}
+	}
+	slices.Sort(result)
+	return result
 }
 
 func TestInvalidSubscriberOptionsUseProblemValidationResponse(t *testing.T) {

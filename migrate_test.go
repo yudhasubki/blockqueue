@@ -16,7 +16,7 @@ import (
 func TestMigrationChecksumMismatchFailsLoudly(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "checksum.db"), sqlite.Config{})
 	require.NoError(t, err)
-	defer driver.Close()
+	defer func() { require.NoError(t, driver.Close()) }()
 	require.NoError(t, Migrate(context.Background(), driver))
 
 	_, err = testDB(driver).Exec(`
@@ -30,7 +30,7 @@ func TestMigrationChecksumMismatchFailsLoudly(t *testing.T) {
 func TestFreshSchemaContainsCanonicalTables(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "fresh-schema.db"), sqlite.Config{})
 	require.NoError(t, err)
-	defer driver.Close()
+	defer func() { require.NoError(t, driver.Close()) }()
 	require.NoError(t, Migrate(context.Background(), driver))
 
 	connection := testDB(driver)
@@ -62,7 +62,7 @@ func TestStartupFailureClosesOwnedDriver(t *testing.T) {
 func TestMigrationStatementAndLedgerRollbackTogether(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "rollback.db"), sqlite.Config{})
 	require.NoError(t, err)
-	defer driver.Close()
+	defer func() { require.NoError(t, driver.Close()) }()
 	connection := newDb(driver).Conn()
 	require.NoError(t, ensureMigrationTable(context.Background(), connection, "sqlite"))
 

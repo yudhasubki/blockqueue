@@ -172,6 +172,7 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	transactionsDone := make(chan struct{})
 	go func() {
 		q.transactions.Wait()
+		q.controlOps.Wait()
 		close(transactionsDone)
 	}()
 	var transactionErr error

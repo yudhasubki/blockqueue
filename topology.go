@@ -7,6 +7,65 @@ import (
 	"github.com/google/uuid"
 )
 
+// topicMutation blocks admissions only for the affected topic. It registers
+// itself before shutdown can begin, places a writer barrier after every older
+// admission for that topic, and holds the registry mutex only for the final DB
+// mutation and atomic runtime swap.
+type topicMutation struct {
+	queue          *Queue
+	runtime        *topicRuntime
+	registryLocked bool
+}
+
+func (q *Queue) beginControlOperation() error {
+	q.admissionMu.RLock()
+	defer q.admissionMu.RUnlock()
+	if err := q.requireRunning(); err != nil {
+		return err
+	}
+	q.controlOps.Add(1)
+	return nil
+}
+
+func (q *Queue) beginTopicMutation(topic Topic) (*topicMutation, error) {
+	runtime, exists := q.getTopicRuntime(topic)
+	if !exists {
+		return nil, ErrTopicNotFound
+	}
+	runtime.admissionMu.Lock()
+	if current := q.registry.Load().byName[topic.Name]; current != runtime || runtime.deleted.Load() {
+		runtime.admissionMu.Unlock()
+		return nil, ErrTopicNotFound
+	}
+	if err := q.beginControlOperation(); err != nil {
+		runtime.admissionMu.Unlock()
+		return nil, err
+	}
+	return &topicMutation{queue: q, runtime: runtime}, nil
+}
+
+func (mutation *topicMutation) barrierAndLock(ctx context.Context) error {
+	if mutation.queue.writer != nil {
+		if err := mutation.queue.writer.Barrier(ctx); err != nil {
+			return err
+		}
+	}
+	mutation.queue.mtx.Lock()
+	mutation.registryLocked = true
+	if current := mutation.queue.registry.Load().byName[mutation.runtime.name]; current != mutation.runtime || mutation.runtime.deleted.Load() {
+		return ErrTopicNotFound
+	}
+	return nil
+}
+
+func (mutation *topicMutation) close() {
+	if mutation.registryLocked {
+		mutation.queue.mtx.Unlock()
+	}
+	mutation.queue.controlOps.Done()
+	mutation.runtime.admissionMu.Unlock()
+}
+
 func (q *Queue) GetTopics(ctx context.Context, filter TopicFilter) (Topics, error) {
 	return q.getTopics(ctx, filter)
 }
@@ -44,42 +103,36 @@ func (q *Queue) DeleteSubscriber(ctx context.Context, topic Topic, subscriber st
 }
 
 func (q *Queue) createTopic(ctx context.Context, topic Topic, subscribers Subscribers) error {
-	if q.State() != LifecycleRunning {
-		return ErrQueueNotRunning
-	}
 	candidate, err := buildTopicRuntime(topic, subscribers)
 	if err != nil {
 		return fmt.Errorf("validate topic runtime: %w", err)
 	}
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
+	if err := q.beginControlOperation(); err != nil {
+		return err
+	}
+	defer q.controlOps.Done()
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	if _, exists := q.registry.Load().byName[topic.Name]; exists {
 		return ErrResourceConflict
 	}
 	if err := q.db.createTopic(ctx, topic, subscribers); err != nil {
 		return err
 	}
-	q.storeTopic(candidate)
+	q.storeTopicLocked(candidate)
 	return nil
 }
 
 func (q *Queue) deleteTopic(ctx context.Context, topic Topic) error {
-	if q.State() == LifecycleStopping || q.State() == LifecycleStopped {
-		return ErrQueueStopping
+	mutation, err := q.beginTopicMutation(topic)
+	if err != nil {
+		return err
 	}
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
-	if q.State() == LifecycleRunning && q.writer != nil {
-		if err := q.writer.Barrier(ctx); err != nil {
-			return err
-		}
+	defer mutation.close()
+	if err := mutation.barrierAndLock(ctx); err != nil {
+		return err
 	}
-
-	current := q.registry.Load()
-	runtime, exists := current.byName[topic.Name]
-	if !exists {
-		return ErrTopicNotFound
-	}
+	runtime := mutation.runtime
 	if err := q.db.deleteTopic(ctx, runtime.id); err != nil {
 		return err
 	}
@@ -91,7 +144,7 @@ func (q *Queue) deleteTopic(ctx context.Context, topic Topic) error {
 		}
 		subscriber.deleted.Store(true)
 	}
-	q.removeTopic(runtime)
+	q.removeTopicLocked(runtime)
 	return nil
 }
 
@@ -104,20 +157,15 @@ func (q *Queue) getSubscribersStatus(ctx context.Context, topic Topic) (Subscrib
 }
 
 func (q *Queue) createSubscribers(ctx context.Context, topic Topic, subscribers Subscribers) error {
-	if q.State() == LifecycleStopping || q.State() == LifecycleStopped {
-		return ErrQueueStopping
+	mutation, err := q.beginTopicMutation(topic)
+	if err != nil {
+		return err
 	}
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
-	runtime, exists := q.getTopicRuntime(topic)
-	if !exists {
-		return ErrTopicNotFound
+	defer mutation.close()
+	if err := mutation.barrierAndLock(ctx); err != nil {
+		return err
 	}
-	if q.State() == LifecycleRunning && q.writer != nil {
-		if err := q.writer.Barrier(ctx); err != nil {
-			return err
-		}
-	}
+	runtime := mutation.runtime
 	prepared, err := runtime.prepareSubscribers(subscribers)
 	if err != nil {
 		return err
@@ -132,20 +180,15 @@ func (q *Queue) createSubscribers(ctx context.Context, topic Topic, subscribers 
 }
 
 func (q *Queue) deleteSubscriber(ctx context.Context, topic Topic, subscriberName string) error {
-	if q.State() == LifecycleStopping || q.State() == LifecycleStopped {
-		return ErrQueueStopping
+	mutation, err := q.beginTopicMutation(topic)
+	if err != nil {
+		return err
 	}
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
-	runtime, exists := q.getTopicRuntime(topic)
-	if !exists {
-		return ErrTopicNotFound
+	defer mutation.close()
+	if err := mutation.barrierAndLock(ctx); err != nil {
+		return err
 	}
-	if q.State() == LifecycleRunning && q.writer != nil {
-		if err := q.writer.Barrier(ctx); err != nil {
-			return err
-		}
-	}
+	runtime := mutation.runtime
 	subscriber, ok := runtime.subscriberByName(subscriberName)
 	if !ok {
 		return ErrSubscriberNotFound
@@ -180,7 +223,10 @@ func (q *Queue) notify(topicID uuid.UUID) {
 func (q *Queue) storeTopic(runtime *topicRuntime) {
 	q.mtx.Lock()
 	defer q.mtx.Unlock()
+	q.storeTopicLocked(runtime)
+}
 
+func (q *Queue) storeTopicLocked(runtime *topicRuntime) {
 	current := q.registry.Load()
 	next := &topicRegistry{
 		byName: make(map[string]*topicRuntime, len(current.byName)+1),
@@ -198,10 +244,7 @@ func (q *Queue) storeTopic(runtime *topicRuntime) {
 	q.topologyVersion.Add(1)
 }
 
-func (q *Queue) removeTopic(runtime *topicRuntime) {
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-
+func (q *Queue) removeTopicLocked(runtime *topicRuntime) {
 	current := q.registry.Load()
 	next := &topicRegistry{
 		byName: make(map[string]*topicRuntime, len(current.byName)-1),

@@ -51,6 +51,7 @@ type Queue struct {
 	topologyVersion  atomic.Uint64
 	workers          sync.WaitGroup
 	transactions     sync.WaitGroup
+	controlOps       sync.WaitGroup
 	transactionMu    sync.RWMutex
 	activeTx         map[*sql.Tx]struct{}
 	schedulerSignal  chan struct{}

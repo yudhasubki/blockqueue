@@ -336,7 +336,7 @@ func TestLifecycleAndWeightedBudget(t *testing.T) {
 func TestEmbeddedMigrationRerun(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "migration.db"), sqlite.Config{})
 	require.NoError(t, err)
-	defer driver.Close()
+	defer func() { require.NoError(t, driver.Close()) }()
 	require.NoError(t, Migrate(context.Background(), driver))
 	require.NoError(t, Migrate(context.Background(), driver))
 	var applied int
@@ -361,7 +361,7 @@ func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {
 	require.NoError(t, err)
 	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
 	require.NoError(t, err)
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{BatchSize: 1, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond})
 	now := time.Now().UTC()

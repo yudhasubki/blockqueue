@@ -56,13 +56,21 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 	var scheduledAt time.Time
 	var admission *writeAdmission
 	err := func() error {
-		q.admissionMu.RLock()
-		defer q.admissionMu.RUnlock()
 		runtime, exists := q.getTopicRuntime(topic)
 		if !exists {
 			return ErrTopicNotFound
 		}
-		if runtime.deleted.Load() || len(runtime.registry.Load().byID) == 0 {
+		runtime.admissionMu.RLock()
+		defer runtime.admissionMu.RUnlock()
+		q.admissionMu.RLock()
+		defer q.admissionMu.RUnlock()
+		if err := q.requireRunning(); err != nil {
+			return err
+		}
+		if current := q.registry.Load().byName[topic.Name]; current != runtime || runtime.deleted.Load() {
+			return ErrTopicNotFound
+		}
+		if len(runtime.registry.Load().byID) == 0 {
 			return ErrNoActiveSubscriber
 		}
 		now := time.Now().UTC().Truncate(time.Millisecond)
@@ -111,13 +119,21 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 	receipts := make(PublishReceipts, len(requests))
 	var admission *writeAdmission
 	err := func() error {
-		q.admissionMu.RLock()
-		defer q.admissionMu.RUnlock()
 		runtime, exists := q.getTopicRuntime(topic)
 		if !exists {
 			return ErrTopicNotFound
 		}
-		if runtime.deleted.Load() || len(runtime.registry.Load().byID) == 0 {
+		runtime.admissionMu.RLock()
+		defer runtime.admissionMu.RUnlock()
+		q.admissionMu.RLock()
+		defer q.admissionMu.RUnlock()
+		if err := q.requireRunning(); err != nil {
+			return err
+		}
+		if current := q.registry.Load().byName[topic.Name]; current != runtime || runtime.deleted.Load() {
+			return ErrTopicNotFound
+		}
+		if len(runtime.registry.Load().byID) == 0 {
 			return ErrNoActiveSubscriber
 		}
 

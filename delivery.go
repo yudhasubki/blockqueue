@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -271,6 +272,7 @@ func (q *Queue) signalReaper() {
 }
 
 func (q *Queue) startDeliveryReaper() {
+	clock := q.clock()
 	for {
 		next, exists, err := q.db.nextLeaseExpiry(q.serverCtx)
 		if err != nil {
@@ -278,10 +280,8 @@ func (q *Queue) startDeliveryReaper() {
 				return
 			}
 			q.deliveryHealthy.Store(false)
-			select {
-			case <-q.serverCtx.Done():
+			if !waitForMaintenanceRetry(q.serverCtx, clock) {
 				return
-			case <-time.After(time.Second):
 			}
 			continue
 		}
@@ -317,12 +317,16 @@ func (q *Queue) startDeliveryReaper() {
 		}
 
 		var total int64
+		reapFailed := false
 		for {
 			count, err := q.db.reapExpiredDeliveries(q.serverCtx, 1000)
 			if err != nil {
-				if !errors.Is(err, context.Canceled) {
-					q.deliveryHealthy.Store(false)
+				if errors.Is(err, context.Canceled) {
+					return
 				}
+				q.deliveryHealthy.Store(false)
+				slog.Error("delivery reaper failed", "error", err)
+				reapFailed = true
 				break
 			}
 			total += count
@@ -334,6 +338,9 @@ func (q *Queue) startDeliveryReaper() {
 			for _, topic := range q.registry.Load().byID {
 				topic.notify()
 			}
+		}
+		if reapFailed && !waitForMaintenanceRetry(q.serverCtx, clock) {
+			return
 		}
 	}
 }
@@ -440,8 +447,12 @@ func (q *Queue) ResumeTopic(ctx context.Context, topic Topic) error {
 }
 
 func (q *Queue) setTopicPaused(ctx context.Context, topic Topic, paused bool) error {
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
+	if err := q.beginControlOperation(); err != nil {
+		return err
+	}
+	defer q.controlOps.Done()
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	topicRuntime, ok := q.getTopicRuntime(topic)
 	if !ok {
 		return ErrTopicNotFound
@@ -466,8 +477,12 @@ func (q *Queue) ResumeSubscriber(ctx context.Context, topic Topic, subscriber st
 }
 
 func (q *Queue) setSubscriberPaused(ctx context.Context, topic Topic, subscriber string, paused bool) error {
-	q.admissionMu.Lock()
-	defer q.admissionMu.Unlock()
+	if err := q.beginControlOperation(); err != nil {
+		return err
+	}
+	defer q.controlOps.Done()
+	q.mtx.Lock()
+	defer q.mtx.Unlock()
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err

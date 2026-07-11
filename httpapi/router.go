@@ -1,14 +1,29 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"path/filepath"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/yudhasubki/blockqueue"
 )
+
+type principalContextKey struct{}
+
+// PrincipalResolver authenticates a request and returns the stable subject
+// exposed to downstream authorization middleware and handlers. A nil resolver
+// keeps the HTTP package authentication-neutral.
+type PrincipalResolver func(*http.Request) (string, error)
+
+// PrincipalFromContext returns the subject installed by PrincipalResolver.
+func PrincipalFromContext(ctx context.Context) (string, bool) {
+	principal, ok := ctx.Value(principalContextKey{}).(string)
+	return principal, ok && principal != ""
+}
 
 type Options struct {
 	// Prefix defaults to /v1. Handler.Attach can be used directly when the
@@ -20,6 +35,9 @@ type Options struct {
 	// OpenAPI, and static UI remain available for the embedding application to
 	// protect at a wider router boundary when desired.
 	AuthMiddleware func(http.Handler) http.Handler
+	// PrincipalResolver is optional. When set, resolution failure or an empty
+	// subject returns an RFC 9457 401 response before AuthMiddleware runs.
+	PrincipalResolver PrincipalResolver
 }
 
 func Router(queue *blockqueue.Queue, options Options) http.Handler {
@@ -46,6 +64,9 @@ func Router(queue *blockqueue.Queue, options Options) http.Handler {
 	}
 	handler := New(queue, queueErrorMapper(queue))
 	router.Group(func(api chi.Router) {
+		if options.PrincipalResolver != nil {
+			api.Use(principalMiddleware(options.PrincipalResolver))
+		}
 		if options.AuthMiddleware != nil {
 			api.Use(options.AuthMiddleware)
 		}
@@ -62,6 +83,21 @@ func Router(queue *blockqueue.Queue, options Options) http.Handler {
 		router.Handle("/*", fileServer)
 	}
 	return router
+}
+
+func principalMiddleware(resolve PrincipalResolver) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			principal, err := resolve(request)
+			principal = strings.TrimSpace(principal)
+			if err != nil || principal == "" {
+				writeProblem(w, request, http.StatusUnauthorized, "unauthorized", "authentication failed")
+				return
+			}
+			ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
+			next.ServeHTTP(w, request.WithContext(ctx))
+		})
+	}
 }
 
 func queueErrorMapper(queue *blockqueue.Queue) ErrorMapper {

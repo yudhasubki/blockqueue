@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -35,12 +36,11 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	defer driver.Close()
-	if err := blockqueue.Migrate(ctx, driver); err != nil {
-		return err
+	if migrationErr := blockqueue.Migrate(ctx, driver); migrationErr != nil {
+		return errors.Join(migrationErr, driver.Close())
 	}
 	slog.Info("successfully applied embedded migrations")
-	return nil
+	return driver.Close()
 }
 
 func (m *Migrate) Usage() {

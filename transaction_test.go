@@ -175,3 +175,45 @@ func TestShutdownDrainsRegisteredTransaction(t *testing.T) {
 	require.NoError(t, <-shutdownResult)
 	require.Equal(t, LifecycleStopped, queue.State())
 }
+
+func TestShutdownDrainsRegisteredTransactionRollback(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	rollbackErr := errors.New("business rollback during shutdown")
+	transactionResult := make(chan error, 1)
+	go func() {
+		transactionResult <- queue.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+			_, err := queue.PublishTx(context.Background(), tx, topic, Message{Message: "must roll back"})
+			if err != nil {
+				return err
+			}
+			close(started)
+			<-release
+			return rollbackErr
+		})
+	}()
+	<-started
+
+	shutdownResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		shutdownResult <- queue.shutdown(ctx, false)
+	}()
+	require.Eventually(t, func() bool { return queue.State() == LifecycleStopping }, time.Second, time.Millisecond)
+	select {
+	case err := <-shutdownResult:
+		require.Failf(t, "shutdown returned before transaction rollback", "error=%v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	require.ErrorIs(t, <-transactionResult, rollbackErr)
+	require.NoError(t, <-shutdownResult)
+	require.Equal(t, LifecycleStopped, queue.State())
+	var rows int
+	require.NoError(t, testDB(driver).Get(&rows,
+		"SELECT COUNT(*) FROM messages WHERE message = ?", "must roll back"))
+	require.Zero(t, rows)
+}

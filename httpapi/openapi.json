@@ -45,7 +45,16 @@
 						"description": "Persisted"
 					},
 					"202": {
-						"description": "Admitted"
+						"description": "Admitted",
+						"headers": {
+							"Location": {
+								"description": "Canonical message status resource",
+								"schema": {
+									"type": "string",
+									"format": "uri-reference"
+								}
+							}
+						}
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"

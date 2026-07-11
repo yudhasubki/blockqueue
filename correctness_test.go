@@ -263,7 +263,7 @@ func TestShutdownDeadlineAbortsWriterAndReachesStopped(t *testing.T) {
 	require.NoError(t, err)
 	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
 	require.NoError(t, err)
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 
 	publishResult := make(chan error, 1)
 	go func() {
@@ -410,6 +410,76 @@ func TestSubscriberMutationFailureLeavesRuntimeUnchanged(t *testing.T) {
 	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, time.Second)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
+}
+
+func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "topic-fence.db"), sqlite.Config{BusyTimeout: 1})
+	require.NoError(t, err)
+	queue := New(driver, Options{Writer: WriterOptions{
+		BatchSize: 100, FlushInterval: time.Millisecond,
+		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+	}})
+	require.NoError(t, queue.Run(context.Background()))
+	blockedTopic := NewTopic("blocked-topic")
+	blockedSubscriber := NewSubscriber(blockedTopic, "worker", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1m",
+	})
+	require.NoError(t, queue.CreateTopic(context.Background(), blockedTopic, Subscribers{blockedSubscriber}))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+	otherTopic := NewTopic("unrelated-topic")
+	otherSubscriber := NewSubscriber(otherTopic, "worker", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1m",
+	})
+	require.NoError(t, queue.CreateTopic(context.Background(), otherTopic, Subscribers{otherSubscriber}))
+
+	lock, err := testDB(driver).Connx(context.Background())
+	require.NoError(t, err)
+	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
+	require.NoError(t, err)
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			_, _ = lock.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = lock.Close()
+	}()
+
+	_, err = queue.PublishAsync(context.Background(), blockedTopic, Message{Message: "blocked before barrier"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return !queue.writer.Healthy() }, time.Second, 5*time.Millisecond)
+
+	mutationResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		mutationResult <- queue.DeleteSubscriber(ctx, blockedTopic, "worker")
+	}()
+	require.Eventually(t, func() bool { return len(queue.writer.queue) > 0 }, time.Second, time.Millisecond,
+		"the destructive mutation must install its writer barrier")
+
+	started := time.Now()
+	receipt, err := queue.PublishAsync(context.Background(), otherTopic, Message{Message: "not globally blocked"})
+	require.NoError(t, err)
+	require.Equal(t, "admitted", receipt.State)
+	require.Less(t, time.Since(started), 250*time.Millisecond,
+		"a mutation barrier for one topic must not block unrelated admission")
+
+	_, err = lock.ExecContext(context.Background(), "ROLLBACK")
+	require.NoError(t, err)
+	lockHeld = false
+	require.NoError(t, <-mutationResult)
+	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelBarrier()
+	require.NoError(t, queue.writer.Barrier(barrierCtx))
+
+	var persisted int
+	require.NoError(t, testDB(driver).Get(&persisted,
+		"SELECT COUNT(*) FROM messages WHERE id = ?", receipt.MessageID))
+	require.Equal(t, 1, persisted)
 }
 
 func TestInvalidTopicRuntimeNeverCommitsMetadata(t *testing.T) {
