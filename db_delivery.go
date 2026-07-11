@@ -19,7 +19,8 @@ type deliveryRow struct {
 	CorrelationID  sql.NullString `db:"correlation_id"`
 	Priority       int            `db:"priority"`
 	Status         string         `db:"status"`
-	Attempt        int            `db:"attempt"`
+	DeliveryCount  int            `db:"delivery_count"`
+	FailureCount   int            `db:"failure_count"`
 	VisibleAt      time.Time      `db:"visible_at"`
 	ReceiptToken   sql.NullString `db:"receipt_token"`
 	LeaseExpiresAt sql.NullTime   `db:"lease_expires_at"`
@@ -46,20 +47,21 @@ func (d *db) nowTx(ctx context.Context, tx *sqlx.Tx) (time.Time, error) {
 // locking candidate read and a single UPDATE ... RETURNING. PostgreSQL workers
 // coordinate with SKIP LOCKED; SQLite transactions are BEGIN IMMEDIATE through
 // the driver DSN.
-func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration, maxAttempts int) ([]deliveryRow, error) {
+func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration) ([]deliveryRow, error) {
 	claimed := make([]deliveryRow, 0, limit)
 	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		now, err := d.nowTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		if err := d.requeueExpiredDeliveriesTx(ctx, tx, subscriberID, maxAttempts, now); err != nil {
+		if _, err := d.requeueExpiredDeliveriesTx(ctx, tx, &subscriberID, 1000, now); err != nil {
 			return err
 		}
 		query := `
 			SELECT deliveries.message_id, messages.message, messages.headers,
 			       messages.correlation_id, deliveries.priority, deliveries.status,
-			       deliveries.attempt, deliveries.visible_at, deliveries.receipt_token,
+			       deliveries.delivery_count, deliveries.failure_count,
+			       deliveries.visible_at, deliveries.receipt_token,
 			       deliveries.lease_expires_at, messages.created_at
 			FROM message_deliveries deliveries
 			JOIN messages ON messages.id = deliveries.message_id
@@ -102,7 +104,7 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 			}
 			statement.WriteString(`)
 				UPDATE message_deliveries
-				SET status = 'delivered', attempt = attempt + 1,
+				SET status = 'delivered', delivery_count = delivery_count + 1,
 				    receipt_token = (SELECT receipt_token FROM claimed
 				        WHERE claimed.message_id = message_deliveries.message_id),
 				    lease_expires_at = ?, delivered_at = ?, processed_at = NULL, last_error = NULL
@@ -123,7 +125,7 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 				continue
 			}
 			candidate.Status = "delivered"
-			candidate.Attempt++
+			candidate.DeliveryCount++
 			candidate.ReceiptToken = sql.NullString{String: tokens[candidate.MessageID], Valid: true}
 			candidate.LeaseExpiresAt = sql.NullTime{Time: leaseExpires, Valid: true}
 			claimed = append(claimed, candidate)
@@ -133,22 +135,123 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 	return claimed, err
 }
 
-func (d *db) requeueExpiredDeliveriesTx(ctx context.Context, tx *sqlx.Tx, subscriberID uuid.UUID, maxAttempts int, now time.Time) error {
-	if maxAttempts <= 0 {
-		maxAttempts = 3
-	}
-	processedAtBind := d.dialect.timestampBind()
+type expiredDelivery struct {
+	MessageID          string  `db:"message_id"`
+	SubscriberID       string  `db:"subscriber_id"`
+	FailureCount       int     `db:"failure_count"`
+	MaxAttempts        int     `db:"max_attempts"`
+	RetryInitialMillis int64   `db:"retry_initial_delay_ms"`
+	RetryMaxMillis     int64   `db:"retry_max_delay_ms"`
+	RetryMultiplier    float64 `db:"retry_multiplier"`
+	RetryJitter        float64 `db:"retry_jitter"`
+}
+
+func (d *db) requeueExpiredDeliveriesTx(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	subscriberID *uuid.UUID,
+	limit int,
+	now time.Time,
+) (int64, error) {
 	query := `
-		UPDATE message_deliveries
-		SET status = CASE WHEN attempt >= ? THEN 'dead_letter' ELSE 'pending' END,
-		    visible_at = CASE WHEN attempt >= ? THEN visible_at ELSE ? END,
-		    receipt_token = NULL,
-		    processed_at = CASE WHEN attempt >= ? THEN ` + processedAtBind + ` ELSE NULL END,
-		    lease_expires_at = NULL
-		WHERE subscriber_id = ? AND status = 'delivered' AND lease_expires_at <= ?`
-	_, err := tx.ExecContext(ctx, tx.Rebind(query),
-		maxAttempts, maxAttempts, now, maxAttempts, now, subscriberID, now)
-	return err
+		SELECT deliveries.message_id, deliveries.subscriber_id, deliveries.failure_count,
+		       subscribers.max_attempts, subscribers.retry_initial_delay_ms,
+		       subscribers.retry_max_delay_ms, subscribers.retry_multiplier, subscribers.retry_jitter
+		FROM message_deliveries deliveries
+		JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
+		WHERE deliveries.status = 'delivered' AND deliveries.lease_expires_at <= ?`
+	args := []any{now}
+	if subscriberID != nil {
+		query += " AND deliveries.subscriber_id = ?"
+		args = append(args, *subscriberID)
+	}
+	query += " ORDER BY deliveries.lease_expires_at, deliveries.message_id, deliveries.subscriber_id LIMIT ?"
+	args = append(args, limit)
+	query += d.dialect.lockClause("deliveries", true)
+	rows := make([]expiredDelivery, 0, limit)
+	if err := tx.SelectContext(ctx, &rows, d.Conn().Rebind(query), args...); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+
+	terminalMessageIDs := make([]string, 0)
+	terminalSeen := make(map[string]struct{})
+	for start := 0; start < len(rows); start += 100 {
+		end := min(start+100, len(rows))
+		chunk := rows[start:end]
+		var update strings.Builder
+		update.WriteString("WITH failed(message_id, subscriber_id, failure_count, next_status, visible_at, processed_at) AS (VALUES ")
+		updateArgs := make([]any, 0, len(chunk)*6+1)
+		for index, row := range chunk {
+			if index > 0 {
+				update.WriteByte(',')
+			}
+			failureCount := row.FailureCount + 1
+			status := "pending"
+			visibleAt := now.Add(retryDelayFor(subscriberOptions{
+				RetryInitialDelay: time.Duration(row.RetryInitialMillis) * time.Millisecond,
+				RetryMaxDelay:     time.Duration(row.RetryMaxMillis) * time.Millisecond,
+				RetryMultiplier:   row.RetryMultiplier,
+				RetryJitter:       row.RetryJitter,
+			}, failureCount, row.MessageID))
+			var processedAt any
+			if failureCount >= row.MaxAttempts {
+				status = "dead_letter"
+				visibleAt = now
+				processedAt = now
+				if _, exists := terminalSeen[row.MessageID]; !exists {
+					terminalSeen[row.MessageID] = struct{}{}
+					terminalMessageIDs = append(terminalMessageIDs, row.MessageID)
+				}
+			}
+			update.WriteString(d.dialect.deliveryFailureRow())
+			updateArgs = append(updateArgs, row.MessageID, row.SubscriberID, failureCount, status, visibleAt, processedAt)
+		}
+		update.WriteString(`)
+			UPDATE message_deliveries
+			SET failure_count = (SELECT failure_count FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			    status = (SELECT next_status FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			    visible_at = (SELECT visible_at FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			    receipt_token = NULL, lease_expires_at = NULL,
+			    processed_at = (SELECT processed_at FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			    last_error = ?
+			WHERE status = 'delivered' AND EXISTS (
+			    SELECT 1 FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id
+			)`)
+		updateArgs = append(updateArgs, leaseExpiredError)
+		if _, err := tx.ExecContext(ctx, d.Conn().Rebind(update.String()), updateArgs...); err != nil {
+			return 0, err
+		}
+	}
+	if err := d.insertDeliveryErrorsTx(ctx, tx, rows, leaseExpiredError, now); err != nil {
+		return 0, err
+	}
+	if err := d.completeScheduleRunsForMessagesTx(ctx, tx, terminalMessageIDs); err != nil {
+		return 0, err
+	}
+	return int64(len(rows)), nil
+}
+
+func (d *db) insertDeliveryErrorsTx(ctx context.Context, tx *sqlx.Tx, rows []expiredDelivery, errorText string, failedAt time.Time) error {
+	for start := 0; start < len(rows); start += 150 {
+		end := min(start+150, len(rows))
+		var query strings.Builder
+		query.WriteString("INSERT INTO delivery_errors (id, message_id, subscriber_id, failure_count, error, failed_at) VALUES ")
+		args := make([]any, 0, (end-start)*6)
+		for index, row := range rows[start:end] {
+			if index > 0 {
+				query.WriteByte(',')
+			}
+			query.WriteString("(?, ?, ?, ?, ?, ?)")
+			args = append(args, uuid.NewString(), row.MessageID, row.SubscriberID, row.FailureCount+1, errorText, failedAt)
+		}
+		if _, err := tx.ExecContext(ctx, d.Conn().Rebind(query.String()), args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // reapExpiredDeliveries advances leases even when no consumer performs another
@@ -163,38 +266,8 @@ func (d *db) reapExpiredDeliveries(ctx context.Context, limit int) (int64, error
 		if err != nil {
 			return err
 		}
-		processedAtBind := d.dialect.timestampBind()
-		query := `
-			UPDATE message_deliveries
-			SET status = CASE WHEN attempt >= COALESCE((
-			        SELECT max_attempts FROM topic_subscribers
-			        WHERE id = message_deliveries.subscriber_id), 3)
-			    THEN 'dead_letter' ELSE 'pending' END,
-			    visible_at = CASE WHEN attempt >= COALESCE((
-			        SELECT max_attempts FROM topic_subscribers
-			        WHERE id = message_deliveries.subscriber_id), 3)
-			    THEN visible_at ELSE ? END,
-			    receipt_token = NULL,
-			    processed_at = CASE WHEN attempt >= COALESCE((
-			        SELECT max_attempts FROM topic_subscribers
-			        WHERE id = message_deliveries.subscriber_id), 3)
-			    THEN ` + processedAtBind + ` ELSE NULL END,
-			    lease_expires_at = NULL
-			WHERE status = 'delivered' AND lease_expires_at <= ?
-			  AND (message_id, subscriber_id) IN (
-			    SELECT message_id, subscriber_id FROM message_deliveries
-			    WHERE status = 'delivered' AND lease_expires_at <= ?
-			    ORDER BY lease_expires_at, message_id, subscriber_id LIMIT ?
-			  )`
-		result, err := tx.ExecContext(ctx, tx.Rebind(query), now, now, now, now, limit)
-		if err != nil {
-			return err
-		}
-		affected, _ = result.RowsAffected()
-		if affected == 0 {
-			return nil
-		}
-		return d.completeScheduleRunsTx(ctx, tx, "")
+		affected, err = d.requeueExpiredDeliveriesTx(ctx, tx, nil, limit, now)
+		return err
 	})
 	return affected, err
 }
@@ -209,12 +282,16 @@ func (d *db) nextLeaseExpiry(ctx context.Context) (time.Time, bool, error) {
 }
 
 func (d *db) ackDelivery(ctx context.Context, subscriberID uuid.UUID, messageID, receipt string) error {
-	return d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+	return d.ackDeliveryWithTx(ctx, nil, subscriberID, messageID, receipt)
+}
+
+func (d *db) ackDeliveryWithTx(ctx context.Context, external *sql.Tx, subscriberID uuid.UUID, messageID, receipt string) error {
+	return d.withTx(ctx, external, func(ctx context.Context, tx *sqlx.Tx) error {
 		now, err := d.nowTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		result, err := tx.ExecContext(ctx, tx.Rebind(`
+		result, err := tx.ExecContext(ctx, d.Conn().Rebind(`
 			UPDATE message_deliveries
 			SET status = 'processed', processed_at = ?, lease_expires_at = NULL
 			WHERE message_id = ? AND subscriber_id = ? AND status = 'delivered'
@@ -231,7 +308,7 @@ func (d *db) ackDelivery(ctx context.Context, subscriberID uuid.UUID, messageID,
 			Status  string         `db:"status"`
 			Receipt sql.NullString `db:"receipt_token"`
 		}
-		err = tx.GetContext(ctx, &state, tx.Rebind(
+		err = tx.GetContext(ctx, &state, d.Conn().Rebind(
 			"SELECT status, receipt_token FROM message_deliveries WHERE message_id = ? AND subscriber_id = ?"),
 			messageID, subscriberID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -359,14 +436,18 @@ func (d *db) batchAckDeliveries(ctx context.Context, subscriberID uuid.UUID, req
 	return results, err
 }
 
-func (d *db) nackDelivery(ctx context.Context, subscriberID uuid.UUID, messageID, receipt string, delay time.Duration, errorText string, maxAttempts int) (bool, error) {
+func (d *db) nackDelivery(ctx context.Context, subscriberID uuid.UUID, messageID, receipt string, delay time.Duration, errorText string) (bool, error) {
+	return d.nackDeliveryWithTx(ctx, nil, subscriberID, messageID, receipt, delay, errorText)
+}
+
+func (d *db) nackDeliveryWithTx(ctx context.Context, external *sql.Tx, subscriberID uuid.UUID, messageID, receipt string, delay time.Duration, errorText string) (bool, error) {
 	terminal := false
-	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+	err := d.withTx(ctx, external, func(ctx context.Context, tx *sqlx.Tx) error {
 		now, err := d.nowTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		terminal, err = d.nackDeliveryTx(ctx, tx, subscriberID, messageID, receipt, delay, errorText, maxAttempts, now)
+		terminal, err = d.nackDeliveryTx(ctx, tx, subscriberID, messageID, receipt, delay, errorText, now)
 		if err != nil {
 			return err
 		}
@@ -385,49 +466,83 @@ func (d *db) nackDeliveryTx(
 	messageID, receipt string,
 	delay time.Duration,
 	errorText string,
-	maxAttempts int,
 	now time.Time,
 ) (bool, error) {
-	if maxAttempts <= 0 {
-		maxAttempts = 3
+	var state expiredDelivery
+	query := `
+		SELECT deliveries.message_id, deliveries.subscriber_id, deliveries.failure_count,
+		       subscribers.max_attempts, subscribers.retry_initial_delay_ms,
+		       subscribers.retry_max_delay_ms, subscribers.retry_multiplier, subscribers.retry_jitter
+		FROM message_deliveries deliveries
+		JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
+		WHERE deliveries.message_id = ? AND deliveries.subscriber_id = ?
+		  AND deliveries.status = 'delivered' AND deliveries.receipt_token = ?
+		  AND deliveries.lease_expires_at > ?`
+	query += d.dialect.lockClause("deliveries", false)
+	err := tx.GetContext(ctx, &state, d.Conn().Rebind(query), messageID, subscriberID, receipt, now)
+	if errors.Is(err, sql.ErrNoRows) {
+		var count int
+		if countErr := tx.GetContext(ctx, &count, d.Conn().Rebind(
+			"SELECT COUNT(*) FROM message_deliveries WHERE message_id = ? AND subscriber_id = ?"),
+			messageID, subscriberID); countErr != nil {
+			return false, countErr
+		}
+		if count == 0 {
+			return false, ErrDeliveryNotFound
+		}
+		return false, ErrLeaseLost
 	}
-	timestampBind := d.dialect.timestampBind()
-	var status string
-	err := tx.GetContext(ctx, &status, tx.Rebind(`
-		UPDATE message_deliveries
-		SET status = CASE WHEN attempt >= ? THEN 'dead_letter' ELSE 'pending' END,
-		    visible_at = CASE WHEN attempt >= ? THEN `+timestampBind+` ELSE `+timestampBind+` END,
-		    receipt_token = NULL, lease_expires_at = NULL,
-		    processed_at = CASE WHEN attempt >= ? THEN `+timestampBind+` ELSE NULL END,
-		    last_error = ?
-		WHERE message_id = ? AND subscriber_id = ? AND status = 'delivered'
-		  AND receipt_token = ? AND lease_expires_at > ?
-		RETURNING status`),
-		maxAttempts, maxAttempts, now, now.Add(delay), maxAttempts, now,
-		nullString(errorText), messageID, subscriberID, receipt, now)
-	if err == nil {
-		return status == "dead_letter", nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if err != nil {
 		return false, err
 	}
-	var count int
-	if countErr := tx.GetContext(ctx, &count, tx.Rebind(
-		"SELECT COUNT(*) FROM message_deliveries WHERE message_id = ? AND subscriber_id = ?"),
-		messageID, subscriberID); countErr != nil {
-		return false, countErr
+
+	failureCount := state.FailureCount + 1
+	terminal := failureCount >= state.MaxAttempts
+	if delay <= 0 {
+		delay = retryDelayFor(subscriberOptions{
+			RetryInitialDelay: time.Duration(state.RetryInitialMillis) * time.Millisecond,
+			RetryMaxDelay:     time.Duration(state.RetryMaxMillis) * time.Millisecond,
+			RetryMultiplier:   state.RetryMultiplier,
+			RetryJitter:       state.RetryJitter,
+		}, failureCount, messageID)
 	}
-	if count == 0 {
-		return false, ErrDeliveryNotFound
+	status := "pending"
+	visibleAt := now.Add(delay)
+	var processedAt any
+	if terminal {
+		status = "dead_letter"
+		visibleAt = now
+		processedAt = now
 	}
-	return false, ErrLeaseLost
+	storedError := errorText
+	if storedError == "" {
+		storedError = "delivery negatively acknowledged"
+	}
+	result, err := tx.ExecContext(ctx, d.Conn().Rebind(`
+		UPDATE message_deliveries
+		SET status = ?, failure_count = ?, visible_at = ?, receipt_token = NULL,
+		    lease_expires_at = NULL, processed_at = ?, last_error = ?
+		WHERE message_id = ? AND subscriber_id = ? AND status = 'delivered'
+		  AND receipt_token = ? AND lease_expires_at > ?`),
+		status, failureCount, visibleAt, processedAt, storedError,
+		messageID, subscriberID, receipt, now)
+	if err != nil {
+		return false, err
+	}
+	updated, _ := result.RowsAffected()
+	if updated == 0 {
+		return false, ErrLeaseLost
+	}
+	if err := d.insertDeliveryErrorsTx(ctx, tx, []expiredDelivery{state}, storedError, now); err != nil {
+		return false, err
+	}
+	return terminal, nil
 }
 
 func (d *db) batchNackDeliveries(
 	ctx context.Context,
 	subscriberID uuid.UUID,
 	requests []BatchNackItem,
-	maxAttempts int,
 ) ([]bool, []error, error) {
 	terminal := make([]bool, len(requests))
 	results := make([]error, len(requests))
@@ -456,7 +571,7 @@ func (d *db) batchNackDeliveries(
 			}
 			isTerminal, itemErr := d.nackDeliveryTx(
 				ctx, tx, subscriberID, request.MessageID, request.ReceiptToken,
-				request.RetryDelay, request.Error, maxAttempts, now,
+				request.RetryDelay, request.Error, now,
 			)
 			if itemErr != nil {
 				if errors.Is(itemErr, ErrDeliveryNotFound) || errors.Is(itemErr, ErrLeaseLost) {
@@ -494,6 +609,10 @@ func (d *db) extendDeliveryLease(ctx context.Context, subscriberID uuid.UUID, me
 			return err
 		}
 		expires = current.Add(extension)
+		maximumExpiry := now.Add(maximumDeliveryLease)
+		if expires.After(maximumExpiry) {
+			expires = maximumExpiry
+		}
 		result, err := tx.ExecContext(ctx, tx.Rebind(`
 			UPDATE message_deliveries SET lease_expires_at = ?
 			WHERE message_id = ? AND subscriber_id = ? AND status = 'delivered'
@@ -512,21 +631,15 @@ func (d *db) extendDeliveryLease(ctx context.Context, subscriberID uuid.UUID, me
 }
 
 func (d *db) completeScheduleRunsTx(ctx context.Context, tx *sqlx.Tx, messageID string) error {
-	filter := ""
-	args := make([]any, 0, 1)
-	if messageID != "" {
-		filter = " AND message_id = ?"
-		args = append(args, messageID)
-	}
-	_, err := tx.ExecContext(ctx, tx.Rebind(`
+	_, err := tx.ExecContext(ctx, d.Conn().Rebind(`
 		UPDATE schedule_runs
 		SET status = 'completed', finished_at = CURRENT_TIMESTAMP
-		WHERE status = 'running' AND message_id IS NOT NULL`+filter+`
+		WHERE status = 'running' AND message_id = ?
 		  AND NOT EXISTS (
 			SELECT 1 FROM message_deliveries
 			WHERE message_deliveries.message_id = schedule_runs.message_id
-			  AND message_deliveries.status NOT IN ('processed', 'dead_letter')
-		  )`), args...)
+			  AND message_deliveries.status NOT IN ('processed', 'dead_letter', 'cancelled')
+		  )`), messageID)
 	return err
 }
 
@@ -540,12 +653,12 @@ func (d *db) completeScheduleRunsForMessagesTx(ctx context.Context, tx *sqlx.Tx,
 			  AND NOT EXISTS (
 				SELECT 1 FROM message_deliveries
 				WHERE message_deliveries.message_id = schedule_runs.message_id
-				  AND message_deliveries.status NOT IN ('processed', 'dead_letter')
+				  AND message_deliveries.status NOT IN ('processed', 'dead_letter', 'cancelled')
 			  )`, messageIDs[start:end])
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, tx.Rebind(query), args...); err != nil {
+		if _, err := tx.ExecContext(ctx, d.Conn().Rebind(query), args...); err != nil {
 			return err
 		}
 	}
@@ -576,7 +689,8 @@ func (d *db) listDeliveries(ctx context.Context, subscriberID uuid.UUID, deadLet
 	query := `
 		SELECT deliveries.message_id, messages.message, messages.headers,
 		       messages.correlation_id, deliveries.priority, deliveries.status,
-		       deliveries.attempt, deliveries.visible_at, deliveries.receipt_token,
+		       deliveries.delivery_count, deliveries.failure_count,
+		       deliveries.visible_at, deliveries.receipt_token,
 		       deliveries.lease_expires_at, deliveries.message_created_at AS created_at
 		FROM message_deliveries deliveries
 		JOIN messages ON messages.id = deliveries.message_id
@@ -606,7 +720,8 @@ func (d *db) replayDeadLetter(ctx context.Context, subscriberID uuid.UUID, messa
 		}
 		result, err := tx.ExecContext(ctx, tx.Rebind(`
 			UPDATE message_deliveries
-			SET status = 'pending', attempt = 0, visible_at = ?, receipt_token = NULL,
+			SET status = 'pending', delivery_count = 0, failure_count = 0,
+			    visible_at = ?, receipt_token = NULL,
 			    lease_expires_at = NULL, processed_at = NULL, last_error = NULL
 			WHERE subscriber_id = ? AND message_id = ? AND status = 'dead_letter'`),
 			now, subscriberID, messageID)

@@ -32,12 +32,21 @@ Turso/libSQL support is experimental.
 - A weighted writer budget limits both pending message count and bytes. A
   reservation is released only after the database transaction finishes.
 - Claims use database locking, a new receipt token for every delivery lease,
-  idempotent ACK, fenced stale receipts, delayed NACK, and lease extension.
+  idempotent ACK, fenced stale receipts, delayed NACK, snooze, cancellation,
+  and lease extension.
+- `PublishTx`, `AckDeliveryTx`, and the other `*Tx` methods can commit queue
+  state atomically with application tables in the same SQLite or PostgreSQL
+  database.
+- Delivery claims and processing failures are counted separately. Subscriber
+  retry policy supports exponential backoff with bounded deterministic jitter,
+  and every failure is retained in a paginated error history.
 - Priority, delayed delivery, absolute RFC3339 scheduling, recurring five-field
   cron schedules, IANA timezones, run history, and overlap protection.
 - Transactional, checksummed embedded schema migrations.
 - `/livez`, `/readyz`, bounded retention, adaptive SQLite checkpoints, and
-  optional Prometheus metrics.
+- `/livez`, `/readyz`, an embedded OpenAPI 3.1 document, RFC 9457 problem
+  responses, bounded retention, adaptive SQLite checkpoints, and optional
+  Prometheus metrics.
 
 There is one queue engine and one current HTTP contract at `/v1`; the project
 does not maintain parallel v1/v2 engines or schemas. See the
@@ -123,6 +132,53 @@ func main() {
 caller's context expires after admission, it receives `*CommitUnknownError`
 with stable message IDs; the writer continues owning the admitted messages.
 
+### Transactional enqueue and completion
+
+Use `WithTx` when application tables and BlockQueue use the same database. The
+producer can atomically create application data and enqueue later work:
+
+```go
+err := queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
+	if err := insertOrder(ctx, tx, orderID, "pending"); err != nil {
+		return err
+	}
+	_, err := queue.PublishTx(ctx, tx, topic, blockqueue.Message{
+		Message:        `{"order_id":"1022","action":"fulfill"}`,
+		IdempotencyKey: "fulfill-order-1022",
+	})
+	return err
+})
+```
+
+That commit does not include consumer execution. The consumer claims the
+committed delivery later, then can atomically store its result and complete the
+delivery:
+
+```go
+err := queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
+	if err := markOrderFulfilled(ctx, tx, orderID); err != nil {
+		return err
+	}
+	return queue.AckDeliveryTx(
+		ctx, tx, topic, worker.Name, delivery.ID, delivery.ReceiptToken,
+	)
+})
+```
+
+`PublishTx` returns `state: staged`; the rows become visible only if the
+transaction commits. `AckDeliveryTx`, `NackDeliveryTx`, `SnoozeDeliveryTx`,
+`CancelDeliveryTx`, and `CancelMessageTx` provide the same atomic boundary for
+consumer side effects. Keep callbacks short and free of network calls. SQLite
+has one writer, so an open caller transaction intentionally blocks queue
+writes until commit or rollback. PostgreSQL uses a shared topology fence, so
+publishers can proceed concurrently while destructive subscriber mutations
+wait for the transaction. `Shutdown` drains transactions created by `WithTx`;
+callers that begin a raw transaction themselves must coordinate its lifetime
+with shutdown.
+
+The runnable [transactional example](example/transactional) shows both commits
+against one SQLite database, including receipt-fenced consumer completion.
+
 ## Run the HTTP server
 
 Copy [config.yaml.example](config.yaml.example), then run:
@@ -189,11 +245,24 @@ JSON decoding is strict. The HTTP limits are 1 MiB per message, 1,000 messages
 per batch, 16 MiB per request body, 16 KiB of headers, and 128 bytes per
 idempotency key.
 
+The complete OpenAPI 3.1 contract is served at `/openapi.json`. Errors use
+`application/problem+json` with stable `code` values. The HTTP surface exposes
+message status, delivery/message cancellation, snooze, and delivery error
+history. Database transaction methods are intentionally Go-only: a remote HTTP
+request cannot join the caller's local transaction; cross-database systems
+should publish through an application outbox.
+
 ## Delivery contract
 
 - Delivery is at-least-once. Consumers must make side effects idempotent.
 - A claim owns a delivery only for its current receipt token and lease. ACK,
   NACK, and lease extension reject stale receipts.
+- `delivery_count` increases when a lease is claimed; `failure_count` increases
+  only on NACK or lease expiry. Dead-lettering is based on failures, with three
+  failures and exponential retry delay as the default.
+- Snooze returns a claimed delivery to pending without consuming a failure.
+  Cancellation is terminal and idempotent, and failure records remain
+  queryable while the delivery is retained.
 - `Publish` waits for the canonical message and all subscriber delivery rows to
   commit. `PublishAsync` guarantees bounded process-local admission, not crash
   durability.
@@ -201,6 +270,10 @@ idempotency key.
   reduce latency but are never required for correctness.
 - Built-in authentication and exactly-once execution are outside the project
   scope. Protect the HTTP server with a private network or reverse proxy.
+
+v0.2 is the durable embedded/HTTP fan-out core. A typed Go worker runtime and
+multi-node maintenance leader election are intentionally roadmap items rather
+than hidden behavior in this release.
 
 ## Storage and durability
 
@@ -243,6 +316,13 @@ exact persisted-row checks are documented in
 
 For component boundaries and lock ownership, see
 [docs/architecture.md](docs/architecture.md).
+
+## Roadmap
+
+- v0.2.x: optional in-process event subscription, tracing hooks, and focused
+  test helpers without changing the schema.
+- v0.3: typed Go workers and PostgreSQL maintenance leader election.
+- v0.4: versioned workflow/DAG orchestration as a separate layer over the queue.
 
 ## License
 

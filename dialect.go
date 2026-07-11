@@ -20,9 +20,11 @@ type sqlDialect interface {
 	boolLiteral(bool) string
 	currentTimeQuery() string
 	lockClause(target string, skipLocked bool) string
+	topologyReadLockClause(target string) string
 	timestampBind() string
 	deliveryBatchRow() string
 	deliveryIdentityRow() string
+	deliveryFailureRow() string
 	messageChunkSize() int
 	claimChunkSize(int) int
 	usesDatabaseEvents() bool
@@ -41,9 +43,11 @@ func (sqliteDialect) boolLiteral(value bool) string {
 }
 func (sqliteDialect) currentTimeQuery() string                       { return "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" }
 func (sqliteDialect) lockClause(string, bool) string                 { return "" }
+func (sqliteDialect) topologyReadLockClause(string) string           { return "" }
 func (sqliteDialect) timestampBind() string                          { return "?" }
 func (sqliteDialect) deliveryBatchRow() string                       { return "(?, ?, ?, ?)" }
 func (sqliteDialect) deliveryIdentityRow() string                    { return "(?, ?)" }
+func (sqliteDialect) deliveryFailureRow() string                     { return "(?, ?, ?, ?, ?, ?)" }
 func (sqliteDialect) messageChunkSize() int                          { return 100 }
 func (sqliteDialect) claimChunkSize(requested int) int               { return min(requested, 400) }
 func (sqliteDialect) usesDatabaseEvents() bool                       { return false }
@@ -67,9 +71,20 @@ func (postgresDialect) deliveryBatchRow() string {
 func (postgresDialect) deliveryIdentityRow() string {
 	return "(CAST(? AS UUID), CAST(? AS UUID))"
 }
+func (postgresDialect) deliveryFailureRow() string {
+	return "(CAST(? AS UUID), CAST(? AS UUID), CAST(? AS INTEGER), CAST(? AS VARCHAR), CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))"
+}
 func (postgresDialect) messageChunkSize() int            { return 1000 }
 func (postgresDialect) claimChunkSize(requested int) int { return requested }
 func (postgresDialect) usesDatabaseEvents() bool         { return true }
+
+func (postgresDialect) topologyReadLockClause(target string) string {
+	clause := " FOR SHARE"
+	if target != "" {
+		clause += " OF " + target
+	}
+	return clause
+}
 
 func (postgresDialect) lockClause(target string, skipLocked bool) string {
 	clause := " FOR UPDATE"

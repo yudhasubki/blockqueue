@@ -2,6 +2,7 @@ package blockqueue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"sync"
@@ -49,6 +50,9 @@ type Queue struct {
 	state            atomic.Uint32
 	topologyVersion  atomic.Uint64
 	workers          sync.WaitGroup
+	transactions     sync.WaitGroup
+	transactionMu    sync.RWMutex
+	activeTx         map[*sql.Tx]struct{}
 	schedulerSignal  chan struct{}
 	reaperSignal     chan struct{}
 	schedulerOwner   string
@@ -92,6 +96,7 @@ func New(driver store.Driver, opt Options) *Queue {
 		schedulerSignal: make(chan struct{}, 1),
 		reaperSignal:    make(chan struct{}, 1),
 		schedulerOwner:  uuid.NewString(),
+		activeTx:        make(map[*sql.Tx]struct{}),
 	}
 	queue.db.disableMetrics = opt.DisableMetrics
 	queue.schedulerHealthy.Store(true)

@@ -67,7 +67,7 @@ jobs:
         run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
 
       - name: PostgreSQL benchmark smoke
-        run: go test -run '^$' -bench 'BenchmarkPublishDurable/postgres$' -benchtime=1x -count=1 .
+        run: go test -run '^$' -bench 'Benchmark(PublishDurable|Claim100|BatchAck100|NackFailure)/postgres$' -benchtime=1x -count=1 .
 
       # - name: Validate benchmark assets
       #   run: |

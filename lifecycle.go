@@ -169,6 +169,18 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 		q.writer.abortWrites()
 	}
 
+	transactionsDone := make(chan struct{})
+	go func() {
+		q.transactions.Wait()
+		close(transactionsDone)
+	}()
+	var transactionErr error
+	select {
+	case <-transactionsDone:
+	case <-ctx.Done():
+		transactionErr = fmt.Errorf("shutdown transactions: %w", ctx.Err())
+	}
+
 	if q.cancel != nil {
 		q.cancel()
 	}
@@ -192,7 +204,7 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	if closeDB {
 		closeErr = q.db.close()
 	}
-	return errors.Join(flushErr, workersErr, closeErr)
+	return errors.Join(flushErr, transactionErr, workersErr, closeErr)
 }
 
 func (q *Queue) Live() bool {

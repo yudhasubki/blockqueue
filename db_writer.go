@@ -16,6 +16,13 @@ import (
 )
 
 func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) ([]bool, error) {
+	return d.persistWriteRequestsWithTx(ctx, nil, requests)
+}
+
+// persistWriteRequestsWithTx uses a caller-owned transaction when supplied.
+// The caller retains commit/rollback ownership; a nil transaction preserves
+// the normal writer-owned transaction boundary.
+func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, requests []writeRequest) ([]bool, error) {
 	if len(requests) == 0 {
 		return []bool{}, nil
 	}
@@ -34,37 +41,41 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 	}
 	messageChunk := d.dialect.messageChunkSize()
 	messageStatements := make(map[int]*sqlx.Stmt, 2)
-	for start := 0; start < len(normalized); start += messageChunk {
-		rows := min(messageChunk, len(normalized)-start)
-		if _, exists := messageStatements[rows]; exists {
-			continue
+	if external == nil {
+		for start := 0; start < len(normalized); start += messageChunk {
+			rows := min(messageChunk, len(normalized)-start)
+			if _, exists := messageStatements[rows]; exists {
+				continue
+			}
+			statement, err := d.statements.get(ctx, d.Conn(), cachedMessageInsertQuery(d, rows))
+			if err != nil {
+				return nil, err
+			}
+			messageStatements[rows] = statement
 		}
-		statement, err := d.statements.get(ctx, d.Conn(), cachedMessageInsertQuery(d, rows))
-		if err != nil {
-			return nil, err
-		}
-		messageStatements[rows] = statement
 	}
 	deliveryStatements := make(map[int]*sqlx.Stmt, 2)
 	messagesByTopic := make(map[uuid.UUID]int)
 	for _, request := range normalized {
 		messagesByTopic[request.TopicID]++
 	}
-	for _, count := range messagesByTopic {
-		for remaining := count; remaining > 0; remaining -= min(200, remaining) {
-			rows := min(200, remaining)
-			if _, exists := deliveryStatements[rows]; exists {
-				continue
+	if external == nil {
+		for _, count := range messagesByTopic {
+			for remaining := count; remaining > 0; remaining -= min(200, remaining) {
+				rows := min(200, remaining)
+				if _, exists := deliveryStatements[rows]; exists {
+					continue
+				}
+				statement, err := d.statements.get(ctx, d.Conn(), cachedDeliveryInsertQuery(d, rows))
+				if err != nil {
+					return nil, err
+				}
+				deliveryStatements[rows] = statement
 			}
-			statement, err := d.statements.get(ctx, d.Conn(), cachedDeliveryInsertQuery(d, rows))
-			if err != nil {
-				return nil, err
-			}
-			deliveryStatements[rows] = statement
 		}
 	}
 	duplicates := make([]bool, len(requests))
-	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+	run := func(ctx context.Context, tx *sqlx.Tx) error {
 		topicIDs := make([]uuid.UUID, 0)
 		seenTopics := make(map[uuid.UUID]struct{})
 		for _, request := range normalized {
@@ -79,12 +90,15 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 				(SELECT COUNT(*) FROM topic_subscribers subscribers
 				 WHERE subscribers.topic_id = topics.id AND subscribers.deleted_at IS NULL) AS subscribers
 				FROM topics WHERE topics.id = ? AND topics.deleted_at IS NULL`
-			query += d.dialect.lockClause("topics", false)
+			// Publishers share the topology fence with other publishers. Topology
+			// mutations take FOR UPDATE, so they wait for the fan-out snapshot
+			// without serializing normal or caller-owned publish transactions.
+			query += d.dialect.topologyReadLockClause("topics")
 			var state struct {
 				ID          string `db:"id"`
 				Subscribers int    `db:"subscribers"`
 			}
-			if err := tx.GetContext(ctx, &state, tx.Rebind(query), topicID); err != nil {
+			if err := tx.GetContext(ctx, &state, d.Conn().Rebind(query), topicID); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return ErrTopicNotFound
 				}
@@ -107,9 +121,12 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 					request.Priority, request.VisibleAt, request.CreatedAt,
 				)
 			}
-			statement := tx.StmtxContext(ctx, messageStatements[len(chunk)])
 			ids := make([]string, 0, len(chunk))
-			if err := statement.SelectContext(ctx, &ids, args...); err != nil {
+			if statement := messageStatements[len(chunk)]; statement != nil {
+				if err := tx.StmtxContext(ctx, statement).SelectContext(ctx, &ids, args...); err != nil {
+					return err
+				}
+			} else if err := tx.SelectContext(ctx, &ids, cachedMessageInsertQuery(d, len(chunk)), args...); err != nil {
 				return err
 			}
 			for _, id := range ids {
@@ -149,7 +166,7 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 					WHERE topic_id = ? AND idempotency_key = ?`
 				args = []any{request.TopicID, request.IdempotencyKey}
 			}
-			if err := tx.GetContext(ctx, &existing, tx.Rebind(query), args...); err != nil {
+			if err := tx.GetContext(ctx, &existing, d.Conn().Rebind(query), args...); err != nil {
 				return err
 			}
 			existingScheduled := !existing.ScheduledAt.Equal(existing.CreatedAt)
@@ -194,7 +211,13 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 			}
 		}
 		return nil
-	})
+	}
+	var err error
+	if external == nil {
+		err = d.tx(ctx, run)
+	} else {
+		err = run(ctx, &sqlx.Tx{Tx: external, Mapper: d.Conn().Mapper})
+	}
 	return duplicates, err
 }
 
@@ -239,8 +262,8 @@ func cachedDeliveryInsertQuery(d *db, rows int) string {
 	}
 	query.WriteString(`)
 		INSERT INTO message_deliveries
-			(message_id, subscriber_id, status, attempt, visible_at, priority, message_created_at)
-		SELECT batch.message_id, ts.id, 'pending', 0, batch.visible_at,
+			(message_id, subscriber_id, status, delivery_count, failure_count, visible_at, priority, message_created_at)
+		SELECT batch.message_id, ts.id, 'pending', 0, 0, batch.visible_at,
 		       batch.priority, batch.message_created_at
 		FROM topic_subscribers ts CROSS JOIN batch
 		WHERE ts.topic_id = ? AND ts.deleted_at IS NULL

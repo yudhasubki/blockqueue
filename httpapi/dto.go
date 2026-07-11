@@ -23,9 +23,10 @@ func (r PublishRequest) command() blockqueue.Message {
 }
 
 type SubscriberOptions struct {
-	MaxAttempts        int    `json:"max_attempts"`
-	VisibilityDuration string `json:"visibility_duration"`
-	DequeueBatchSize   int    `json:"dequeue_batch_size,omitempty"`
+	MaxAttempts        int                    `json:"max_attempts"`
+	VisibilityDuration string                 `json:"visibility_duration"`
+	DequeueBatchSize   int                    `json:"dequeue_batch_size,omitempty"`
+	RetryPolicy        blockqueue.RetryPolicy `json:"retry_policy,omitempty"`
 }
 
 type SubscriberRequest struct {
@@ -48,7 +49,7 @@ func subscriberCommands(requests []SubscriberRequest, topicID uuid.UUID) blockqu
 	for _, request := range requests {
 		options := blockqueue.SubscriberOptions{
 			MaxAttempts: request.Option.MaxAttempts, VisibilityDuration: request.Option.VisibilityDuration,
-			DequeueBatchSize: request.Option.DequeueBatchSize,
+			DequeueBatchSize: request.Option.DequeueBatchSize, RetryPolicy: request.Option.RetryPolicy,
 		}
 		result = append(result, blockqueue.Subscriber{ID: uuid.New(), TopicID: topicID, Name: request.Name, Options: options})
 	}
@@ -68,6 +69,15 @@ type NackRequest struct {
 type LeaseRequest struct {
 	ReceiptToken string `json:"receipt_token"`
 	Extension    string `json:"extension,omitempty"`
+}
+
+type SnoozeRequest struct {
+	ReceiptToken string `json:"receipt_token"`
+	Delay        string `json:"delay"`
+}
+
+type CancelRequest struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type BatchReceiptRequest struct {

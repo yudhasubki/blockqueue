@@ -52,7 +52,7 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	if topicRuntime.paused.Load() || subscriberRuntime.paused.Load() || subscriberRuntime.deleted.Load() {
 		return Deliveries{}, ErrResourcePaused
 	}
-	rows, err := q.db.claimDeliveries(ctx, subscriberRuntime.id, limit, lease, subscriberRuntime.options.MaxAttempts)
+	rows, err := q.db.claimDeliveries(ctx, subscriberRuntime.id, limit, lease)
 	if err != nil {
 		if !q.options.DisableMetrics {
 			metric.DeliveryOperations.WithLabelValues("claim", "failed").Inc()
@@ -75,7 +75,8 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 			Headers:        headers,
 			CorrelationID:  row.CorrelationID.String,
 			Status:         row.Status,
-			RetryCount:     row.Attempt,
+			DeliveryCount:  row.DeliveryCount,
+			FailureCount:   row.FailureCount,
 			Priority:       row.Priority,
 			ReceiptToken:   row.ReceiptToken.String,
 			LeaseExpiresAt: optionalTime(row.LeaseExpiresAt),
@@ -201,7 +202,7 @@ func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messa
 		}
 		return fmt.Errorf("%w: retry delay cannot be negative", ErrInvalidPublish)
 	}
-	terminal, err := q.db.nackDelivery(ctx, subscriberRuntime.id, messageID, receipt, retryDelay, errorText, subscriberRuntime.options.MaxAttempts)
+	terminal, err := q.db.nackDelivery(ctx, subscriberRuntime.id, messageID, receipt, retryDelay, errorText)
 	if err != nil {
 		result := "failed"
 		if errors.Is(err, ErrLeaseLost) {
@@ -387,9 +388,7 @@ func (q *Queue) BatchNackDeliveries(ctx context.Context, topic Topic, subscriber
 		}
 	} else {
 		var transactionErr error
-		terminal, itemErrors, transactionErr = q.db.batchNackDeliveries(
-			ctx, subscriberRuntime.id, requests, subscriberRuntime.options.MaxAttempts,
-		)
+		terminal, itemErrors, transactionErr = q.db.batchNackDeliveries(ctx, subscriberRuntime.id, requests)
 		if transactionErr != nil {
 			for index := range itemErrors {
 				itemErrors[index] = transactionErr
@@ -508,7 +507,7 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 		page.Messages = append(page.Messages, Delivery{
 			ID: row.MessageID, Message: row.Message, Headers: headers,
 			CorrelationID: row.CorrelationID.String, Status: row.Status,
-			RetryCount: row.Attempt, Priority: row.Priority,
+			DeliveryCount: row.DeliveryCount, FailureCount: row.FailureCount, Priority: row.Priority,
 			ReceiptToken:   row.ReceiptToken.String,
 			LeaseExpiresAt: optionalTime(row.LeaseExpiresAt),
 			VisibleAt:      row.VisibleAt,

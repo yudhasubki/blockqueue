@@ -3,6 +3,7 @@ package blockqueue
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ func setupQueue(t *testing.T) (*Queue, *sqlite.Driver, Topic) {
 	topic := NewTopic("queue-topic")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
 		MaxAttempts: 5, VisibilityDuration: "100ms",
+		RetryPolicy: RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -102,6 +104,10 @@ func TestIdempotencyComparesCorrelationAndExplicitSchedule(t *testing.T) {
 }
 
 func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
+	logs := make(chan slog.Record, 8)
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(testLogHandler{records: logs}))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	driver, cleanup := setupTestDB(t, "admission_isolation_"+time.Now().Format("150405.000000000"))
 	defer cleanup()
 	database := newDb(driver)
@@ -134,10 +140,28 @@ func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	var count int
 	require.NoError(t, testDB(driver).Get(&count, "SELECT COUNT(*) FROM messages WHERE message = 'valid'"))
 	require.Equal(t, 1, count)
+	require.Eventually(t, func() bool {
+		select {
+		case record := <-logs:
+			return record.Message == "writer permanently rejected admission"
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 	messages, bytes := buffer.Pending()
 	require.Zero(t, messages)
 	require.Zero(t, bytes)
 }
+
+type testLogHandler struct{ records chan<- slog.Record }
+
+func (handler testLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (handler testLogHandler) Handle(_ context.Context, record slog.Record) error {
+	handler.records <- record.Clone()
+	return nil
+}
+func (handler testLogHandler) WithAttrs([]slog.Attr) slog.Handler { return handler }
+func (handler testLogHandler) WithGroup(string) slog.Handler      { return handler }
 
 func TestDeleteSubscriberWakesLongPollWithoutDeadlock(t *testing.T) {
 	queue, _, topic := setupQueue(t)

@@ -331,8 +331,8 @@ func (d *db) persistScheduleOccurrence(
 		}
 		if _, err := tx.ExecContext(ctx, tx.Rebind(`
 			INSERT INTO message_deliveries
-				(message_id, subscriber_id, status, attempt, visible_at, priority, message_created_at)
-			SELECT ?, id, 'pending', 0, ?, ?, ? FROM topic_subscribers
+				(message_id, subscriber_id, status, delivery_count, failure_count, visible_at, priority, message_created_at)
+			SELECT ?, id, 'pending', 0, 0, ?, ?, ? FROM topic_subscribers
 			WHERE topic_id = ? AND deleted_at IS NULL
 			ON CONFLICT (message_id, subscriber_id) DO NOTHING`),
 			messageID, visibleAt, schedule.Priority, visibleAt, schedule.TopicID); err != nil {

@@ -1,0 +1,701 @@
+{
+	"openapi": "3.1.0",
+	"info": {
+		"title": "BlockQueue HTTP API",
+		"version": "0.2.0",
+		"description": "Durable fan-out queue API. Caller-owned database transactions are available only through the Go package."
+	},
+	"servers": [
+		{
+			"url": "/v1"
+		}
+	],
+	"paths": {
+		"/topics": {
+			"get": {
+				"operationId": "listTopics",
+				"responses": {
+					"200": {
+						"description": "Topics"
+					}
+				}
+			},
+			"post": {
+				"operationId": "createTopic",
+				"responses": {
+					"201": {
+						"description": "Topic created"
+					},
+					"400": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/messages": {
+			"post": {
+				"operationId": "publishMessage",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Persisted"
+					},
+					"202": {
+						"description": "Admitted"
+					},
+					"409": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/messages/batch": {
+			"post": {
+				"operationId": "publishMessageBatch",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Persisted receipts"
+					},
+					"202": {
+						"description": "Admitted receipts"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/messages/{messageID}": {
+			"get": {
+				"operationId": "getMessageStatus",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Canonical message and delivery states"
+					},
+					"404": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/messages/{messageID}/cancel": {
+			"post": {
+				"operationId": "cancelMessage",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Per-delivery cancellation results"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/": {
+			"delete": {
+				"operationId": "deleteTopic",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Topic deleted"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/pause": {
+			"post": {
+				"operationId": "pauseTopic",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Topic paused"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/resume": {
+			"post": {
+				"operationId": "resumeTopic",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Topic resumed"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers": {
+			"get": {
+				"operationId": "listSubscribers",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Subscriber status"
+					}
+				}
+			},
+			"post": {
+				"operationId": "createSubscribers",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"201": {
+						"description": "Subscribers created"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}": {
+			"delete": {
+				"operationId": "deleteSubscriber",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Subscriber deleted"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/claim": {
+			"post": {
+				"operationId": "claimDeliveries",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Claimed deliveries"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/ack": {
+			"post": {
+				"operationId": "ackDelivery",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Processed"
+					},
+					"409": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/nack": {
+			"post": {
+				"operationId": "nackDelivery",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Retry scheduled or dead-lettered"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/lease": {
+			"post": {
+				"operationId": "extendLease",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Lease extended"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/snooze": {
+			"post": {
+				"operationId": "snoozeDelivery",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Delivery rescheduled without failure"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/cancel": {
+			"post": {
+				"operationId": "cancelDelivery",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Delivery cancelled"
+					},
+					"409": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/errors": {
+			"get": {
+				"operationId": "listDeliveryErrors",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/MessageID"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Failure history"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages": {
+			"get": {
+				"operationId": "listActiveDeliveries",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Pending and delivered messages"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/batch/ack": {
+			"post": {
+				"operationId": "batchAckDeliveries",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Per-item ACK results"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/batch/nack": {
+			"post": {
+				"operationId": "batchNackDeliveries",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Per-item NACK results"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/pause": {
+			"post": {
+				"operationId": "pauseSubscriber",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Subscriber paused"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/resume": {
+			"post": {
+				"operationId": "resumeSubscriber",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Subscriber resumed"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/dlq": {
+			"get": {
+				"operationId": "listDeadLetters",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Dead letters"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/subscribers/{subscriberName}/dlq/replay": {
+			"post": {
+				"operationId": "replayDeadLetters",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/SubscriberName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Per-item replay results"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules": {
+			"get": {
+				"operationId": "listSchedules",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "Schedules"
+					}
+				}
+			},
+			"post": {
+				"operationId": "createSchedule",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/TopicName"
+					}
+				],
+				"responses": {
+					"201": {
+						"description": "Schedule created"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules/{scheduleId}": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/TopicName"
+				},
+				{
+					"$ref": "#/components/parameters/ScheduleID"
+				}
+			],
+			"get": {
+				"operationId": "getSchedule",
+				"responses": {
+					"200": {
+						"description": "Schedule"
+					}
+				}
+			},
+			"put": {
+				"operationId": "updateSchedule",
+				"responses": {
+					"200": {
+						"description": "Schedule updated"
+					},
+					"409": {
+						"$ref": "#/components/responses/Problem"
+					}
+				}
+			},
+			"delete": {
+				"operationId": "deleteSchedule",
+				"responses": {
+					"204": {
+						"description": "Schedule deleted"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules/{scheduleId}/pause": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/TopicName"
+				},
+				{
+					"$ref": "#/components/parameters/ScheduleID"
+				}
+			],
+			"post": {
+				"operationId": "pauseSchedule",
+				"responses": {
+					"200": {
+						"description": "Schedule paused"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules/{scheduleId}/resume": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/TopicName"
+				},
+				{
+					"$ref": "#/components/parameters/ScheduleID"
+				}
+			],
+			"post": {
+				"operationId": "resumeSchedule",
+				"responses": {
+					"200": {
+						"description": "Schedule resumed"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules/{scheduleId}/run-now": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/TopicName"
+				},
+				{
+					"$ref": "#/components/parameters/ScheduleID"
+				}
+			],
+			"post": {
+				"operationId": "runScheduleNow",
+				"responses": {
+					"202": {
+						"description": "Schedule run admitted"
+					}
+				}
+			}
+		},
+		"/topics/{topicName}/schedules/{scheduleId}/runs": {
+			"parameters": [
+				{
+					"$ref": "#/components/parameters/TopicName"
+				},
+				{
+					"$ref": "#/components/parameters/ScheduleID"
+				}
+			],
+			"get": {
+				"operationId": "listScheduleRuns",
+				"responses": {
+					"200": {
+						"description": "Schedule run history"
+					}
+				}
+			}
+		}
+	},
+	"components": {
+		"parameters": {
+			"TopicName": {
+				"name": "topicName",
+				"in": "path",
+				"required": true,
+				"schema": {
+					"type": "string"
+				}
+			},
+			"SubscriberName": {
+				"name": "subscriberName",
+				"in": "path",
+				"required": true,
+				"schema": {
+					"type": "string"
+				}
+			},
+			"MessageID": {
+				"name": "messageID",
+				"in": "path",
+				"required": true,
+				"schema": {
+					"type": "string",
+					"format": "uuid"
+				}
+			},
+			"ScheduleID": {
+				"name": "scheduleId",
+				"in": "path",
+				"required": true,
+				"schema": {
+					"type": "string",
+					"format": "uuid"
+				}
+			}
+		},
+		"schemas": {
+			"Problem": {
+				"type": "object",
+				"required": [
+					"type",
+					"title",
+					"status",
+					"detail",
+					"code"
+				],
+				"properties": {
+					"type": {
+						"type": "string",
+						"format": "uri"
+					},
+					"title": {
+						"type": "string"
+					},
+					"status": {
+						"type": "integer"
+					},
+					"detail": {
+						"type": "string"
+					},
+					"code": {
+						"type": "string"
+					},
+					"instance": {
+						"type": "string"
+					}
+				}
+			}
+		},
+		"responses": {
+			"Problem": {
+				"description": "RFC 9457 problem detail",
+				"content": {
+					"application/problem+json": {
+						"schema": {
+							"$ref": "#/components/schemas/Problem"
+						}
+					}
+				}
+			}
+		}
+	}
+}

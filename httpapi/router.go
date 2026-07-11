@@ -16,6 +16,10 @@ type Options struct {
 	Prefix    string
 	UIPath    string
 	DisableUI bool
+	// AuthMiddleware is applied only to the versioned API. Health checks,
+	// OpenAPI, and static UI remain available for the embedding application to
+	// protect at a wider router boundary when desired.
+	AuthMiddleware func(http.Handler) http.Handler
 }
 
 func Router(queue *blockqueue.Queue, options Options) http.Handler {
@@ -41,7 +45,13 @@ func Router(queue *blockqueue.Queue, options Options) http.Handler {
 		prefix = "/v1"
 	}
 	handler := New(queue, queueErrorMapper(queue))
-	router.Route(prefix, handler.Attach)
+	router.Group(func(api chi.Router) {
+		if options.AuthMiddleware != nil {
+			api.Use(options.AuthMiddleware)
+		}
+		api.Route(prefix, handler.Attach)
+	})
+	router.Get("/openapi.json", serveOpenAPI)
 	if !options.DisableUI {
 		var fileServer http.Handler
 		if options.UIPath == "" {
@@ -55,32 +65,35 @@ func Router(queue *blockqueue.Queue, options Options) http.Handler {
 }
 
 func queueErrorMapper(queue *blockqueue.Queue) ErrorMapper {
-	return func(err error) (int, string) {
+	return func(err error) (int, string, string) {
 		status := http.StatusInternalServerError
+		code := "internal_error"
 		message := "internal server error"
 		switch {
 		case errors.Is(err, blockqueue.ErrInvalidPublish), errors.Is(err, blockqueue.ErrInvalidReceipt),
 			errors.Is(err, blockqueue.ErrInvalidTopic), errors.Is(err, blockqueue.ErrInvalidSubscriber):
-			status, message = http.StatusBadRequest, err.Error()
+			status, code, message = http.StatusBadRequest, "validation_error", err.Error()
 		case errors.Is(err, blockqueue.ErrTopicNotFound), errors.Is(err, blockqueue.ErrSubscriberNotFound),
 			errors.Is(err, blockqueue.ErrSubscriberDeleted), errors.Is(err, blockqueue.ErrDeliveryNotFound),
 			errors.Is(err, blockqueue.ErrScheduleNotFound):
-			status, message = http.StatusNotFound, err.Error()
+			status, code, message = http.StatusNotFound, "resource_not_found", err.Error()
 		case errors.Is(err, blockqueue.ErrLeaseLost), errors.Is(err, blockqueue.ErrIdempotencyConflict),
 			errors.Is(err, blockqueue.ErrNoActiveSubscriber), errors.Is(err, blockqueue.ErrScheduleVersion),
 			errors.Is(err, blockqueue.ErrScheduleOverlap), errors.Is(err, blockqueue.ErrResourcePaused),
-			errors.Is(err, blockqueue.ErrScheduleLeaseLost), errors.Is(err, blockqueue.ErrResourceConflict):
-			status, message = http.StatusConflict, err.Error()
+			errors.Is(err, blockqueue.ErrScheduleLeaseLost), errors.Is(err, blockqueue.ErrResourceConflict),
+			errors.Is(err, blockqueue.ErrDeliveryTerminal):
+			status, code, message = http.StatusConflict, "conflict", err.Error()
 		case errors.Is(err, blockqueue.ErrPendingBudgetExceeded):
-			status, message = http.StatusTooManyRequests, err.Error()
+			status, code, message = http.StatusTooManyRequests, "buffer_pressure", err.Error()
 			if !queue.WriterHealthy() {
 				status = http.StatusServiceUnavailable
+				code = "writer_unhealthy"
 			}
 		case errors.Is(err, blockqueue.ErrQueueNotRunning), errors.Is(err, blockqueue.ErrQueueStopping),
 			errors.Is(err, blockqueue.ErrWriterClosed), errors.Is(err, blockqueue.ErrWriterDrainTimeout),
 			errors.Is(err, blockqueue.ErrCommitUnknown):
-			status, message = http.StatusServiceUnavailable, err.Error()
+			status, code, message = http.StatusServiceUnavailable, "service_unavailable", err.Error()
 		}
-		return status, message
+		return status, code, message
 	}
 }

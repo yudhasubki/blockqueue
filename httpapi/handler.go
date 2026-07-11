@@ -27,15 +27,25 @@ type Handler struct {
 }
 
 type envelope struct {
-	Data  any    `json:"data,omitempty"`
-	Error string `json:"error,omitempty"`
+	Data any `json:"data,omitempty"`
+}
+
+type problem struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail"`
+	Code     string `json:"code"`
+	Instance string `json:"instance,omitempty"`
 }
 
 type topicContextKey struct{}
 
 func New(service Service, mapper ErrorMapper) *Handler {
 	if mapper == nil {
-		mapper = func(error) (int, string) { return http.StatusInternalServerError, "internal server error" }
+		mapper = func(error) (int, string, string) {
+			return http.StatusInternalServerError, "internal_error", "internal server error"
+		}
 	}
 	return &Handler{service: service, mapError: mapper}
 }
@@ -47,6 +57,8 @@ func (h *Handler) Attach(root chi.Router) {
 		r.Use(h.topicExists)
 		r.Post("/messages", h.publish)
 		r.Post("/messages/batch", h.batchPublish)
+		r.Get("/messages/{messageID}", h.getMessageStatus)
+		r.Post("/messages/{messageID}/cancel", h.cancelMessage)
 		r.Delete("/", h.deleteTopic)
 		r.Post("/pause", h.pauseTopic)
 		r.Post("/resume", h.resumeTopic)
@@ -58,6 +70,9 @@ func (h *Handler) Attach(root chi.Router) {
 		r.Post("/subscribers/{subscriberName}/messages/{messageID}/ack", h.ack)
 		r.Post("/subscribers/{subscriberName}/messages/{messageID}/nack", h.nack)
 		r.Post("/subscribers/{subscriberName}/messages/{messageID}/lease", h.lease)
+		r.Post("/subscribers/{subscriberName}/messages/{messageID}/snooze", h.snooze)
+		r.Post("/subscribers/{subscriberName}/messages/{messageID}/cancel", h.cancelDelivery)
+		r.Get("/subscribers/{subscriberName}/messages/{messageID}/errors", h.deliveryErrors)
 		r.Post("/subscribers/{subscriberName}/messages/batch/ack", h.batchAck)
 		r.Post("/subscribers/{subscriberName}/messages/batch/nack", h.batchNack)
 		r.Post("/subscribers/{subscriberName}/pause", h.pauseSubscriber)
@@ -194,6 +209,24 @@ func (h *Handler) batchPublish(w http.ResponseWriter, r *http.Request) {
 	h.respond(w, status, receipts, err)
 }
 
+func (h *Handler) getMessageStatus(w http.ResponseWriter, r *http.Request) {
+	result, err := h.service.GetMessageStatus(
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "messageID"),
+	)
+	h.respond(w, http.StatusOK, result, err)
+}
+
+func (h *Handler) cancelMessage(w http.ResponseWriter, r *http.Request) {
+	var request CancelRequest
+	if !h.decodeOptional(w, r, &request) {
+		return
+	}
+	result, err := h.service.CancelMessage(
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "messageID"), request.Reason,
+	)
+	h.respond(w, http.StatusOK, result, err)
+}
+
 func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 	timeout := defaultPoll
 	if raw := r.URL.Query().Get("timeout"); raw != "" {
@@ -240,6 +273,45 @@ func (h *Handler) nack(w http.ResponseWriter, r *http.Request) {
 	}
 	err = h.service.NackDelivery(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), chi.URLParam(r, "messageID"), request.ReceiptToken, delay, request.Error)
 	h.respond(w, http.StatusOK, map[string]string{"status": "pending"}, err)
+}
+
+func (h *Handler) snooze(w http.ResponseWriter, r *http.Request) {
+	var request SnoozeRequest
+	if !h.decode(w, r, &request) {
+		return
+	}
+	delay, err := optionalDuration(request.Delay, false)
+	if err != nil {
+		h.validation(w, err)
+		return
+	}
+	visibleAt, err := h.service.SnoozeDelivery(
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
+		chi.URLParam(r, "messageID"), request.ReceiptToken, delay,
+	)
+	h.respond(w, http.StatusOK, map[string]string{
+		"status": "pending", "visible_at": visibleAt.Format(time.RFC3339Nano),
+	}, err)
+}
+
+func (h *Handler) cancelDelivery(w http.ResponseWriter, r *http.Request) {
+	var request CancelRequest
+	if !h.decodeOptional(w, r, &request) {
+		return
+	}
+	err := h.service.CancelDelivery(
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
+		chi.URLParam(r, "messageID"), request.Reason,
+	)
+	h.respond(w, http.StatusOK, map[string]string{"status": "cancelled"}, err)
+}
+
+func (h *Handler) deliveryErrors(w http.ResponseWriter, r *http.Request) {
+	result, err := h.service.DeliveryErrors(
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
+		chi.URLParam(r, "messageID"), queryLimit(r, 100), r.URL.Query().Get("cursor"),
+	)
+	h.respond(w, http.StatusOK, result, err)
 }
 
 func (h *Handler) lease(w http.ResponseWriter, r *http.Request) {
@@ -414,7 +486,7 @@ func (h *Handler) topicExists(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		topic, exists := h.service.GetTopic(chi.URLParam(r, "topicName"))
 		if !exists {
-			writeError(w, http.StatusNotFound, "topic not found")
+			writeProblem(w, r, http.StatusNotFound, "topic_not_found", "topic not found")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), topicContextKey{}, topic)))
@@ -447,8 +519,29 @@ func (h *Handler) decode(w http.ResponseWriter, r *http.Request, destination any
 	return true
 }
 
+func (h *Handler) decodeOptional(w http.ResponseWriter, r *http.Request, destination any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); errors.Is(err, io.EOF) {
+		return true
+	} else if err != nil {
+		h.validation(w, err)
+		return false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("request body must contain one JSON value")
+		}
+		h.validation(w, err)
+		return false
+	}
+	return true
+}
+
 func (h *Handler) validation(w http.ResponseWriter, err error) {
-	writeError(w, http.StatusBadRequest, err.Error())
+	writeProblem(w, nil, http.StatusBadRequest, "validation_error", err.Error())
 }
 
 func (h *Handler) respond(w http.ResponseWriter, status int, data any, err error) {
@@ -460,8 +553,8 @@ func (h *Handler) respond(w http.ResponseWriter, status int, data any, err error
 }
 
 func (h *Handler) writeError(w http.ResponseWriter, err error) {
-	status, message := h.mapError(err)
-	writeError(w, status, message)
+	status, code, message := h.mapError(err)
+	writeProblem(w, nil, status, code, message)
 }
 
 func write(w http.ResponseWriter, status int, data any) {
@@ -470,10 +563,17 @@ func write(w http.ResponseWriter, status int, data any) {
 	_ = json.NewEncoder(w).Encode(envelope{Data: data})
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
+func writeProblem(w http.ResponseWriter, request *http.Request, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(envelope{Error: message})
+	instance := ""
+	if request != nil {
+		instance = request.URL.Path
+	}
+	_ = json.NewEncoder(w).Encode(problem{
+		Type: "https://blockqueue.dev/problems/" + code, Title: http.StatusText(status),
+		Status: status, Detail: message, Code: code, Instance: instance,
+	})
 }
 
 func queryLimit(r *http.Request, fallback int) int {

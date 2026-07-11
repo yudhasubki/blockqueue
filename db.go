@@ -2,6 +2,7 @@ package blockqueue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -138,10 +139,13 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers S
 		}
 		if _, err := tx.ExecContext(ctx, tx.Rebind(`
 			INSERT INTO topic_subscribers
-				(id, topic_id, name, option, paused, max_attempts, visibility_timeout_ms, dequeue_batch_size)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
+				(id, topic_id, name, option, paused, max_attempts, visibility_timeout_ms, dequeue_batch_size,
+				 retry_initial_delay_ms, retry_max_delay_ms, retry_multiplier, retry_jitter)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 			subscriber.ID, subscriber.TopicID, subscriber.Name, subscriber.Options, subscriber.Paused,
 			options.MaxAttempts, options.VisibilityDuration.Milliseconds(), options.DequeueBatchSize,
+			options.RetryInitialDelay.Milliseconds(), options.RetryMaxDelay.Milliseconds(),
+			options.RetryMultiplier, options.RetryJitter,
 		); err != nil {
 			return err
 		}
@@ -150,6 +154,13 @@ func (d *db) createTxSubscribers(ctx context.Context, tx *sqlx.Tx, subscribers S
 }
 
 func (d *db) tx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) error {
+	return d.withTx(ctx, nil, fn)
+}
+
+func (d *db) withTx(ctx context.Context, external *sql.Tx, fn func(context.Context, *sqlx.Tx) error) error {
+	if external != nil {
+		return fn(ctx, &sqlx.Tx{Tx: external, Mapper: d.Conn().Mapper})
+	}
 	tx, err := d.Conn().BeginTxx(ctx, nil)
 	if err != nil {
 		return err
@@ -218,7 +229,7 @@ func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration
 			DELETE FROM message_deliveries
 			WHERE (message_id, subscriber_id) IN (
 				SELECT message_id, subscriber_id FROM message_deliveries
-				WHERE status = 'processed' AND processed_at < ?
+				WHERE status IN ('processed', 'cancelled') AND processed_at < ?
 				ORDER BY processed_at LIMIT 1000
 			)`), threshold)
 		if err != nil {

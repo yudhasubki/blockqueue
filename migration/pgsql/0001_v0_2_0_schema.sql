@@ -21,6 +21,10 @@ CREATE TABLE topic_subscribers (
     max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
     visibility_timeout_ms BIGINT NOT NULL DEFAULT 300000 CHECK (visibility_timeout_ms > 0),
     dequeue_batch_size INTEGER NOT NULL DEFAULT 10 CHECK (dequeue_batch_size BETWEEN 1 AND 1000),
+    retry_initial_delay_ms BIGINT NOT NULL DEFAULT 1000 CHECK (retry_initial_delay_ms >= 0),
+    retry_max_delay_ms BIGINT NOT NULL DEFAULT 3600000 CHECK (retry_max_delay_ms >= retry_initial_delay_ms),
+    retry_multiplier DOUBLE PRECISION NOT NULL DEFAULT 2 CHECK (retry_multiplier >= 1),
+    retry_jitter DOUBLE PRECISION NOT NULL DEFAULT 0.2 CHECK (retry_jitter BETWEEN 0 AND 1),
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     deleted_at TIMESTAMPTZ
 );
@@ -57,8 +61,9 @@ CREATE TABLE message_deliveries (
     message_id UUID NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     subscriber_id UUID NOT NULL REFERENCES topic_subscribers(id) ON DELETE CASCADE,
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
-        CHECK (status IN ('pending', 'delivered', 'processed', 'dead_letter')),
-    attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt >= 0),
+        CHECK (status IN ('pending', 'delivered', 'processed', 'dead_letter', 'cancelled')),
+    delivery_count INTEGER NOT NULL DEFAULT 0 CHECK (delivery_count >= 0),
+    failure_count INTEGER NOT NULL DEFAULT 0 CHECK (failure_count >= 0),
     visible_at TIMESTAMPTZ NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN -1000 AND 1000),
     message_created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -66,10 +71,13 @@ CREATE TABLE message_deliveries (
     lease_expires_at TIMESTAMPTZ,
     delivered_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ,
+    cancelled_at TIMESTAMPTZ,
+    cancel_reason TEXT,
     last_error TEXT,
     CHECK (status <> 'delivered' OR (receipt_token IS NOT NULL AND lease_expires_at IS NOT NULL)),
     CHECK (status <> 'pending' OR (receipt_token IS NULL AND lease_expires_at IS NULL)),
-    CHECK (status NOT IN ('processed', 'dead_letter') OR processed_at IS NOT NULL),
+    CHECK (status NOT IN ('processed', 'dead_letter', 'cancelled') OR processed_at IS NOT NULL),
+    CHECK (status <> 'cancelled' OR cancelled_at IS NOT NULL),
     PRIMARY KEY (message_id, subscriber_id)
 ) WITH (fillfactor = 85, autovacuum_vacuum_scale_factor = 0.01);
 
@@ -102,7 +110,21 @@ WHERE status = 'dead_letter';
 
 CREATE INDEX idx_message_deliveries_processed
 ON message_deliveries(processed_at)
-WHERE status = 'processed';
+WHERE status IN ('processed', 'cancelled');
+
+CREATE TABLE delivery_errors (
+    id UUID PRIMARY KEY,
+    message_id UUID NOT NULL,
+    subscriber_id UUID NOT NULL,
+    failure_count INTEGER NOT NULL CHECK (failure_count > 0),
+    error TEXT NOT NULL,
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (message_id, subscriber_id)
+        REFERENCES message_deliveries(message_id, subscriber_id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_delivery_errors_history
+ON delivery_errors(subscriber_id, message_id, failed_at DESC, id DESC);
 
 CREATE TABLE schedules (
     id UUID PRIMARY KEY,
@@ -155,3 +177,7 @@ WHERE status = 'running' AND message_id IS NOT NULL;
 CREATE INDEX idx_schedule_runs_running_schedule
 ON schedule_runs(schedule_id, scheduled_for)
 WHERE status = 'running';
+
+CREATE INDEX idx_schedule_runs_retention
+ON schedule_runs(COALESCE(finished_at, created_at), id)
+WHERE status <> 'running';

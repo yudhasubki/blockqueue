@@ -235,6 +235,88 @@ func BenchmarkBatchAck100(b *testing.B) {
 	})
 }
 
+func BenchmarkNackFailure(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		claimed := make(Deliveries, 0, b.N)
+		for iteration := 0; iteration < b.N; iteration++ {
+			if _, err := queue.Publish(ctx, topic, Message{Message: "nack benchmark"}); err != nil {
+				b.Fatal(err)
+			}
+			deliveries, err := queue.Claim(ctx, topic, "worker", 1, time.Minute)
+			if err != nil || len(deliveries) != 1 {
+				b.Fatalf("claim: count=%d err=%v", len(deliveries), err)
+			}
+			claimed = append(claimed, deliveries[0])
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for _, delivery := range claimed {
+			if err := queue.NackDelivery(
+				ctx, topic, "worker", delivery.ID, delivery.ReceiptToken, time.Hour, "benchmark failure",
+			); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		var errorsCount int
+		if err := queue.db.Conn().Get(&errorsCount, "SELECT COUNT(*) FROM delivery_errors"); err != nil {
+			b.Fatal(err)
+		}
+		if errorsCount != b.N {
+			b.Fatalf("delivery error mismatch: expected=%d actual=%d", b.N, errorsCount)
+		}
+		verifyBenchmarkRows(b, queue, int64(b.N))
+	})
+}
+
+func BenchmarkSQLiteCallerTransactionContention(b *testing.B) {
+	for _, hold := range []time.Duration{10 * time.Millisecond, 100 * time.Millisecond, time.Second} {
+		b.Run("hold_"+hold.String(), func(b *testing.B) {
+			driver, err := sqlite.Open(filepath.Join(b.TempDir(), "caller-transaction.db"), sqlite.Config{
+				BusyTimeout: 5000,
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			queue, topic := benchmarkQueue(b, driver)
+			ctx := context.Background()
+
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				b.StopTimer()
+				tx, err := driver.DB().BeginTx(ctx, nil)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if _, err := queue.PublishTx(ctx, tx, topic, Message{Message: "held caller transaction"}); err != nil {
+					_ = tx.Rollback()
+					b.Fatal(err)
+				}
+				if _, err := queue.PublishAsync(ctx, topic, Message{Message: "queued writer admission"}); err != nil {
+					_ = tx.Rollback()
+					b.Fatal(err)
+				}
+				barrier := make(chan error, 1)
+				go func() { barrier <- queue.writer.Barrier(ctx) }()
+
+				b.StartTimer()
+				time.Sleep(hold)
+				commitErr := tx.Commit()
+				barrierErr := <-barrier
+				b.StopTimer()
+				if commitErr != nil {
+					b.Fatal(commitErr)
+				}
+				if barrierErr != nil {
+					b.Fatal(barrierErr)
+				}
+			}
+			verifyBenchmarkRows(b, queue, int64(b.N*2))
+		})
+	}
+}
+
 func verifyBenchmarkRows(b *testing.B, queue *Queue, expected int64) {
 	b.Helper()
 	var messages, deliveries int64

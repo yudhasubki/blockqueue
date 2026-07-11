@@ -2,6 +2,7 @@ package blockqueue
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sync"
@@ -67,6 +68,10 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		NewSubscriber(topic, "two", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "100ms"}),
 	}
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, subscribers))
+	runTransactionalPublishContract(t, queue, driver, topic)
+	if driver.Dialect() == store.DialectPostgres {
+		runPostgresTopologyFenceContract(t, queue, driver)
+	}
 
 	first, err := queue.PublishDurable(context.Background(), topic, Message{Message: "idempotent", IdempotencyKey: "contract-key", Priority: 10})
 	require.NoError(t, err)
@@ -189,8 +194,19 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	replayedClaim, err := queue.Claim(context.Background(), retryTopic, retrySubscriber.Name, 1, time.Second)
 	require.NoError(t, err)
 	require.Len(t, replayedClaim, 1)
-	require.NoError(t, queue.AckDelivery(context.Background(), retryTopic, retrySubscriber.Name,
-		replayedClaim[0].ID, replayedClaim[0].ReceiptToken))
+	require.NoError(t, queue.NackDelivery(context.Background(), retryTopic, retrySubscriber.Name,
+		replayedClaim[0].ID, replayedClaim[0].ReceiptToken, time.Millisecond, "replayed retry"))
+	replayedContext, replayedCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	replayedFinal, err := queue.ClaimWait(replayedContext, retryTopic, retrySubscriber.Name, 1, time.Second)
+	replayedCancel()
+	require.NoError(t, err)
+	require.Len(t, replayedFinal, 1)
+	require.NoError(t, queue.NackDelivery(context.Background(), retryTopic, retrySubscriber.Name,
+		replayedFinal[0].ID, replayedFinal[0].ReceiptToken, 0, "replayed terminal"))
+	errorHistory, err := queue.DeliveryErrors(context.Background(), retryTopic, retrySubscriber.Name,
+		retryReceipt.MessageID, 10, "")
+	require.NoError(t, err)
+	require.Len(t, errorHistory.Errors, 4, "DLQ replay must start a new failure cycle without losing history")
 
 	concurrentTopic, concurrentSubscriber := createContractTopic(t, queue, "contract-concurrent-claim", SubscriberOptions{
 		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
@@ -269,6 +285,27 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		history, historyErr := queue.ScheduleRunHistory(context.Background(), scheduleTopic, schedule.ID, 10, "")
 		return historyErr == nil && len(history.Runs) == 1 && history.Runs[0].Status == "completed"
 	}, time.Second, 20*time.Millisecond)
+
+	expiryTopic, expirySubscriber := createContractTopic(t, queue, "contract-schedule-expiry", SubscriberOptions{
+		MaxAttempts: 1, VisibilityDuration: "25ms", DequeueBatchSize: 1,
+		RetryPolicy: RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
+	})
+	expirySchedule, err := queue.CreateSchedule(context.Background(), expiryTopic, ScheduleInput{
+		Name: "expire", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "expire-run",
+	})
+	require.NoError(t, err)
+	_, err = queue.RunScheduleNow(context.Background(), expiryTopic, expirySchedule.ID, false)
+	require.NoError(t, err)
+	expiryClaim, err := queue.Claim(context.Background(), expiryTopic, expirySubscriber.Name, 1, 25*time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, expiryClaim, 1)
+	require.Eventually(t, func() bool {
+		history, historyErr := queue.ScheduleRunHistory(
+			context.Background(), expiryTopic, expirySchedule.ID, 10, "",
+		)
+		return historyErr == nil && len(history.Runs) == 1 && history.Runs[0].Status == "completed"
+	}, 3*time.Second, 20*time.Millisecond, "lease-expiry DLQ must complete only its related schedule run")
+
 	retentionCutoff := time.Now().UTC().Add(-31 * 24 * time.Hour)
 	_, err = queue.db.Conn().ExecContext(context.Background(), queue.db.Conn().Rebind(
 		"UPDATE schedule_runs SET created_at = ?, finished_at = ? WHERE id = ?"),
@@ -338,6 +375,120 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	require.NoError(t, queue.Shutdown(ctx))
+}
+
+func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Driver, topic Topic) {
+	t.Helper()
+	ctx := context.Background()
+	database := testDB(driver)
+	_, err := database.ExecContext(ctx, "CREATE TABLE contract_business_records (id VARCHAR(36) PRIMARY KEY)")
+	require.NoError(t, err)
+
+	tx, err := driver.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, database.Rebind("INSERT INTO contract_business_records (id) VALUES (?)"), uuid.NewString())
+	require.NoError(t, err)
+	receipt, err := queue.PublishTx(ctx, tx, topic, Message{Message: "transaction-commit"})
+	require.NoError(t, err)
+	require.Equal(t, "staged", receipt.State)
+	require.NoError(t, tx.Commit())
+
+	tx, err = driver.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, database.Rebind("INSERT INTO contract_business_records (id) VALUES (?)"), uuid.NewString())
+	require.NoError(t, err)
+	_, err = queue.PublishTx(ctx, tx, topic, Message{Message: "transaction-rollback"})
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+
+	var businessRows, committedMessages, rolledBackMessages int
+	require.NoError(t, database.Get(&businessRows, "SELECT COUNT(*) FROM contract_business_records"))
+	require.NoError(t, database.Get(&committedMessages,
+		database.Rebind("SELECT COUNT(*) FROM messages WHERE id = ?"), receipt.MessageID))
+	require.NoError(t, database.Get(&rolledBackMessages,
+		"SELECT COUNT(*) FROM messages WHERE message = 'transaction-rollback'"))
+	require.Equal(t, 1, businessRows)
+	require.Equal(t, 1, committedMessages)
+	require.Zero(t, rolledBackMessages)
+
+	claimed, err := queue.Claim(ctx, topic, "one", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	tx, err = driver.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, err = tx.ExecContext(ctx, database.Rebind("INSERT INTO contract_business_records (id) VALUES (?)"), uuid.NewString())
+	require.NoError(t, err)
+	require.NoError(t, queue.AckDeliveryTx(ctx, tx, topic, "one", claimed[0].ID, claimed[0].ReceiptToken))
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, queue.AckDelivery(ctx, topic, "one", claimed[0].ID, claimed[0].ReceiptToken))
+
+	nackReceipt, err := queue.Publish(ctx, topic, Message{Message: "transactional-nack"})
+	require.NoError(t, err)
+	nackClaim, err := queue.Claim(ctx, topic, "one", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, nackClaim, 1)
+	require.Equal(t, nackReceipt.MessageID, nackClaim[0].ID)
+	require.NoError(t, queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		return queue.NackDeliveryTx(ctx, tx, topic, "one", nackClaim[0].ID,
+			nackClaim[0].ReceiptToken, time.Hour, "transactional failure")
+	}))
+	errorPage, err := queue.DeliveryErrors(ctx, topic, "one", nackReceipt.MessageID, 10, "")
+	require.NoError(t, err)
+	require.Len(t, errorPage.Errors, 1)
+	require.Equal(t, 1, errorPage.Errors[0].FailureCount)
+
+	cancelReceipt, err := queue.Publish(ctx, topic, Message{Message: "transactional-cancel"})
+	require.NoError(t, err)
+	var cancelResults []DeliveryResult
+	require.NoError(t, queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		results, cancelErr := queue.CancelMessageTx(ctx, tx, topic, cancelReceipt.MessageID, "business rollback")
+		cancelResults = results
+		return cancelErr
+	}))
+	require.Len(t, cancelResults, 2)
+	status, err := queue.GetMessageStatus(ctx, topic, cancelReceipt.MessageID)
+	require.NoError(t, err)
+	require.Len(t, status.Deliveries, 2)
+	for _, delivery := range status.Deliveries {
+		require.Equal(t, "cancelled", delivery.Status)
+		require.Equal(t, "business rollback", delivery.CancelReason)
+	}
+}
+
+func runPostgresTopologyFenceContract(t *testing.T, queue *Queue, driver store.Driver) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	topic := NewTopic("transaction-fence")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateTopic(ctx, topic, Subscribers{subscriber}))
+
+	tx, err := driver.DB().BeginTx(ctx, nil)
+	require.NoError(t, err)
+	_, err = queue.PublishTx(ctx, tx, topic, Message{Message: "held-shared-fence"})
+	require.NoError(t, err)
+
+	publishResult := make(chan error, 1)
+	go func() {
+		_, publishErr := queue.Publish(ctx, topic, Message{Message: "concurrent-publisher"})
+		publishResult <- publishErr
+	}()
+	select {
+	case err := <-publishResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		require.Fail(t, "shared topology fence blocked another publisher")
+	}
+
+	mutationResult := make(chan error, 1)
+	go func() { mutationResult <- queue.DeleteSubscriber(ctx, topic, subscriber.Name) }()
+	select {
+	case err := <-mutationResult:
+		require.Failf(t, "mutation bypassed topology fence", "error=%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, tx.Commit())
+	require.NoError(t, <-mutationResult)
 }
 
 func createContractTopic(t *testing.T, queue *Queue, name string, options SubscriberOptions) (Topic, Subscriber) {

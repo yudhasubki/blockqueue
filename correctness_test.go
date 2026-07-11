@@ -70,6 +70,40 @@ func TestGlobalReaperMovesMaxAttemptToDLQ(t *testing.T) {
 	}, 2*time.Second, 20*time.Millisecond)
 }
 
+func TestClaimDoesNotSweepUnrelatedScheduleRuns(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	ctx := context.Background()
+	completed, err := queue.Publish(ctx, topic, Message{Message: "completed schedule candidate"})
+	require.NoError(t, err)
+	claimed, err := queue.Claim(ctx, topic, "worker", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.NoError(t, queue.AckDelivery(ctx, topic, "worker", claimed[0].ID, claimed[0].ReceiptToken))
+
+	schedule, err := queue.CreateSchedule(ctx, topic, ScheduleInput{
+		Name: "claim-no-sweep", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "scheduled",
+	})
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	_, err = testDB(driver).Exec(`
+		INSERT INTO schedule_runs (id, schedule_id, message_id, scheduled_for, status)
+		VALUES (?, ?, ?, ?, 'running')`, uuid.NewString(), schedule.ID, completed.MessageID, now)
+	require.NoError(t, err)
+	_, err = testDB(driver).Exec(`
+		CREATE TRIGGER reject_schedule_run_hot_path
+		BEFORE UPDATE ON schedule_runs
+		BEGIN
+			SELECT RAISE(ABORT, 'schedule run sweep reached claim hot path');
+		END`)
+	require.NoError(t, err)
+
+	_, err = queue.Publish(ctx, topic, Message{Message: "ordinary claim"})
+	require.NoError(t, err)
+	claimed, err = queue.Claim(ctx, topic, "worker", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+}
+
 func TestConcurrentClaimsHaveSingleOwner(t *testing.T) {
 	queue, _, topic := setupQueue(t)
 	const messages = 500

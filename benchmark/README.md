@@ -8,7 +8,7 @@ must be reported separately.
 
 ```bash
 go test -run '^$' \
-  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100' \
+  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkNackFailure' \
   -benchmem -count=5 .
 ```
 
@@ -20,7 +20,7 @@ name ends in `_bench`:
 ```bash
 BLOCKQUEUE_BENCH_POSTGRES_URL='postgres://postgres:postgres@127.0.0.1:5432/blockqueue_bench?sslmode=disable' \
   go test -run '^$' \
-  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100' \
+  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkNackFailure' \
   -benchmem -benchtime=10x -count=5 .
 ```
 
@@ -31,6 +31,39 @@ barrier; cleanup still drains the admitted backlog.
 Use a fixed `-benchtime=Nx` for PostgreSQL multi-case runs: adaptive calibration
 can admit a very large async backlog, whose required post-timing durable drain
 then dominates total suite time.
+
+The release comparison includes publish, claim, set-based batch ACK, and the
+NACK failure path (including `delivery_errors`). Compare each case to the same
+backend and durability baseline; the median of five fresh trials may regress by
+at most 5%.
+
+v0.2 hardening seed baseline (Apple M1, strict durability, `-benchtime=10x`,
+five fresh isolated trials):
+
+| Operation | SQLite median | PostgreSQL median | Unit |
+|---|---:|---:|---|
+| Claim100 | 2.528 ms | 8.071 ms | one 100-message claim |
+| BatchAck100 | 2.979 ms | 11.103 ms | one 100-message transaction |
+| NackFailure | 0.186 ms | 0.779 ms | one NACK plus error-history insert |
+
+Every trial verified exact canonical-message and delivery counts; NACK trials
+also verified one `delivery_errors` row per operation. These numbers establish
+the first comparable baseline for the new paths, so the 5% regression gate
+applies to subsequent revisions rather than being inferred against a different
+pre-v0.2 workload.
+
+Caller-owned SQLite transactions intentionally hold its single writer lock.
+The diagnostic benchmark measures how directly that hold time appears in a
+queued durable writer barrier:
+
+```bash
+go test -run '^$' -bench BenchmarkSQLiteCallerTransactionContention \
+  -benchtime=1x -count=5 .
+```
+
+It runs 10 ms, 100 ms, and 1 s hold cases. This is a documented contention cost,
+not a throughput gate: application callbacks should contain only short local
+database work and must not perform network I/O.
 
 ## HTTP/k6 benchmark: SQLite
 
