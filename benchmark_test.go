@@ -2,341 +2,249 @@ package blockqueue
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	bqio "github.com/yudhasubki/blockqueue/pkg/io"
-	"github.com/yudhasubki/blockqueue/pkg/sqlite"
+	"github.com/yudhasubki/blockqueue/internal/testdb"
+	"github.com/yudhasubki/blockqueue/store"
+	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
 
-// BenchmarkPublish tests single message publish throughput
-func BenchmarkPublish(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_publish", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_publish")
-	defer os.Remove("bench_publish-shm")
-	defer os.Remove("bench_publish-wal")
+type benchmarkBackend struct {
+	name string
+	open func(*testing.B) store.Driver
+}
 
-	runBenchMigrate(b, sqliteDb)
-
-	bq := New(sqliteDb, BlockQueueOption{
-		WriteBufferConfig: WriteBufferConfig{
-			BatchSize:     100,
-			FlushInterval: 50 * time.Millisecond,
-			BufferSize:    10000,
+func forEachBenchmarkBackend(b *testing.B, run func(*testing.B, *Queue, Topic)) {
+	b.Helper()
+	backends := []benchmarkBackend{{
+		name: "sqlite",
+		open: func(b *testing.B) store.Driver {
+			driver, err := sqlite.Open(filepath.Join(b.TempDir(), "benchmark.db"), sqlite.Config{})
+			if err != nil {
+				b.Fatal(err)
+			}
+			return driver
 		},
-		CheckpointInterval: 30 * time.Second,
-	})
-
-	ctx := context.Background()
-	request := bqio.Topic{
-		Name: "bench-topic",
-		Subscribers: bqio.Subscribers{
-			{Name: "bench-subscriber"},
-		},
-	}
-	topic := request.Topic()
-	subscribers := request.Subscriber(topic.Id)
-
-	bq.Run(ctx)
-	bq.AddJob(ctx, topic, subscribers)
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		bq.Publish(ctx, topic, bqio.Publish{
-			Message: "benchmark message",
+	}}
+	if postgresURL := os.Getenv("BLOCKQUEUE_BENCH_POSTGRES_URL"); postgresURL != "" {
+		backends = append(backends, benchmarkBackend{
+			name: "postgres",
+			open: func(b *testing.B) store.Driver {
+				schema, err := testdb.OpenPostgreSQLSchema(
+					context.Background(), postgresURL, "_bench", "blockqueue_benchmark",
+				)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.Cleanup(func() {
+					if err := schema.Close(); err != nil {
+						b.Error(err)
+					}
+				})
+				return schema.Driver
+			},
 		})
 	}
 
-	b.StopTimer()
-	bq.Close()
-}
-
-// BenchmarkPublishParallel tests concurrent publish throughput
-func BenchmarkPublishParallel(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_parallel", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_parallel")
-	defer os.Remove("bench_parallel-shm")
-	defer os.Remove("bench_parallel-wal")
-
-	runBenchMigrate(b, sqliteDb)
-
-	bq := New(sqliteDb, BlockQueueOption{
-		WriteBufferConfig: WriteBufferConfig{
-			BatchSize:     100,
-			FlushInterval: 50 * time.Millisecond,
-			BufferSize:    10000,
-		},
-		CheckpointInterval: 30 * time.Second,
-	})
-
-	ctx := context.Background()
-	request := bqio.Topic{
-		Name: "bench-parallel-topic",
-		Subscribers: bqio.Subscribers{
-			{Name: "bench-parallel-subscriber"},
-		},
-	}
-	topic := request.Topic()
-	subscribers := request.Subscriber(topic.Id)
-
-	bq.Run(ctx)
-	bq.AddJob(ctx, topic, subscribers)
-
-	b.ResetTimer()
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			bq.Publish(ctx, topic, bqio.Publish{
-				Message: "parallel benchmark message",
-			})
-		}
-	})
-
-	b.StopTimer()
-	bq.Close()
-}
-
-// BenchmarkBatchEnqueue tests batch insert performance
-func BenchmarkBatchEnqueue(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_batch", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_batch")
-	defer os.Remove("bench_batch-shm")
-	defer os.Remove("bench_batch-wal")
-
-	runBenchMigrate(b, sqliteDb)
-
-	database := newDb(sqliteDb)
-
-	// Create topic and subscriber
-	topicId := uuid.New()
-	subscriberId := uuid.New()
-	sqliteDb.Database.Exec("INSERT INTO topics (id, name) VALUES (?, ?)", topicId, "bench-batch-topic")
-	sqliteDb.Database.Exec(
-		"INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (?, ?, ?, ?)",
-		subscriberId, topicId, "bench-batch-subscriber", `{"max_attempts":3,"visibility_duration":"30s"}`,
-	)
-
-	// Prepare batch
-	batchSize := 100
-	requests := make([]writeRequest, batchSize)
-	for i := 0; i < batchSize; i++ {
-		requests[i] = writeRequest{
-			TopicId:   topicId,
-			MessageId: uuid.NewString(),
-			Message:   "batch benchmark message",
-		}
-	}
-
-	ctx := context.Background()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		// Regenerate message IDs for each iteration
-		for j := range requests {
-			requests[j].MessageId = uuid.NewString()
-		}
-		database.batchEnqueueToSubscribers(ctx, requests)
+	for _, backend := range backends {
+		backend := backend
+		b.Run(backend.name, func(b *testing.B) {
+			queue, topic := benchmarkQueue(b, backend.open(b))
+			run(b, queue, topic)
+		})
 	}
 }
 
-// BenchmarkDequeue tests dequeue performance
-func BenchmarkDequeue(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_dequeue", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_dequeue")
-	defer os.Remove("bench_dequeue-shm")
-	defer os.Remove("bench_dequeue-wal")
-
-	runBenchMigrate(b, sqliteDb)
-
-	database := newDb(sqliteDb)
-
-	// Create topic and subscriber
-	topicId := uuid.New()
-	subscriberId := uuid.New()
-	sqliteDb.Database.Exec("INSERT INTO topics (id, name) VALUES (?, ?)", topicId, "bench-dequeue-topic")
-	sqliteDb.Database.Exec(
-		"INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (?, ?, ?, ?)",
-		subscriberId, topicId, "bench-dequeue-subscriber", `{"max_attempts":3,"visibility_duration":"30s"}`,
-	)
-
-	ctx := context.Background()
-
-	// Pre-populate messages
-	for i := 0; i < b.N*10; i++ {
-		database.enqueueToSubscribers(ctx, topicId, uuid.NewString(), "dequeue benchmark message")
-	}
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		database.dequeueMessages(ctx, subscriberId, 10, 30*time.Second)
-	}
-}
-
-// BenchmarkAck tests acknowledgment performance
-func BenchmarkAck(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_ack", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_ack")
-	defer os.Remove("bench_ack-shm")
-	defer os.Remove("bench_ack-wal")
-
-	runBenchMigrate(b, sqliteDb)
-
-	database := newDb(sqliteDb)
-
-	// Create topic and subscriber
-	topicId := uuid.New()
-	subscriberId := uuid.New()
-	sqliteDb.Database.Exec("INSERT INTO topics (id, name) VALUES (?, ?)", topicId, "bench-ack-topic")
-	sqliteDb.Database.Exec(
-		"INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (?, ?, ?, ?)",
-		subscriberId, topicId, "bench-ack-subscriber", `{"max_attempts":3,"visibility_duration":"30s"}`,
-	)
-
-	ctx := context.Background()
-
-	// Pre-populate messages
-	messageIds := make([]string, b.N)
-	for i := 0; i < b.N; i++ {
-		messageIds[i] = uuid.NewString()
-		database.enqueueToSubscribers(ctx, topicId, messageIds[i], "ack benchmark message")
-	}
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		database.ackSubscriberMessage(ctx, subscriberId, messageIds[i])
-	}
-}
-
-// BenchmarkEndToEnd tests full publish→consume→ack cycle
-func BenchmarkEndToEnd(b *testing.B) {
-	sqliteDb, err := sqlite.New("bench_e2e", sqlite.Config{
-		BusyTimeout: 5000,
-	})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer sqliteDb.Database.Close()
-	defer os.Remove("bench_e2e")
-	defer os.Remove("bench_e2e-shm")
-	defer os.Remove("bench_e2e-wal")
-
-	runBenchMigrate(b, sqliteDb)
-
-	database := newDb(sqliteDb)
-
-	// Create topic and subscriber
-	topicId := uuid.New()
-	subscriberId := uuid.New()
-	sqliteDb.Database.Exec("INSERT INTO topics (id, name) VALUES (?, ?)", topicId, "bench-e2e-topic")
-	sqliteDb.Database.Exec(
-		"INSERT INTO topic_subscribers (id, topic_id, name, option) VALUES (?, ?, ?, ?)",
-		subscriberId, topicId, "bench-e2e-subscriber", `{"max_attempts":3,"visibility_duration":"30s"}`,
-	)
-
-	ctx := context.Background()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		messageId := uuid.NewString()
-
-		// Publish
-		database.enqueueToSubscribers(ctx, topicId, messageId, "e2e benchmark message")
-
-		// Consume
-		database.dequeueMessages(ctx, subscriberId, 1, 30*time.Second)
-
-		// Ack
-		database.ackSubscriberMessage(ctx, subscriberId, messageId)
-	}
-}
-
-// Helper to run migrations for benchmarks
-func runBenchMigrate(b *testing.B, db *sqlite.SQLite) {
+func benchmarkQueue(b *testing.B, driver store.Driver) (*Queue, Topic) {
 	b.Helper()
-
-	migrations := []string{
-		`CREATE TABLE IF NOT EXISTS topics (
-			id VARCHAR(36) PRIMARY KEY,
-			name VARCHAR(255) NOT NULL UNIQUE,
-			deleted_at DATETIME DEFAULT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)`,
-		`CREATE TABLE IF NOT EXISTS topic_subscribers (
-			id VARCHAR(36) PRIMARY KEY,
-			topic_id VARCHAR(36) NOT NULL,
-			name VARCHAR(255) NOT NULL,
-			option TEXT DEFAULT '{}',
-			deleted_at DATETIME DEFAULT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
-		)`,
-		`CREATE TABLE IF NOT EXISTS topic_messages (
-			id VARCHAR(36) PRIMARY KEY,
-			topic_id VARCHAR(36) NOT NULL,
-			message TEXT NOT NULL,
-			status VARCHAR(15) DEFAULT 'pending',
-			deleted_at DATETIME DEFAULT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
-		)`,
-		`CREATE TABLE IF NOT EXISTS subscriber_messages (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			subscriber_id VARCHAR(36) NOT NULL,
-			topic_id VARCHAR(36) NOT NULL,
-			message_id VARCHAR(50) NOT NULL,
-			message TEXT NOT NULL,
-			status VARCHAR(15) DEFAULT 'pending',
-			retry_count INTEGER DEFAULT 0,
-			visible_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (subscriber_id) REFERENCES topic_subscribers(id) ON DELETE CASCADE,
-			FOREIGN KEY (topic_id) REFERENCES topics(id) ON DELETE CASCADE
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_poll ON subscriber_messages(subscriber_id, status, visible_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_ack ON subscriber_messages(message_id, subscriber_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_topic ON subscriber_messages(topic_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_subscriber_messages_pending ON subscriber_messages(subscriber_id, visible_at) WHERE status = 'pending'`,
+	queue := New(driver, Options{Writer: WriterOptions{
+		BatchSize: 100, FlushInterval: time.Millisecond,
+		MaxPendingMessages: 200_000, MaxPendingBytes: 512 << 20,
+	}})
+	if err := queue.Run(context.Background()); err != nil {
+		b.Fatal(err)
 	}
-
-	for _, migration := range migrations {
-		_, err := db.Database.Exec(migration)
-		if err != nil {
-			b.Fatalf("failed to run migration: %v", err)
+	topic := NewTopic("benchmark")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
+		MaxAttempts: 5, VisibilityDuration: "1m", DequeueBatchSize: 1000,
+	})
+	if err := queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}); err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := queue.Shutdown(ctx); err != nil {
+			b.Error(err)
 		}
+	})
+	return queue, topic
+}
+
+func BenchmarkPublishDurable(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for index := 0; index < b.N; index++ {
+			if _, err := queue.Publish(ctx, topic, Message{Message: "benchmark message"}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N))
+	})
+}
+
+func BenchmarkPublishAsync(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for index := 0; index < b.N; index++ {
+			if _, err := queue.PublishAsync(ctx, topic, Message{Message: "benchmark message"}); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		if err := queue.writer.Barrier(ctx); err != nil {
+			b.Fatal(err)
+		}
+		verifyBenchmarkRows(b, queue, int64(b.N))
+	})
+}
+
+func BenchmarkBatchPublishDurable100(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		batch := make([]Message, 100)
+		for index := range batch {
+			batch[index].Message = "batch benchmark message"
+		}
+		b.ReportAllocs()
+		b.SetBytes(int64(len(batch)))
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			if _, err := queue.BatchPublish(ctx, topic, batch); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N*len(batch)))
+	})
+}
+
+func BenchmarkClaim100(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		for iteration := 0; iteration < b.N; iteration++ {
+			batch := make([]Message, 100)
+			for index := range batch {
+				batch[index].Message = fmt.Sprintf("claim-%d-%d", iteration, index)
+			}
+			if _, err := queue.BatchPublish(ctx, topic, batch); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportAllocs()
+		b.SetBytes(100)
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			messages, err := queue.Claim(ctx, topic, "worker", 100, time.Minute)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(messages) != 100 {
+				b.Fatalf("claimed %d messages, want 100", len(messages))
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N*100))
+	})
+}
+
+func BenchmarkClaimAndAck(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		batch := make([]Message, b.N)
+		for index := range batch {
+			batch[index].Message = "ack benchmark"
+		}
+		for start := 0; start < len(batch); start += 1000 {
+			end := min(start+1000, len(batch))
+			if _, err := queue.BatchPublish(ctx, topic, batch[start:end]); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.ReportAllocs()
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			messages, err := queue.Claim(ctx, topic, "worker", 1, time.Minute)
+			if err != nil || len(messages) != 1 {
+				b.Fatalf("claim: count=%d err=%v", len(messages), err)
+			}
+			message := messages[0]
+			if err := queue.AckDelivery(ctx, topic, "worker", message.ID, message.ReceiptToken); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N))
+	})
+}
+
+func BenchmarkBatchAck100(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		claimedBatches := make([]Deliveries, b.N)
+		for iteration := 0; iteration < b.N; iteration++ {
+			batch := make([]Message, 100)
+			for index := range batch {
+				batch[index].Message = "batch ack benchmark"
+			}
+			if _, err := queue.BatchPublish(ctx, topic, batch); err != nil {
+				b.Fatal(err)
+			}
+			claimed, err := queue.Claim(ctx, topic, "worker", 100, time.Minute)
+			if err != nil || len(claimed) != 100 {
+				b.Fatalf("claim: count=%d err=%v", len(claimed), err)
+			}
+			claimedBatches[iteration] = claimed
+		}
+		b.ReportAllocs()
+		b.SetBytes(100)
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			items := make([]BatchAckItem, len(claimedBatches[iteration]))
+			for index, delivery := range claimedBatches[iteration] {
+				items[index] = BatchAckItem{MessageID: delivery.ID, ReceiptToken: delivery.ReceiptToken}
+			}
+			results := queue.BatchAckDeliveries(ctx, topic, "worker", items)
+			for _, result := range results {
+				if result.Status != "processed" {
+					b.Fatalf("batch ack result: %+v", result)
+				}
+			}
+		}
+		b.StopTimer()
+		verifyBenchmarkRows(b, queue, int64(b.N*100))
+	})
+}
+
+func verifyBenchmarkRows(b *testing.B, queue *Queue, expected int64) {
+	b.Helper()
+	var messages, deliveries int64
+	if err := queue.db.Conn().Get(&messages, "SELECT COUNT(*) FROM messages"); err != nil {
+		b.Fatal(err)
+	}
+	if err := queue.db.Conn().Get(&deliveries, "SELECT COUNT(*) FROM message_deliveries"); err != nil {
+		b.Fatal(err)
+	}
+	if messages != expected || deliveries != expected {
+		b.Fatalf("persisted row mismatch: expected=%d messages=%d deliveries=%d", expected, messages, deliveries)
 	}
 }

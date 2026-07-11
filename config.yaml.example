@@ -1,29 +1,44 @@
 http:
+  host: "127.0.0.1"
   port: 8080
   shutdown: "30s"
-  driver: "sqlite|turso|pgsql"
+  read_header_timeout: "5s"
+  idle_timeout: "2m"
+  write_timeout: "65s"
+  driver: "sqlite" # sqlite, pgsql, or experimental turso
 logging:
   level: "debug"
   type:  "json"
 sqlite:
-  db_name: "blockqueue"
+  db_name: "blockqueue.db"
   busy_timeout: 5000
+  max_open_conns: 10
+  max_idle_conns: 10
   cache_size: -4000   # 4MB page cache (negative = KB)
-  mmap_size: 0        
+  mmap_size: 0
+  checkpoint_interval: "30s"
+  durability: "strict" # strict (FULL) or balanced (NORMAL)
 turso:
   url: "libsql://tursodatabase-username.turso.io"
 pgsql:
   host: "localhost"
   username: "postgres"
-  password: ""
+  password: "${BLOCKQUEUE_POSTGRES_PASSWORD}"
   name: "blockqueue"
   port: 5432
   timezone: "UTC"
   max_open_conns: 10
   max_idle_conns: 10
-write_buffer:
+  ssl_mode: "disable"
+  durability: "strict" # strict (synchronous_commit=on) or balanced (local)
+writer:
   batch_size: 100          # Messages per batch
   flush_interval: "100ms"  # Max time before flush
-  buffer_size: 10000       # Channel buffer size
+  max_pending_messages: 100000
+  max_pending_bytes: 268435456 # 256MiB
+maintenance:
+  processed_retention: "168h" # 7 days
+  schedule_run_retention: "720h" # 30 days
+  # dead_letter_retention: "2160h" # Optional; disabled by default.
 metric:
   enable: false

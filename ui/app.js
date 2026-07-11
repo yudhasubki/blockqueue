@@ -1,8 +1,29 @@
-const API_BASE = ".";
+const API_BASE = "./v1";
 
 // State
 let currentTopic = null;
 let topics = [];
+
+function escapeHTML(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+}
+
+function inlineJSON(value) {
+    return JSON.stringify(value)
+        .replaceAll('&', '\\u0026')
+        .replaceAll("'", '\\u0027')
+        .replaceAll('<', '\\u003c')
+        .replaceAll('>', '\\u003e');
+}
+
+function pathSegment(value) {
+    return encodeURIComponent(String(value));
+}
 
 // DOM Elements
 const topicListEl = document.getElementById('topicList');
@@ -39,9 +60,9 @@ async function fetchTopics() {
 
 function renderTopics() {
     topicListEl.innerHTML = topics.map(t => `
-        <div class="topic-item ${currentTopic?.id === t.id ? 'active' : ''}" onclick="selectTopic('${t.name}')">
-            <span><i class="fa-solid fa-hashtag"></i> ${t.name}</span>
-            <span style="font-size: 0.75em; opacity: 0.5">${t.id.substring(0, 8)}</span>
+        <div class="topic-item ${currentTopic?.id === t.id ? 'active' : ''}" onclick='selectTopic(${inlineJSON(t.name)})'>
+            <span><i class="fa-solid fa-hashtag"></i> ${escapeHTML(t.name)}</span>
+            <span style="font-size: 0.75em; opacity: 0.5">${escapeHTML(t.id.substring(0, 8))}</span>
         </div>
     `).join('');
 }
@@ -49,14 +70,15 @@ function renderTopics() {
 async function selectTopic(name) {
     // We need to fetch subscribers status which gives us topic metadata + subscribers
     try {
-        const res = await fetch(`${API_BASE}/topics/${name}/subscribers`);
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(name)}/subscribers`);
         if (!res.ok) throw new Error('Failed to load topic details');
 
         const response = await res.json();
 
         const statusData = response.data || [];
 
-        const topicId = statusData.length > 0 ? statusData[0].topic_id : 'Unknown'; /* We need to fix this in backend if topic has no subscribers */
+        const selectedTopic = topics.find(topic => topic.name === name);
+        const topicId = selectedTopic?.id || statusData[0]?.topic_id || 'Unknown';
 
         currentTopic = { name, id: topicId };
         renderTopics(); // Update active state
@@ -93,7 +115,7 @@ function renderSubscribers(subscribers) {
     subscriberListEl.innerHTML = subscribers.map(s => `
         <div class="subscriber-card">
             <div class="subscriber-info">
-                <h3>${s.name}</h3>
+                <h3>${escapeHTML(s.name)}</h3>
                 <span class="status-badge">Active</span>
             </div>
             <div class="subscriber-stats">
@@ -106,13 +128,13 @@ function renderSubscribers(subscribers) {
                     ${s.unacked_message}
                 </div>
                 <div class="stat-item">
-                     <button class="btn btn-sm btn-primary" onclick="openInspect('${s.name}')" title="Inspect Queue">
+                     <button class="btn btn-sm btn-primary" onclick='openInspect(${inlineJSON(s.name)})' title="Inspect Queue">
                          <i class="fa-solid fa-eye"></i> Peek
                     </button>
-                    <button class="btn btn-sm btn-danger" onclick="openDLQ('${s.name}')" title="View Dead Letter Queue" style="margin-left: 0.5rem">
+                    <button class="btn btn-sm btn-danger" onclick='openDLQ(${inlineJSON(s.name)})' title="View Dead Letter Queue" style="margin-left: 0.5rem">
                          <i class="fa-solid fa-skull"></i> DLQ
                     </button>
-                     <button class="btn btn-sm btn-danger" onclick="deleteSubscriber('${s.name}')" title="Delete Subscriber" style="margin-left: 0.5rem">
+                     <button class="btn btn-sm btn-danger" onclick='deleteSubscriber(${inlineJSON(s.name)})' title="Delete Subscriber" style="margin-left: 0.5rem">
                          <i class="fa-solid fa-trash"></i>
                     </button>
                 </div>
@@ -126,11 +148,23 @@ async function handleCreateTopic(e) {
     e.preventDefault();
     const formData = new FormData(e.target);
     const name = formData.get('name');
+    const subscriberName = formData.get('subscriber_name');
+    const maxAttempts = parseInt(formData.get('max_attempts'));
+    const visibilityDuration = formData.get('visibility_duration');
 
     try {
         const res = await fetch(`${API_BASE}/topics`, {
             method: 'POST',
-            body: JSON.stringify({ name }),
+            body: JSON.stringify({
+                name,
+                subscribers: [{
+                    name: subscriberName,
+                    option: {
+                        max_attempts: maxAttempts,
+                        visibility_duration: visibilityDuration,
+                    },
+                }],
+            }),
             headers: { 'Content-Type': 'application/json' }
         });
 
@@ -150,7 +184,7 @@ async function deleteTopic() {
     if (!currentTopic || !confirm(`Delete topic ${currentTopic.name}? This cannot be undone.`)) return;
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}`, { method: 'DELETE' });
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/`, { method: 'DELETE' });
         if (!res.ok) throw new Error(await res.text());
 
         currentTopic = null;
@@ -182,7 +216,7 @@ async function handlePublish(e) {
     if (delay) payload.delay = delay;
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/messages`, {
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/messages?wait_for=commit`, {
             method: 'POST',
             body: JSON.stringify(payload),
             headers: { 'Content-Type': 'application/json' }
@@ -195,10 +229,7 @@ async function handlePublish(e) {
 
         showToast('Message published successfully!', 'success');
 
-        // Small delay to ensure DB write is visible in stats
-        setTimeout(() => {
-            selectTopic(currentTopic.name);
-        }, 300);
+        selectTopic(currentTopic.name);
 
     } catch (err) {
         showToast('Error publishing: ' + err.message, 'error');
@@ -218,7 +249,7 @@ function showToast(message, type = 'success') {
         ? '<i class="fa-solid fa-circle-check"></i>'
         : '<i class="fa-solid fa-circle-exclamation"></i>';
 
-    toast.innerHTML = `${icon} <span>${message}</span>`;
+    toast.innerHTML = `${icon} <span>${escapeHTML(message)}</span>`;
 
     container.appendChild(toast);
 
@@ -246,7 +277,7 @@ async function handleCreateSubscriber(e) {
     };
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers`, {
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers`, {
             method: 'POST',
             body: JSON.stringify([{
                 name,
@@ -270,7 +301,7 @@ async function deleteSubscriber(name) {
     if (!currentTopic || !confirm(`Delete subscriber ${name}?`)) return;
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${name}`, { method: 'DELETE' });
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers/${pathSegment(name)}`, { method: 'DELETE' });
         if (!res.ok) throw new Error(await res.text());
         selectTopic(currentTopic.name);
         showToast('Subscriber deleted');
@@ -286,11 +317,11 @@ async function openDLQ(subscriberName) {
     openModal('dlqModal');
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/dlq`);
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers/${pathSegment(subscriberName)}/dlq`);
         if (!res.ok) throw new Error('Failed to fetch DLQ');
 
         const response = await res.json();
-        const messages = response.data || [];
+        const messages = response.data?.messages || [];
 
         if (messages.length === 0) {
             content.innerHTML = '<div style="text-align:center; padding: 2rem;">No messages in DLQ</div>';
@@ -300,11 +331,11 @@ async function openDLQ(subscriberName) {
         content.innerHTML = messages.map(m => `
             <div class="subscriber-card" style="margin-bottom: 0.5rem">
                 <div class="subscriber-info">
-                    <div style="font-family:monospace; font-size:0.8rem; opacity:0.7">${m.id}</div>
-                    <div style="margin-top:0.25rem">${m.message}</div>
+                    <div style="font-family:monospace; font-size:0.8rem; opacity:0.7">${escapeHTML(m.id)}</div>
+                    <div style="margin-top:0.25rem">${escapeHTML(m.message)}</div>
                 </div>
                 <div class="subscriber-stats">
-                    <button class="btn btn-sm btn-primary" onclick="replayDLQ('${subscriberName}', '${m.id}')">
+                    <button class="btn btn-sm btn-primary" onclick='replayDLQ(${inlineJSON(subscriberName)}, ${inlineJSON(m.id)})'>
                         <i class="fa-solid fa-rotate-left"></i> Replay
                     </button>
                 </div>
@@ -312,7 +343,7 @@ async function openDLQ(subscriberName) {
         `).join('');
 
     } catch (err) {
-        content.innerHTML = `<div style="color:var(--error-color)">Error: ${err.message}</div>`;
+        content.innerHTML = `<div style="color:var(--error-color)">Error: ${escapeHTML(err.message)}</div>`;
     }
 }
 
@@ -323,11 +354,11 @@ async function openInspect(subscriberName) {
     openModal('inspectModal');
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/messages`);
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers/${pathSegment(subscriberName)}/messages`);
         if (!res.ok) throw new Error('Failed to fetch messages');
 
         const response = await res.json();
-        const messages = response.data || [];
+        const messages = response.data?.messages || [];
 
         if (messages.length === 0) {
             content.innerHTML = '<div style="text-align:center; padding: 2rem;">Queue is empty (no pending/delivered messages)</div>';
@@ -338,38 +369,40 @@ async function openInspect(subscriberName) {
             <div class="subscriber-card" style="margin-bottom: 0.5rem; flex-direction: column; align-items: flex-start;">
                 <div style="width: 100%; display: flex; justify-content: space-between; align-items: start; margin-bottom: 0.5rem;">
                      <div>
-                        <div style="font-family:monospace; font-size:0.75rem; opacity:0.6">${m.id}</div>
+                        <div style="font-family:monospace; font-size:0.75rem; opacity:0.6">${escapeHTML(m.id)}</div>
                         <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.1rem;">
                             <i class="fa-regular fa-clock"></i> ${new Date(m.created_at).toLocaleString()}
                         </div>
                     </div>
                     <div style="display: flex; gap: 0.5rem; align-items: center;">
                         <span class="status-badge ${m.status === 'pending' ? 'warning' : 'success'}">${m.status}</span>
-                         <button class="btn btn-sm btn-primary" onclick="ackMessage('${subscriberName}', '${m.id}')" title="Ack Message" style="padding: 0.2rem 0.6rem; font-size: 0.7rem;">
+                         ${m.status === 'delivered' ? `<button class="btn btn-sm btn-primary" onclick='ackMessage(${inlineJSON(subscriberName)}, ${inlineJSON(m.id)}, ${inlineJSON(m.receipt_token)})' title="Ack Message" style="padding: 0.2rem 0.6rem; font-size: 0.7rem;">
                             <i class="fa-solid fa-check"></i> Ack
-                        </button>
+                        </button>` : ''}
                     </div>
                 </div>
-                <div style="background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 0.5rem; width: 100%; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem;">${m.message}</div>
+                <div style="background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 0.5rem; width: 100%; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem;">${escapeHTML(m.message)}</div>
                 ${m.status === 'delivered' ? `
                     <div style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--accent-color);">
-                        <i class="fa-solid fa-stopwatch"></i> Visible again at: ${new Date(m.visible_at).toLocaleTimeString()}
+                        <i class="fa-solid fa-stopwatch"></i> Lease expires at: ${new Date(m.lease_expires_at).toLocaleTimeString()}
                     </div>
                 ` : ''}
             </div>
         `).join('');
 
     } catch (err) {
-        content.innerHTML = `<div style="color:var(--error-color)">Error: ${err.message}</div>`;
+        content.innerHTML = `<div style="color:var(--error-color)">Error: ${escapeHTML(err.message)}</div>`;
     }
 }
 
-async function ackMessage(subscriberName, messageId) {
-    if (!confirm('Are you sure you want to ACK (delete) this message?')) return;
+async function ackMessage(subscriberName, messageID, receiptToken) {
+    if (!confirm('Acknowledge this delivery?')) return;
 
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/messages/${messageId}`, {
-            method: 'DELETE'
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers/${pathSegment(subscriberName)}/messages/${pathSegment(messageID)}/ack`, {
+            method: 'POST',
+            body: JSON.stringify({ receipt_token: receiptToken }),
+            headers: { 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error('Failed to ack message');
 
@@ -383,10 +416,12 @@ async function ackMessage(subscriberName, messageId) {
     }
 }
 
-async function replayDLQ(subscriberName, messageId) {
+async function replayDLQ(subscriberName, messageID) {
     try {
-        const res = await fetch(`${API_BASE}/topics/${currentTopic.name}/subscribers/${subscriberName}/dlq/${messageId}/replay`, {
-            method: 'POST'
+        const res = await fetch(`${API_BASE}/topics/${pathSegment(currentTopic.name)}/subscribers/${pathSegment(subscriberName)}/dlq/replay`, {
+            method: 'POST',
+            body: JSON.stringify({ message_ids: [messageID] }),
+            headers: { 'Content-Type': 'application/json' },
         });
         if (!res.ok) throw new Error('Failed to replay');
 

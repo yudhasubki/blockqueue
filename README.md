@@ -1,192 +1,249 @@
-# BlockQueue
+<p align="center">
+  <img src="docs/img/blockqueue-logo.png" alt="BlockQueue logo" width="176">
+</p>
 
-BlockQueue is a cost-effective, durable, and lightweight message queue system designed for simplicity and reliability. Built on top of SQLite (with WAL mode), it offers transactional integrity and low-latency persistence without the operational complexity of distributed message brokers like Kafka or the memory constraints of Redis.
+<h1 align="center">BlockQueue</h1>
 
-It supports multiple storage backends including SQLite, PostgreSQL, and Turso (LibSQL), making it versatile for both single-node deployments and scalable infrastructure.
+<p align="center">
+  A durable, embeddable message queue for Go, backed by SQLite or PostgreSQL.
+</p>
 
-## Key Features
+<p align="center">
+  <a href="https://pkg.go.dev/github.com/yudhasubki/blockqueue"><img src="https://pkg.go.dev/badge/github.com/yudhasubki/blockqueue.svg" alt="Go Reference"></a>
+  <img src="https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.23+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
+</p>
 
-*   **Transactional Durability**: All messages are persisted to disk using atomic transactions, ensuring data integrity even during system failures.
-*   **High Throughput**: Optimized write buffering and batch processing capabilities allow handling thousands of messages per second with minimal latency.
-*   **Scheduled Delivery**: Built-in support for delayed message publishing, allowing messages to become visible only after a specific duration.
-*   **Dead Letter Queue (DLQ)**: Automatic handling of failed message deliveries with a dedicated inspection and replay mechanism.
-*   **Pub/Sub Architecture**: Flexible topic-based routing with multiple subscriber support, allowing fan-out patterns and decoupled services.
-*   **Active Queue Inspection**: Peek into "pending" and "delivered" messages without consuming them, useful for debugging and monitoring visibility timeouts.
-*   **Built-in Dashboard**: A modern, dark-mode web interface for monitoring topics, managing subscribers, and inspecting dead letter queues in real-time.
-*   **Multiple Backends**: First-class support for SQLite (default), PostgreSQL, and Turso.
+BlockQueue is an embeddable, at-least-once message queue for Go backed by
+SQLite or PostgreSQL. It stores one canonical message and one delivery row per
+subscriber, so fan-out state, retries, leases, DLQ transitions, and schedules
+remain transactional.
 
-## Installation
+Turso/libSQL support is experimental.
 
-### Binary Distribution
-Download the latest release for your platform or build from source:
+> [!IMPORTANT]
+> v0.2.0 is a clean schema break and requires a new, empty database. It does
+> not perform an in-place database upgrade from v0.1.
+
+## What v0.2.0 provides
+
+- Durable publish is the default in the Go API; explicit async publish is
+  available when admission latency matters more than crash durability.
+- A weighted writer budget limits both pending message count and bytes. A
+  reservation is released only after the database transaction finishes.
+- Claims use database locking, a new receipt token for every delivery lease,
+  idempotent ACK, fenced stale receipts, delayed NACK, and lease extension.
+- Priority, delayed delivery, absolute RFC3339 scheduling, recurring five-field
+  cron schedules, IANA timezones, run history, and overlap protection.
+- Transactional, checksummed embedded schema migrations.
+- `/livez`, `/readyz`, bounded retention, adaptive SQLite checkpoints, and
+  optional Prometheus metrics.
+
+There is one queue engine and one current HTTP contract at `/v1`; the project
+does not maintain parallel v1/v2 engines or schemas. See the
+[v0.2 migration guide](docs/migration-v0.2.md) for source-level changes and
+fresh-database rollout instructions.
+
+## Install
+
+```bash
+go get github.com/yudhasubki/blockqueue
+```
+
+The server binary is optional:
 
 ```bash
 go build -o blockqueue ./cmd/blockqueue
 ```
 
-### Go Library
-Integrate BlockQueue directly into your Go application:
+## Embed in a Go application
 
-```bash
-go get -u github.com/yudhasubki/blockqueue
-```
-
-### Embedding BlockQueue (UI + API)
-You can mount BlockQueue's API and Dashboard into your existing Go application
+Only the root package and the selected storage driver are required:
 
 ```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/store/sqlite"
+)
+
 func main() {
-    // 1. Initialize BlockQueue
-    bq := blockqueue.New(sqlite.New("blockqueue.db", nil), blockqueue.BlockQueueOption{})
-    defer bq.Close()
-    
-    bqHttp := &blockqueue.Http{Stream: bq, UIPath: "./ui"}
+	driver, err := sqlite.Open("blockqueue.db", sqlite.Config{})
+	if err != nil {
+		log.Fatal(err)
+	}
 
-    mux := http.NewServeMux()
-    // Mount the handler with StripPrefix to handle subpath correctly
-    mux.Handle("/admin/queue/", http.StripPrefix("/admin/queue", bqHttp.Router()))
+	queue := blockqueue.New(driver, blockqueue.Options{})
+	if err := queue.Run(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	defer queue.Close()
 
-    http.ListenAndServe(":8080", mux)
+	topic := blockqueue.NewTopic("orders")
+	worker := blockqueue.NewSubscriber(topic, "fulfillment", blockqueue.SubscriberOptions{
+		MaxAttempts:        5,
+		VisibilityDuration: "30s",
+		DequeueBatchSize:   10,
+	})
+	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{worker}); err != nil {
+		log.Fatal(err)
+	}
+
+	receipt, err := queue.Publish(context.Background(), topic, blockqueue.Message{
+		Message:        `{"order_id":"1022"}`,
+		IdempotencyKey: "order-1022",
+		Priority:       10,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("persisted %s", receipt.MessageID)
+
+	deliveries, err := queue.ClaimWait(context.Background(), topic, worker.Name, 10, time.Minute)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, delivery := range deliveries {
+		// Process the message before acknowledging this exact lease.
+		if err := queue.AckDelivery(context.Background(), topic, worker.Name,
+			delivery.ID, delivery.ReceiptToken); err != nil {
+			log.Fatal(err)
+		}
+	}
 }
 ```
 
-## Quick Start
+`Publish` and `BatchPublish` wait for commit. `PublishAsync` and
+`BatchPublishAsync` return after bounded in-memory admission. If a durable
+caller's context expires after admission, it receives `*CommitUnknownError`
+with stable message IDs; the writer continues owning the admitted messages.
 
-### Running the Server
+## Run the HTTP server
 
-Start the BlockQueue server using the HTTP mode:
+Copy [config.yaml.example](config.yaml.example), then run:
 
 ```bash
-./blockqueue http -config=config.yaml
+./blockqueue migrate -config config.yaml
+./blockqueue http -config config.yaml
 ```
 
-**Configuration (config.yaml):**
+`Queue.Run` also applies migrations, so the explicit migration command is
+optional for embedded deployments.
 
-```yaml
-http:
-  port: 8080
-  shutdown: "30s"
-  driver: "sqlite"
-sqlite:
-  db_name: "blockqueue.db"
-  busy_timeout: 5000
-write_buffer:
-  batch_size: 100
-  flush_interval: "100ms"
-  buffer_size: 10000
-```
+Configuration decoding rejects unknown YAML fields and expands `${NAME}` from
+the process environment. This keeps PostgreSQL passwords out of committed
+configuration files; unset variables expand to an empty value and normal
+connection validation still applies.
 
-### Accessing the Dashboard
+Create a topic:
 
-Once the server is running, access the monitoring dashboard at:
-
-`http://localhost:8080`
-
-The dashboard provides visual management for:
-*   Real-time topic statistics (pending/unacked messages).
-*   Subscriber health and configuration.
-*   Dead Letter Queue inspection and message replay.
-
-## API Usage
-
-BlockQueue exposes a RESTful HTTP API for easy integration with any language.
-
-### Topic Management
-
-**Create a Topic**
 ```bash
-curl -X POST http://localhost:8080/topics \
-  -H "Content-Type: application/json" \
+curl -X POST http://127.0.0.1:8080/v1/topics \
+  -H 'Content-Type: application/json' \
   -d '{
-    "name": "orders",
-    "subscribers": [
-      {
-        "name": "payment-processor",
-        "option": {
-          "max_attempts": 5,
-          "visibility_duration": "30s"
-        }
+    "name":"orders",
+    "subscribers":[{
+      "name":"fulfillment",
+      "option":{
+        "max_attempts":5,
+        "visibility_duration":"30s",
+        "dequeue_batch_size":10
       }
-    ]
+    }]
   }'
 ```
 
-### Publishing Messages
+Async publish is the HTTP default and returns `202` with `state: admitted`:
 
-**Standard Publish**
 ```bash
-curl -X POST http://localhost:8080/topics/orders/messages \
-  -H "Content-Type: application/json" \
-  -d '{"message": "order_id:1022"}'
+curl -X POST http://127.0.0.1:8080/v1/topics/orders/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"order-1022","idempotency_key":"order-1022","priority":10}'
 ```
 
-**Delayed Publish (Scheduled)**
-To make a message visible only after a delay (e.g., 10 minutes):
+Wait for commit with `?wait_for=commit`; this returns a definitive duplicate
+result:
+
 ```bash
-curl -X POST http://localhost:8080/topics/orders/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "follow_up_email",
-    "delay": "10m"
-  }'
+curl -X POST 'http://127.0.0.1:8080/v1/topics/orders/messages?wait_for=commit' \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"order-1022","idempotency_key":"order-1022"}'
 ```
 
-**Batch Publish**
-For higher throughput, publish multiple messages in a single request:
+Claim and ACK the returned receipt token:
+
 ```bash
-curl -X POST http://localhost:8080/topics/orders/messages/batch \
-  -H "Content-Type: application/json" \
-  -d '[
-    {"message": "order_1"},
-    {"message": "order_2"},
-    {"message": "order_3", "delay": "5s"}
-  ]'
+curl -X POST 'http://127.0.0.1:8080/v1/topics/orders/subscribers/fulfillment/claim?timeout=30s&limit=10'
+
+curl -X POST http://127.0.0.1:8080/v1/topics/orders/subscribers/fulfillment/messages/MESSAGE_ID/ack \
+  -H 'Content-Type: application/json' \
+  -d '{"receipt_token":"RECEIPT_TOKEN"}'
 ```
 
-### Consuming Messages
+JSON decoding is strict. The HTTP limits are 1 MiB per message, 1,000 messages
+per batch, 16 MiB per request body, 16 KiB of headers, and 128 bytes per
+idempotency key.
 
-**Read Message (Long Polling)**
-BlockQueue supports long-polling to reduce empty responses and network chatter.
+## Delivery contract
+
+- Delivery is at-least-once. Consumers must make side effects idempotent.
+- A claim owns a delivery only for its current receipt token and lease. ACK,
+  NACK, and lease extension reject stale receipts.
+- `Publish` waits for the canonical message and all subscriber delivery rows to
+  commit. `PublishAsync` guarantees bounded process-local admission, not crash
+  durability.
+- The database is authoritative. PostgreSQL notifications and in-memory wakeups
+  reduce latency but are never required for correctness.
+- Built-in authentication and exactly-once execution are outside the project
+  scope. Protect the HTTP server with a private network or reverse proxy.
+
+## Storage and durability
+
+| Backend | Status | Coordination | Default durability |
+| --- | --- | --- | --- |
+| SQLite | Supported | Single writer, immediate claim transactions | WAL + `synchronous=FULL` |
+| PostgreSQL | Supported | pgx, native UUID, `FOR UPDATE SKIP LOCKED` | TLS required + `synchronous_commit=on` |
+| Turso/libSQL | Experimental | Smoke-test scope only | Backend dependent |
+
+Set `store.DurabilityBalanced` explicitly when lower latency is more important
+than the strict default. Async admission has no local disk spool; use durable
+publish when a successful response must imply a committed transaction.
+Processed deliveries are retained for seven days and schedule-run history for
+30 days by default. Dead letters are retained indefinitely unless
+`Options.DeadLetterRetention` is set explicitly.
+
+## Development
+
 ```bash
-curl "http://localhost:8080/topics/orders/subscribers/payment-processor?timeout=5s"
+go test ./...
+go test -race ./...
+go vet ./...
+go test -run '^$' -bench . -benchmem ./...
 ```
 
-**Inspect Queue (Peek)**
-View pending or delivered messages without consuming them. Useful for debugging.
+The SQLite and PostgreSQL contract suite is shared. PostgreSQL tests create a
+random schema per run, remove it during cleanup, and refuse a database whose
+name does not end in `_test`:
+
 ```bash
-curl "http://localhost:8080/topics/orders/subscribers/payment-processor/messages?limit=10&offset=0"
+createdb blockqueue_test
+BLOCKQUEUE_TEST_POSTGRES_URL='postgres://postgres:postgres@127.0.0.1:5432/blockqueue_test?sslmode=disable' \
+  go test -count=1 ./...
 ```
 
-**Acknowledge Message**
-After processing, the consumer must acknowledge the message to remove it from the queue.
-```bash
-curl -X DELETE "http://localhost:8080/topics/orders/subscribers/payment-processor/messages/{message_id}"
-```
+CI runs the complete suite and race detector against both storage backends,
+plus vet and a guarded PostgreSQL benchmark smoke. Benchmark scenarios and
+exact persisted-row checks are documented in
+[benchmark/README.md](benchmark/README.md).
 
-### Dead Letter Queue (DLQ)
-
-Messages that exceed their `max_attempts` are automatically moved to the DLQ.
-
-**Inspect DLQ**
-```bash
-curl "http://localhost:8080/topics/orders/subscribers/payment-processor/dlq?limit=10&offset=0"
-```
-
-**Replay Message**
-Move a message from DLQ back to the active queue for reprocessing:
-```bash
-curl -X POST "http://localhost:8080/topics/orders/subscribers/payment-processor/dlq/{message_id}/replay"
-```
-
-## Performance
-
-BlockQueue is designed for speed. By utilizing SQLite's Write-Ahead Logging (WAL) and an in-memory write buffer, it achieves high throughput suitable for most production workloads.
-
-**SQLite Benchmark (MacBook Pro M1)**
-*   **Write Throughput**: ~47,000 req/sec (100 concurrent users)
-*   **Read Latency (Median)**: 1.19ms
+For component boundaries and lock ownership, see
+[docs/architecture.md](docs/architecture.md).
 
 ## License
 
-Copyright (c) 2024.
-Licensed under the Apache 2.0 License.
+Apache License 2.0.

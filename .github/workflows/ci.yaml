@@ -1,21 +1,76 @@
-name: ci
+name: CI
+
 on:
   pull_request:
   push:
-    branches:
-    - main
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  unit-test-linux:
+  test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: blockqueue
+          POSTGRES_PASSWORD: blockqueue
+          POSTGRES_DB: blockqueue_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blockqueue -d blockqueue_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BLOCKQUEUE_TEST_POSTGRES_URL: postgres://blockqueue:blockqueue@127.0.0.1:5432/blockqueue_test?sslmode=disable
+      BLOCKQUEUE_BENCH_POSTGRES_URL: postgres://blockqueue:blockqueue@127.0.0.1:5432/blockqueue_bench?sslmode=disable
+
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: Setup Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21.3'
-        check-latest: true
-        cache: true
-    - name: Run Unit Tests
-      run:  go test ./... -race
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Create guarded benchmark database
+        run: docker exec "${{ job.services.postgres.id }}" createdb --username blockqueue --owner blockqueue blockqueue_bench
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Test SQLite and PostgreSQL
+        run: go test -count=1 ./...
+
+      - name: Race test SQLite and PostgreSQL
+        run: go test -race -count=1 ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
+
+      - name: PostgreSQL benchmark smoke
+        run: go test -run '^$' -bench 'BenchmarkPublishDurable/postgres$' -benchtime=1x -count=1 .
+
+      - name: Validate benchmark assets
+        run: |
+          zsh -n benchmark/run-k6.sh benchmark/reset-postgres.sh
+          node --check benchmark/publish.js
+          node --check benchmark/consume.js

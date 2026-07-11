@@ -1,0 +1,27 @@
+http:
+  host: "127.0.0.1"
+  port: 8090
+  shutdown: "30s"
+  read_header_timeout: "5s"
+  idle_timeout: "2m"
+  write_timeout: "65s"
+  driver: "sqlite"
+logging:
+  level: "error"
+  type: "text"
+sqlite:
+  db_name: "/private/tmp/blockqueue-k6.db"
+  busy_timeout: 5000
+  max_open_conns: 10
+  max_idle_conns: 10
+  cache_size: -64000
+  mmap_size: 268435456
+  checkpoint_interval: "1s"
+  durability: "strict"
+writer:
+  batch_size: 1000
+  flush_interval: "10ms"
+  max_pending_messages: 100000
+  max_pending_bytes: 268435456
+metric:
+  enable: false

@@ -15,7 +15,6 @@ import (
 
 var (
 	errorEmptyPath = errors.New("configuration path is empty")
-	shutdown       = make(chan os.Signal, 1)
 )
 
 func main() {
@@ -38,7 +37,7 @@ func (m *Main) Run(ctx context.Context, args []string) error {
 
 	switch cmd {
 	case "http":
-		return (&Http{}).Run(ctx, args)
+		return (&HTTP{}).Run(ctx, args)
 	case "migrate":
 		return (&Migrate{}).Run(ctx, args)
 	default:
@@ -53,7 +52,7 @@ func (m *Main) Run(ctx context.Context, args []string) error {
 
 func (m *Main) Usage() {
 	fmt.Println(`
-blockqueue is a tool for send a jobs with consumer groups
+blockqueue is an embeddable durable message queue server
 
 Usage:
 
@@ -61,19 +60,20 @@ Usage:
 
 The commands are:
 
-	http    	running blockqueue with http-based
-	migrate 	running migration blockqueue
+	http    	run the HTTP API and dashboard
+	migrate 	apply embedded database migrations
 `[1:])
 }
 
 type Config struct {
-	Http        HttpConfig        `yaml:"http"`
+	Http        HTTPConfig        `yaml:"http"`
 	Logging     LoggingConfig     `yaml:"logging"`
 	SQLite      SQLiteConfig      `yaml:"sqlite"`
 	Turso       TursoConfig       `yaml:"turso"`
 	PgSQL       PostgreConfig     `yaml:"pgsql"`
 	Metric      MetricConfig      `yaml:"metric"`
-	WriteBuffer WriteBufferConfig `yaml:"write_buffer"`
+	Writer      WriterConfig      `yaml:"writer"`
+	Maintenance MaintenanceConfig `yaml:"maintenance"`
 }
 
 func ReadConfigFile(filename string) (_ Config, err error) {
@@ -83,13 +83,30 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		return config, err
 	}
 
-	err = yaml.Unmarshal(b, &config)
+	decoder := yaml.NewDecoder(strings.NewReader(os.ExpandEnv(string(b))))
+	decoder.KnownFields(true)
+	err = decoder.Decode(&config)
 	if err != nil {
 		return config, err
 	}
 
 	if config.Http.Shutdown.Seconds() == 0 {
 		config.Http.Shutdown = 30 * time.Second
+	}
+	if config.Http.Host == "" {
+		config.Http.Host = "127.0.0.1"
+	}
+	if config.Http.Port == "" {
+		config.Http.Port = "8080"
+	}
+	if config.Http.ReadHeaderTimeout <= 0 {
+		config.Http.ReadHeaderTimeout = 5 * time.Second
+	}
+	if config.Http.IdleTimeout <= 0 {
+		config.Http.IdleTimeout = 2 * time.Minute
+	}
+	if config.Http.WriteTimeout <= 0 {
+		config.Http.WriteTimeout = 65 * time.Second
 	}
 
 	logOutput := os.Stdout
@@ -120,6 +137,8 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		logHandler = slog.NewJSONHandler(logOutput, &logOpts)
 	case "text", "":
 		logHandler = slog.NewTextHandler(logOutput, &logOpts)
+	default:
+		return config, fmt.Errorf("unsupported logging type %q", config.Logging.Type)
 	}
 
 	slog.SetDefault(slog.New(logHandler))
@@ -127,10 +146,14 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 	return config, nil
 }
 
-type HttpConfig struct {
-	Port     string        `yaml:"port"`
-	Shutdown time.Duration `yaml:"shutdown"`
-	Driver   string        `yaml:"driver"`
+type HTTPConfig struct {
+	Host              string        `yaml:"host"`
+	Port              string        `yaml:"port"`
+	Shutdown          time.Duration `yaml:"shutdown"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	Driver            string        `yaml:"driver"`
 }
 
 func register(fs *flag.FlagSet) *string {
@@ -144,10 +167,14 @@ type LoggingConfig struct {
 }
 
 type SQLiteConfig struct {
-	DatabaseName string `yaml:"db_name"`
-	BusyTimeout  int    `yaml:"busy_timeout"`
-	CacheSize    int    `yaml:"cache_size"` // KB (negative = KB, positive = pages)
-	MmapSize     int64  `yaml:"mmap_size"`  // Memory-mapped I/O size in bytes
+	DatabaseName       string `yaml:"db_name"`
+	BusyTimeout        int    `yaml:"busy_timeout"`
+	MaxOpenConns       int    `yaml:"max_open_conns"`
+	MaxIdleConns       int    `yaml:"max_idle_conns"`
+	CacheSize          int    `yaml:"cache_size"`          // KB (negative = KB, positive = pages)
+	MmapSize           int64  `yaml:"mmap_size"`           // Memory-mapped I/O size in bytes
+	CheckpointInterval string `yaml:"checkpoint_interval"` // Default: 30s
+	Durability         string `yaml:"durability"`          // strict (default) or balanced
 }
 
 type TursoConfig struct {
@@ -163,14 +190,23 @@ type PostgreConfig struct {
 	Timezone     string `yaml:"timezone"`
 	MaxOpenConns int    `yaml:"max_open_conns"`
 	MaxIdleConns int    `yaml:"max_idle_conns"`
+	SSLMode      string `yaml:"ssl_mode"`
+	Durability   string `yaml:"durability"` // strict (default) or balanced
 }
 
-type WriteBufferConfig struct {
-	BatchSize     int    `yaml:"batch_size"`
-	FlushInterval string `yaml:"flush_interval"`
-	BufferSize    int    `yaml:"buffer_size"`
+type WriterConfig struct {
+	BatchSize          int    `yaml:"batch_size"`
+	FlushInterval      string `yaml:"flush_interval"`
+	MaxPendingMessages int64  `yaml:"max_pending_messages"`
+	MaxPendingBytes    int64  `yaml:"max_pending_bytes"`
 }
 
 type MetricConfig struct {
 	Enable bool `yaml:"enable"`
+}
+
+type MaintenanceConfig struct {
+	ProcessedRetention   string `yaml:"processed_retention"`
+	DeadLetterRetention  string `yaml:"dead_letter_retention"`
+	ScheduleRunRetention string `yaml:"schedule_run_retention"`
 }

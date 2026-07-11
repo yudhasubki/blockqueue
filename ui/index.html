@@ -98,6 +98,18 @@
                     <label>Topic Name</label>
                     <input type="text" name="name" required placeholder="e.g. orders-processed">
                 </div>
+                <div class="form-group">
+                    <label>Initial Subscriber</label>
+                    <input type="text" name="subscriber_name" required value="worker" placeholder="e.g. order-worker">
+                </div>
+                <div class="form-group">
+                    <label>Max Attempts</label>
+                    <input type="number" name="max_attempts" value="3" min="1">
+                </div>
+                <div class="form-group">
+                    <label>Visibility Duration</label>
+                    <input type="text" name="visibility_duration" value="30s" placeholder="e.g. 30s">
+                </div>
                 <button type="submit" class="btn btn-primary" style="width: 100%">Create Topic</button>
             </form>
         </div>
@@ -118,7 +130,6 @@
                     <label>Delay (optional)</label>
                     <input type="text" name="delay" placeholder="e.g. 5s, 10m, 1h">
                 </div>
-                <!-- TODO: Batch support in UI if needed -->
                 <button type="submit" class="btn btn-primary" style="width: 100%">Publish</button>
             </form>
         </div>

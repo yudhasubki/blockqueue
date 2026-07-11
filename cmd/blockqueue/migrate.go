@@ -1,19 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 
 	blockqueue "github.com/yudhasubki/blockqueue"
-	"github.com/yudhasubki/blockqueue/pkg/postgre"
-	"github.com/yudhasubki/blockqueue/pkg/sqlite"
-	"github.com/yudhasubki/blockqueue/pkg/turso"
 )
 
 type Migrate struct{}
@@ -37,78 +30,16 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	var (
-		driver        blockqueue.Driver
-		migrationPath = "migration/sqlite"
-	)
-	switch cfg.Http.Driver {
-	case "turso":
-		turso, err := turso.New(cfg.Turso.URL)
-		if err != nil {
-			return err
-		}
-		driver = turso
-	case "pgsql":
-		pg, err := postgre.New(postgre.Config{
-			Host:         cfg.PgSQL.Host,
-			Username:     cfg.PgSQL.Username,
-			Password:     cfg.PgSQL.Password,
-			Name:         cfg.PgSQL.Name,
-			Port:         cfg.PgSQL.Port,
-			Timezone:     cfg.PgSQL.Timezone,
-			MaxOpenConns: cfg.PgSQL.MaxOpenConns,
-			MaxIdleConns: cfg.PgSQL.MaxIdleConns,
-		})
-		if err != nil {
-			slog.Error("failed to open database", "error", err)
-			return err
-		}
-		driver = pg
-		migrationPath = "migration/pgsql"
-	case "sqlite", "":
-		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
-			BusyTimeout: cfg.SQLite.BusyTimeout,
-		})
-		if err != nil {
-			slog.Error("failed to open database", "error", err)
-			return err
-		}
-
-		driver = sqlite
+	driver, err := openConfiguredDriver(cfg)
+	if err != nil {
+		return err
 	}
 
-	_ = filepath.Walk(migrationPath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		var buf bytes.Buffer
-
-		_, err = io.Copy(&buf, file)
-		if err != nil {
-			return err
-		}
-
-		_, err = driver.Conn().Exec(buf.String())
-		if err != nil {
-			slog.Error("failed migrate", "filename", path, "error", err)
-			return err
-		}
-		slog.Info("successfully migrate", "filename", path)
-
-		return nil
-	})
-
+	defer driver.Close()
+	if err := blockqueue.Migrate(ctx, driver); err != nil {
+		return err
+	}
+	slog.Info("successfully applied embedded migrations")
 	return nil
 }
 

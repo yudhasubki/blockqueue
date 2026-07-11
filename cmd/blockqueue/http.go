@@ -2,25 +2,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
+	"net"
+	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/lesismal/nbio/nbhttp"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	blockqueue "github.com/yudhasubki/blockqueue"
-	"github.com/yudhasubki/blockqueue/pkg/postgre"
-	"github.com/yudhasubki/blockqueue/pkg/sqlite"
-	"github.com/yudhasubki/blockqueue/pkg/turso"
+	"github.com/yudhasubki/blockqueue/httpapi"
 )
 
-type Http struct{}
+type HTTP struct{}
 
-func (h *Http) Run(ctx context.Context, args []string) error {
+func (h *HTTP) Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("blockqueue-http", flag.ContinueOnError)
 	path := register(fs)
 	fs.Usage = h.Usage
@@ -38,109 +38,121 @@ func (h *Http) Run(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-
-	var driver blockqueue.Driver
-	switch cfg.Http.Driver {
-	case "turso":
-		turso, err := turso.New(cfg.Turso.URL)
-		if err != nil {
-			return err
-		}
-		driver = turso
-	case "pgsql":
-		pg, err := postgre.New(postgre.Config{
-			Host:         cfg.PgSQL.Host,
-			Username:     cfg.PgSQL.Username,
-			Password:     cfg.PgSQL.Password,
-			Name:         cfg.PgSQL.Name,
-			Port:         cfg.PgSQL.Port,
-			Timezone:     cfg.PgSQL.Timezone,
-			MaxOpenConns: cfg.PgSQL.MaxOpenConns,
-			MaxIdleConns: cfg.PgSQL.MaxIdleConns,
-		})
-		if err != nil {
-			slog.Error("failed to open database", "error", err)
-			return err
-		}
-		driver = pg
-	case "sqlite", "":
-		sqlite, err := sqlite.New(cfg.SQLite.DatabaseName, sqlite.Config{
-			BusyTimeout: cfg.SQLite.BusyTimeout,
-			CacheSize:   cfg.SQLite.CacheSize,
-			MmapSize:    cfg.SQLite.MmapSize,
-		})
-		if err != nil {
-			slog.Error("failed to open database", "error", err)
-			return err
-		}
-
-		driver = sqlite
+	checkpointInterval, err := configuredCheckpointInterval(cfg)
+	if err != nil {
+		return err
+	}
+	processedRetention, err := optionalConfigDuration("maintenance.processed_retention", cfg.Maintenance.ProcessedRetention)
+	if err != nil {
+		return err
+	}
+	deadLetterRetention, err := optionalConfigDuration("maintenance.dead_letter_retention", cfg.Maintenance.DeadLetterRetention)
+	if err != nil {
+		return err
+	}
+	scheduleRunRetention, err := optionalConfigDuration("maintenance.schedule_run_retention", cfg.Maintenance.ScheduleRunRetention)
+	if err != nil {
+		return err
+	}
+	driver, err := openConfiguredDriver(cfg)
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	// Parse WriteBuffer config
-	wbConfig := blockqueue.WriteBufferConfig{}
-	if cfg.WriteBuffer.BatchSize > 0 {
-		wbConfig.BatchSize = cfg.WriteBuffer.BatchSize
+	// Parse writer config.
+	writerConfig := blockqueue.WriterOptions{}
+	if cfg.Writer.BatchSize > 0 {
+		writerConfig.BatchSize = cfg.Writer.BatchSize
 	}
-	if cfg.WriteBuffer.BufferSize > 0 {
-		wbConfig.BufferSize = cfg.WriteBuffer.BufferSize
-	}
-	if cfg.WriteBuffer.FlushInterval != "" {
-		if d, err := time.ParseDuration(cfg.WriteBuffer.FlushInterval); err == nil {
-			wbConfig.FlushInterval = d
+	writerConfig.MaxPendingMessages = cfg.Writer.MaxPendingMessages
+	writerConfig.MaxPendingBytes = cfg.Writer.MaxPendingBytes
+	if cfg.Writer.FlushInterval != "" {
+		duration, err := time.ParseDuration(cfg.Writer.FlushInterval)
+		if err != nil {
+			_ = driver.Close()
+			return fmt.Errorf("parse writer flush_interval: %w", err)
 		}
+		writerConfig.FlushInterval = duration
 	}
-
-	stream := blockqueue.New(driver, blockqueue.BlockQueueOption{
-		WriteBufferConfig: wbConfig,
+	queue := blockqueue.New(driver, blockqueue.Options{
+		Writer:               writerConfig,
+		CheckpointInterval:   checkpointInterval,
+		RetentionPeriod:      processedRetention,
+		DeadLetterRetention:  deadLetterRetention,
+		ScheduleRunRetention: scheduleRunRetention,
+		DisableMetrics:       !cfg.Metric.Enable,
 	})
 
-	err = stream.Run(ctx)
+	err = queue.Run(ctx)
 	if err != nil {
-		cancel()
+		_ = driver.Close()
 		return err
 	}
 
 	mux := chi.NewRouter()
-	mux.Mount("/", (&blockqueue.Http{
-		Stream: stream,
-	}).Router())
+	mux.Mount("/", httpapi.Router(queue, httpapi.Options{}))
 
 	if cfg.Metric.Enable {
 		mux.Mount("/prometheus/metrics", promhttp.Handler())
 	}
 
-	engine := nbhttp.NewEngine(nbhttp.Config{
-		Network: "tcp",
-		Addrs:   []string{":" + cfg.Http.Port},
-		Handler: mux,
-		IOMod:   nbhttp.IOModNonBlocking,
-	})
-
-	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-
-	err = engine.Start()
-	if err != nil {
-		cancel()
-		return err
+	server := &http.Server{
+		Addr:              net.JoinHostPort(cfg.Http.Host, cfg.Http.Port),
+		Handler:           mux,
+		ReadHeaderTimeout: cfg.Http.ReadHeaderTimeout,
+		IdleTimeout:       cfg.Http.IdleTimeout,
+		WriteTimeout:      cfg.Http.WriteTimeout,
+		BaseContext: func(net.Listener) context.Context {
+			return ctx
+		},
 	}
-	<-shutdown
 
-	cancel()
+	shutdown := make(chan os.Signal, 1)
+	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(shutdown)
 
-	engine.Stop()
-	stream.Close()
-	driver.Close()
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.ListenAndServe()
+	}()
+	var runtimeErr error
+	select {
+	case <-shutdown:
+	case <-ctx.Done():
+		runtimeErr = ctx.Err()
+	case err := <-serveErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			runtimeErr = err
+		}
+	}
 
-	// handling graceful shutdown
-	time.Sleep(cfg.Http.Shutdown)
-
-	return nil
+	// Stop accepting HTTP requests and drain in-flight handlers before writer
+	// admission is closed and the database is checkpointed. Each phase gets
+	// its own budget so a slow client cannot consume the writer drain deadline.
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), cfg.Http.Shutdown)
+	httpErr := server.Shutdown(httpCtx)
+	httpCancel()
+	queueCtx, queueCancel := context.WithTimeout(context.Background(), cfg.Http.Shutdown)
+	queueErr := queue.Shutdown(queueCtx)
+	queueCancel()
+	return errors.Join(runtimeErr, httpErr, queueErr)
 }
 
-func (h *Http) Usage() {
+func optionalConfigDuration(name, value string) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return duration, nil
+}
+
+func (h *HTTP) Usage() {
 	fmt.Printf(`
 The HTTP command lists all protocol needed in the configuration file.
 
@@ -150,8 +162,6 @@ Usage:
 Arguments:
 	-config PATH
 	    Specifies the configuration file.
-	-partition PARTITION
-		Total Partition Producer and Consumer
 `[1:],
 	)
 }

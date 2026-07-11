@@ -1,0 +1,31 @@
+http:
+  host: "127.0.0.1"
+  port: 8090
+  shutdown: "30s"
+  read_header_timeout: "5s"
+  idle_timeout: "2m"
+  write_timeout: "65s"
+  driver: "pgsql"
+logging:
+  level: "error"
+  type: "text"
+pgsql:
+  host: "${BLOCKQUEUE_BENCH_POSTGRES_HOST}"
+  username: "${BLOCKQUEUE_BENCH_POSTGRES_USER}"
+  password: "${BLOCKQUEUE_BENCH_POSTGRES_PASSWORD}"
+  name: "blockqueue_bench"
+  port: 5432
+  timezone: "UTC"
+  max_open_conns: 25
+  max_idle_conns: 10
+  ssl_mode: "disable"
+  durability: "strict"
+writer:
+  # Match the 100-VU durable benchmark so a full batch can commit without
+  # waiting for the latency fallback on every cycle.
+  batch_size: 100
+  flush_interval: "1ms"
+  max_pending_messages: 100000
+  max_pending_bytes: 268435456
+metric:
+  enable: false
