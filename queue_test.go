@@ -359,8 +359,7 @@ func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {
 
 	lock, err := testDB(driver).Connx(context.Background())
 	require.NoError(t, err)
-	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
-	require.NoError(t, err)
+	requireSQLiteWriteLock(t, lock)
 	defer func() { _ = lock.Close() }()
 
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{BatchSize: 1, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond})

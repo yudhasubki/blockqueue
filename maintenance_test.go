@@ -59,13 +59,13 @@ func TestMaintenanceRetryWaitsForBackoffOrCancellation(t *testing.T) {
 
 func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC()}
-	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "reaper-backoff.db"), sqlite.Config{BusyTimeout: 1})
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "reaper-backoff.db"), sqlite.Config{})
 	require.NoError(t, err)
 	queue := New(driver, Options{Clock: clock})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("reaper-backoff")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "10ms",
+		MaxAttempts: 3, VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -75,7 +75,7 @@ func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
 	})
 	_, err = queue.PublishDurable(context.Background(), topic, Message{Message: "expire"})
 	require.NoError(t, err)
-	claimed, err := queue.Claim(context.Background(), topic, subscriber.Name, 1, 10*time.Millisecond)
+	claimed, err := queue.Claim(context.Background(), topic, subscriber.Name, 1, time.Minute)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
 	_, err = testDB(driver).Exec(`
@@ -89,7 +89,11 @@ func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
 	previous := slog.Default()
 	slog.SetDefault(slog.New(countingLogHandler{message: "delivery reaper failed", count: &failures}))
 	t.Cleanup(func() { slog.SetDefault(previous) })
-	time.Sleep(15 * time.Millisecond)
+	_, err = testDB(driver).Exec(
+		"UPDATE message_deliveries SET lease_expires_at = ? WHERE message_id = ? AND subscriber_id = ?",
+		time.Now().UTC().Add(-time.Second), claimed[0].ID, subscriber.ID,
+	)
+	require.NoError(t, err)
 	queue.signalReaper()
 	require.Eventually(t, func() bool { return failures.Load() == 1 }, time.Second, time.Millisecond)
 	time.Sleep(50 * time.Millisecond)

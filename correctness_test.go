@@ -261,9 +261,14 @@ func TestShutdownDeadlineAbortsWriterAndReachesStopped(t *testing.T) {
 
 	lock, err := testDB(driver).Connx(context.Background())
 	require.NoError(t, err)
-	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
-	require.NoError(t, err)
-	defer func() { _ = lock.Close() }()
+	requireSQLiteWriteLock(t, lock)
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			_, _ = lock.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = lock.Close()
+	}()
 
 	publishResult := make(chan error, 1)
 	go func() {
@@ -290,6 +295,7 @@ func TestShutdownDeadlineAbortsWriterAndReachesStopped(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 	_, err = lock.ExecContext(context.Background(), "ROLLBACK")
 	require.NoError(t, err)
+	lockHeld = false
 }
 
 func TestScheduleUpdateRejectsStaleVersion(t *testing.T) {
@@ -438,8 +444,7 @@ func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {
 
 	lock, err := testDB(driver).Connx(context.Background())
 	require.NoError(t, err)
-	_, err = lock.ExecContext(context.Background(), "BEGIN IMMEDIATE")
-	require.NoError(t, err)
+	requireSQLiteWriteLock(t, lock)
 	lockHeld := true
 	defer func() {
 		if lockHeld {
