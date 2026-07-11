@@ -43,7 +43,6 @@ Turso/libSQL support is experimental.
 - Priority, delayed delivery, absolute RFC3339 scheduling, recurring five-field
   cron schedules, IANA timezones, run history, and overlap protection.
 - Transactional, checksummed embedded schema migrations.
-- `/livez`, `/readyz`, bounded retention, adaptive SQLite checkpoints, and
 - `/livez`, `/readyz`, an embedded OpenAPI 3.1 document, RFC 9457 problem
   responses, bounded retention, adaptive SQLite checkpoints, and optional
   Prometheus metrics.
@@ -167,8 +166,9 @@ err := queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
 
 `PublishTx` returns `state: staged`; the rows become visible only if the
 transaction commits. `AckDeliveryTx`, `NackDeliveryTx`, `SnoozeDeliveryTx`,
-`CancelDeliveryTx`, and `CancelMessageTx` provide the same atomic boundary for
-consumer side effects. Keep callbacks short and free of network calls. SQLite
+`CancelDeliveryTx`, `CancelClaimedDeliveryTx`, and `CancelMessageTx` provide the
+same atomic boundary for consumer side effects. Keep callbacks short and free
+of network calls. SQLite
 has one writer, so an open caller transaction intentionally blocks queue
 writes until commit or rollback. PostgreSQL uses a shared topology fence, so
 publishers can proceed concurrently while destructive subscriber mutations
@@ -178,6 +178,83 @@ with shutdown.
 
 The runnable [transactional example](example/transactional) shows both commits
 against one SQLite database, including receipt-fenced consumer completion.
+
+## Go worker runtime (v0.3 development)
+
+The importable `worker` package turns the delivery API into a bounded consumer
+runtime. It never owns or hides the queue lifecycle: start `Queue` first, run
+one worker per topic/subscriber pair, stop workers, and then shut down `Queue`.
+
+```go
+type FulfillOrder struct {
+	OrderID string `json:"order_id"`
+}
+
+runner, err := worker.NewJSON(
+	queue,
+	topic,
+	subscriber.Name,
+	worker.TypedHandlerFunc[FulfillOrder](func(ctx context.Context, job *worker.TypedJob[FulfillOrder]) error {
+		return job.CompleteTx(ctx, nil, func(tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx,
+				"UPDATE orders SET fulfilled_at = ? WHERE id = ?",
+				time.Now().UTC(), job.Args.OrderID,
+			)
+			return err
+		})
+	}),
+	worker.Options{Concurrency: 16},
+)
+if err != nil {
+	log.Fatal(err)
+}
+
+// Cancellation stops new claims and drains active handlers before returning.
+if err := runner.Run(ctx); err != nil {
+	log.Fatal(err)
+}
+```
+
+Handlers returning nil are ACKed automatically. Handler errors are NACKed with
+the subscriber retry policy; `worker.RetryAfter` overrides the delay for one
+attempt. `worker.CancelJob` and `Job.Cancel` receipt-fence explicitly permanent
+business outcomes directly into `cancelled`. Malformed JSON in `NewJSON`
+follows the normal NACK/DLQ policy so it remains observable and replayable.
+Panics become NACKs instead of crashing the process.
+The runtime never claims more work than its free concurrency slots and
+heartbeats each active lease (one-minute lease, jittered 20-second heartbeat
+window by default).
+Automatic completions are transaction-batched when supported by the client;
+failed items and transient/ambiguous failures retry through the single-item API
+using the same receipt token.
+
+`Job.CompleteTx` is the safe path for database side effects: application writes
+and `AckDeliveryTx` commit together, and the worker does not issue a second ACK.
+`Job.CancelTx` provides the same atomic boundary for permanent cancellation.
+`Job.Ack`, `Job.Nack`, and `Job.Cancel` are available for explicit completion.
+On `Run` context cancellation, claims stop immediately while active handlers
+retain heartbeat for a 30-second drain window. The worker then cancels handler
+contexts and waits one additional second. A handler that ignores cancellation
+can still outlive `Run` and must not access `Queue` after `Run` returns.
+
+`worker.Group` supervises several topic/subscriber workers, cancels peers when
+one returns a terminal error, and drains them together. Concurrency remains
+bounded per worker; the group intentionally does not imply a global limit.
+Worker metrics include jobs by outcome, handler duration, active handlers, and
+heartbeat success/failure/lease loss. Pass the same Prometheus registerer used
+by `Queue`, or set `worker.Options.DisableMetrics` for a fully no-op path. The
+collector names are `blockqueue_worker_jobs_total`,
+`blockqueue_worker_handler_duration_seconds`,
+`blockqueue_worker_active_handlers`, and `blockqueue_worker_heartbeat_total`.
+For `worker_jobs_total`, `nacked` means one failed handler attempt was recorded;
+it does not imply the delivery has exhausted retries or reached DLQ. Handler
+duration uses `ok`, `error`, `panic`, and `cancel_requested` return semantics.
+NACK errors and cancellation reasons are normalized to valid UTF-8 and bounded
+to 16 KiB before they cross the worker client or persistence boundary.
+
+The runnable [worker example](example/worker) demonstrates typed JSON handling
+and transactional completion against SQLite. This package is currently on
+`main` for v0.3 and is not part of the published v0.2.0 module.
 
 ## Run the HTTP server
 
@@ -262,7 +339,8 @@ should publish through an application outbox.
   failures and exponential retry delay as the default.
 - Snooze returns a claimed delivery to pending without consuming a failure.
   Cancellation is terminal and idempotent, and failure records remain
-  queryable while the delivery is retained.
+  queryable while the delivery is retained. NACK errors and cancellation
+  reasons are stored as valid UTF-8 with a 16 KiB maximum.
 - `Publish` waits for the canonical message and all subscriber delivery rows to
   commit. `PublishAsync` guarantees bounded process-local admission, not crash
   durability.
@@ -271,9 +349,9 @@ should publish through an application outbox.
 - Built-in authentication and exactly-once execution are outside the project
   scope. Protect the HTTP server with a private network or reverse proxy.
 
-v0.2 is the durable embedded/HTTP fan-out core. A typed Go worker runtime and
-multi-node maintenance leader election are intentionally roadmap items rather
-than hidden behavior in this release.
+v0.2 is the durable embedded/HTTP fan-out core. The typed Go worker runtime is
+being developed on `main`; multi-node maintenance leader election remains a
+roadmap item rather than hidden behavior in the release.
 
 ## Storage and durability
 
@@ -321,7 +399,8 @@ For component boundaries and lock ownership, see
 
 - v0.2.x: optional in-process event subscription, tracing hooks, and focused
   test helpers without changing the schema.
-- v0.3: typed Go workers and PostgreSQL maintenance leader election.
+- v0.3 (in development): typed Go workers and PostgreSQL maintenance leader
+  election.
 - v0.4: versioned workflow/DAG orchestration as a separate layer over the queue.
 
 ## License

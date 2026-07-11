@@ -88,6 +88,27 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		require.NoError(t, queue.AckDelivery(context.Background(), topic, subscriber, claimed[0].ID, claimed[0].ReceiptToken))
 	}
 
+	cancelTopic, cancelSubscriber := createContractTopic(t, queue, "contract-receipt-cancel", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+	})
+	cancelReceipt, err := queue.PublishDurable(context.Background(), cancelTopic, Message{Message: "poison"})
+	require.NoError(t, err)
+	cancelClaim, err := queue.Claim(context.Background(), cancelTopic, cancelSubscriber.Name, 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, cancelClaim, 1)
+	require.NoError(t, queue.CancelClaimedDelivery(
+		context.Background(), cancelTopic, cancelSubscriber.Name,
+		cancelClaim[0].ID, cancelClaim[0].ReceiptToken, "unsupported payload",
+	))
+	require.NoError(t, queue.CancelClaimedDelivery(
+		context.Background(), cancelTopic, cancelSubscriber.Name,
+		cancelClaim[0].ID, cancelClaim[0].ReceiptToken, "unsupported payload",
+	))
+	cancelStatus, err := queue.GetMessageStatus(context.Background(), cancelTopic, cancelReceipt.MessageID)
+	require.NoError(t, err)
+	require.Equal(t, "cancelled", cancelStatus.Deliveries[0].Status)
+	require.Equal(t, "unsupported payload", cancelStatus.Deliveries[0].CancelReason)
+
 	require.NoError(t, queue.PauseSubscriber(context.Background(), topic, "one"))
 	_, err = queue.PublishDurable(context.Background(), topic, Message{Message: "paused"})
 	require.NoError(t, err)

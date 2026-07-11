@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/internal/textlimit"
 )
 
 type messageStatusRow struct {
@@ -69,6 +70,7 @@ func (d *db) cancelDeliveryWithTx(
 	subscriberID uuid.UUID,
 	messageID, reason string,
 ) (string, error) {
+	reason = textlimit.UTF8(reason, MaxDeliveryTextBytes)
 	status := ""
 	err := d.withTx(ctx, external, func(ctx context.Context, tx *sqlx.Tx) error {
 		now, err := d.nowTx(ctx, tx)
@@ -104,12 +106,58 @@ func (d *db) cancelDeliveryWithTx(
 	return status, err
 }
 
+func (d *db) cancelClaimedDeliveryWithTx(
+	ctx context.Context,
+	external *sql.Tx,
+	subscriberID uuid.UUID,
+	messageID, receipt, reason string,
+) error {
+	reason = textlimit.UTF8(reason, MaxDeliveryTextBytes)
+	return d.withTx(ctx, external, func(ctx context.Context, tx *sqlx.Tx) error {
+		now, err := d.nowTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, d.Conn().Rebind(`
+			UPDATE message_deliveries
+			SET status = 'cancelled', processed_at = ?, cancelled_at = ?, cancel_reason = ?,
+			    lease_expires_at = NULL
+			WHERE message_id = ? AND subscriber_id = ? AND status = 'delivered'
+			  AND receipt_token = ? AND lease_expires_at > ?`),
+			now, now, nullString(reason), messageID, subscriberID, receipt, now)
+		if err != nil {
+			return err
+		}
+		updated, _ := result.RowsAffected()
+		if updated > 0 {
+			return d.completeScheduleRunsTx(ctx, tx, messageID)
+		}
+		var row struct {
+			Status       string         `db:"status"`
+			ReceiptToken sql.NullString `db:"receipt_token"`
+		}
+		if err := tx.GetContext(ctx, &row, d.Conn().Rebind(`
+			SELECT status, receipt_token FROM message_deliveries
+			WHERE message_id = ? AND subscriber_id = ?`),
+			messageID, subscriberID); errors.Is(err, sql.ErrNoRows) {
+			return ErrDeliveryNotFound
+		} else if err != nil {
+			return err
+		}
+		if row.Status == "cancelled" && row.ReceiptToken.Valid && row.ReceiptToken.String == receipt {
+			return nil
+		}
+		return ErrLeaseLost
+	})
+}
+
 func (d *db) cancelMessageWithTx(
 	ctx context.Context,
 	external *sql.Tx,
 	topicID uuid.UUID,
 	messageID, reason string,
 ) ([]cancellationRow, error) {
+	reason = textlimit.UTF8(reason, MaxDeliveryTextBytes)
 	rows := make([]cancellationRow, 0)
 	err := d.withTx(ctx, external, func(ctx context.Context, tx *sqlx.Tx) error {
 		now, err := d.nowTx(ctx, tx)

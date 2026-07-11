@@ -46,6 +46,19 @@ var (
 	SchedulerOperations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "blockqueue", Name: "scheduler_operation_total", Help: "Scheduler outcomes.",
 	}, []string{"operation", "result"})
+	WorkerJobs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "blockqueue", Name: "worker_jobs_total", Help: "Completed worker attempts by final disposition.",
+	}, []string{"topic", "subscriber", "outcome"})
+	WorkerHandlerDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "blockqueue", Name: "worker_handler_duration_seconds", Help: "Worker handler execution duration by return semantics.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300, 900, 3600},
+	}, []string{"topic", "subscriber", "result"})
+	WorkerActiveHandlers = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "blockqueue", Name: "worker_active_handlers", Help: "Currently executing worker handlers.",
+	}, []string{"topic", "subscriber"})
+	WorkerHeartbeats = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "blockqueue", Name: "worker_heartbeat_total", Help: "Worker lease heartbeat outcomes.",
+	}, []string{"topic", "subscriber", "result"})
 )
 
 func Register(registerer prometheus.Registerer) error {
@@ -55,7 +68,8 @@ func Register(registerer prometheus.Registerer) error {
 	collectors := []prometheus.Collector{
 		PublishResults, PendingMessages, PendingBytes, WriterHealthy, FlushTotal,
 		PersistenceLag, FlushSize, FlushDuration, DeliveryOperations, CheckpointDuration,
-		DeliveryDuration, CheckpointResults, SchedulerOperations,
+		DeliveryDuration, CheckpointResults, SchedulerOperations, WorkerJobs,
+		WorkerHandlerDuration, WorkerActiveHandlers, WorkerHeartbeats,
 	}
 	for _, collector := range collectors {
 		if err := registerer.Register(collector); err != nil {

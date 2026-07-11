@@ -1,13 +1,13 @@
 # Architecture
 
-BlockQueue v0.2.0 has one engine, one canonical schema, and one current HTTP
-contract. Versioned HTTP paths do not create versioned writers, schedulers, or
-database packages.
+BlockQueue has one engine, one canonical schema, and one current HTTP contract.
+Versioned HTTP paths and optional execution layers do not create versioned
+writers, schedulers, or database packages.
 
 ```text
-Go caller ───────────────────────────────┐
-                                         v
-HTTP /v1 -> httpapi.Service port -> blockqueue.Queue
+Go caller -> worker (optional) ----------┐
+Go caller -------------------------------+---> blockqueue.Queue
+HTTP /v1 -> httpapi.Service port --------┘
                                          |
                   +----------------------+----------------------+
                   |                      |                      |
@@ -27,6 +27,11 @@ HTTP /v1 -> httpapi.Service port -> blockqueue.Queue
 - The root `blockqueue` package is the import-first public API and owns
   lifecycle, admission, delivery, and scheduling primitives. Workflow/DAG
   orchestration remains a separate future layer.
+- `worker` is an optional Go execution layer over the public delivery API. It
+  owns bounded handler concurrency, lease heartbeat, automatic ACK/NACK, typed
+  JSON decoding, receipt-fenced poison cancellation, set-based completion
+  batching, metrics, group supervision, and handler drain. It depends on the
+  root package and never owns `Queue` lifecycle or durable state.
 - `httpapi` owns routing, strict wire DTO validation, body limits, status
   mapping, and the narrow service interface implemented by `Queue`.
 - `store` exposes a small `database/sql` driver contract. `store/sqlite` and
@@ -117,10 +122,12 @@ pending --claim/new receipt--> delivered --ACK--> processed
    +---------------- DLQ replay --------------------------+
 ```
 
-ACK, NACK, and lease extension require the current receipt token and an
-unexpired lease. Repeating a successful ACK with the same token is idempotent;
-using a receipt from an older delivery returns lease lost. Run completion is
-updated in the same transaction as terminal delivery transitions.
+ACK, NACK, worker cancellation, and lease extension require the current receipt
+token and an unexpired lease. Administrative cancellation remains available
+without a receipt. Repeating successful ACK or worker cancellation with the
+same token is idempotent; using a receipt from an older delivery returns lease
+lost. Run completion is updated in the same transaction as terminal delivery
+transitions.
 
 `delivery_count` counts lease claims and is useful for observability.
 `failure_count` counts only NACK and lease-expiry failures and controls the
@@ -141,8 +148,8 @@ transaction.
 
 PostgreSQL background jobs are fenced and safe on multiple nodes, but v0.2 does
 not elect a single maintenance leader. Multiple nodes can therefore perform
-redundant bounded reaper/pruner scans; leader election is planned with the typed
-worker runtime rather than being implied by the current contract.
+redundant bounded reaper/pruner scans; leader election is planned for v0.3
+rather than being implied by the current contract.
 
 The optional server binary uses the standard `net/http` server with explicit
 header, idle, and long-poll-compatible write timeouts. It binds to
@@ -153,7 +160,15 @@ reverse proxy.
 
 `Queue` moves through `new -> running -> stopping -> stopped`. Startup validates
 migrations, database access, and the complete runtime snapshot before starting
-workers. Shutdown stops admission, drains the writer, stops background workers,
-performs a final SQLite truncate checkpoint, and closes the driver. A shutdown
-deadline with pending admitted messages returns an error instead of silently
-dropping them.
+maintenance goroutines. Shutdown stops admission, drains the writer, stops
+maintenance, performs a final SQLite truncate checkpoint, and closes the
+driver. A shutdown deadline with pending admitted messages returns an error
+instead of silently dropping them.
+
+An optional `worker.Worker` is single-use and deliberately has a separate
+lifecycle. `Run` claims only into free concurrency slots. Canceling its context
+stops new claims, keeps heartbeat active while handlers drain, and cancels
+handler contexts only after the configured drain deadline. It performs one
+short bounded hard-wait after cancellation; a handler that ignores its context
+may still outlive `Run`. Applications stop workers before shutting down `Queue`,
+so compliant handlers retain a live database connection throughout drain.

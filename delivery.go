@@ -23,6 +23,10 @@ var (
 
 const maximumDeliveryLease = 12 * time.Hour
 
+// MaxDeliveryTextBytes is the maximum persisted size of a NACK error or
+// cancellation reason. Longer values are truncated on a valid UTF-8 boundary.
+const MaxDeliveryTextBytes = 16 << 10
+
 // Claim atomically leases visible deliveries in canonical priority order.
 // Every redelivery receives a fresh receipt token.
 func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit int, lease time.Duration) (Deliveries, error) {

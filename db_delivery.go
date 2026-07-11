@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/internal/textlimit"
 )
 
 type deliveryRow struct {
@@ -235,6 +236,7 @@ func (d *db) requeueExpiredDeliveriesTx(
 }
 
 func (d *db) insertDeliveryErrorsTx(ctx context.Context, tx *sqlx.Tx, rows []expiredDelivery, errorText string, failedAt time.Time) error {
+	errorText = textlimit.UTF8(errorText, MaxDeliveryTextBytes)
 	for start := 0; start < len(rows); start += 150 {
 		end := min(start+150, len(rows))
 		var query strings.Builder
@@ -514,7 +516,7 @@ func (d *db) nackDeliveryTx(
 		visibleAt = now
 		processedAt = now
 	}
-	storedError := errorText
+	storedError := textlimit.UTF8(errorText, MaxDeliveryTextBytes)
 	if storedError == "" {
 		storedError = "delivery negatively acknowledged"
 	}

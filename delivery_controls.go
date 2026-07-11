@@ -80,6 +80,53 @@ func (q *Queue) CancelDeliveryTx(ctx context.Context, tx *sql.Tx, topic Topic, s
 	return q.cancelDeliveryTx(ctx, tx, topic, subscriber, messageID, reason)
 }
 
+// CancelClaimedDelivery terminally cancels only the delivery lease identified
+// by receipt. A stale worker cannot cancel a newer redelivery.
+func (q *Queue) CancelClaimedDelivery(
+	ctx context.Context,
+	topic Topic,
+	subscriber, messageID, receipt, reason string,
+) error {
+	return q.cancelClaimedDeliveryTx(ctx, nil, topic, subscriber, messageID, receipt, reason)
+}
+
+// CancelClaimedDeliveryTx is CancelClaimedDelivery within a caller-owned
+// transaction.
+func (q *Queue) CancelClaimedDeliveryTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	topic Topic,
+	subscriber, messageID, receipt, reason string,
+) error {
+	if tx == nil {
+		return fmt.Errorf("%w: transaction is required", ErrInvalidTransaction)
+	}
+	return q.cancelClaimedDeliveryTx(ctx, tx, topic, subscriber, messageID, receipt, reason)
+}
+
+func (q *Queue) cancelClaimedDeliveryTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	topic Topic,
+	subscriber, messageID, receipt, reason string,
+) error {
+	if err := q.requireTransactionAllowed(tx); err != nil {
+		return err
+	}
+	if err := validateDeliveryIdentity(messageID, receipt); err != nil {
+		return err
+	}
+	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	if err != nil {
+		return err
+	}
+	err = q.db.cancelClaimedDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt, reason)
+	if err == nil && tx == nil {
+		runtime.notify()
+	}
+	return err
+}
+
 func (q *Queue) cancelDeliveryTx(ctx context.Context, tx *sql.Tx, topic Topic, subscriber, messageID, reason string) error {
 	if err := q.requireTransactionAllowed(tx); err != nil {
 		return err

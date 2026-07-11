@@ -82,6 +82,37 @@ func TestAckDeliveryTxRollsBackWithBusinessEffect(t *testing.T) {
 	require.Zero(t, effects)
 }
 
+func TestCancelClaimedDeliveryTxRollsBackWithBusinessEffect(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	ctx := context.Background()
+	_, err := driver.DB().ExecContext(ctx, "CREATE TABLE cancellation_effects (id TEXT PRIMARY KEY)")
+	require.NoError(t, err)
+	_, err = queue.Publish(ctx, topic, Message{Message: "cancel atomically"})
+	require.NoError(t, err)
+	claimed, err := queue.Claim(ctx, topic, "worker", 1, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	rollbackErr := errors.New("rollback cancellation")
+	err = queue.WithTx(ctx, nil, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO cancellation_effects (id) VALUES (?)", "rolled-back"); err != nil {
+			return err
+		}
+		if err := queue.CancelClaimedDeliveryTx(
+			ctx, tx, topic, "worker", claimed[0].ID, claimed[0].ReceiptToken, "permanent",
+		); err != nil {
+			return err
+		}
+		return rollbackErr
+	})
+	require.ErrorIs(t, err, rollbackErr)
+	require.NoError(t, queue.AckDelivery(ctx, topic, "worker", claimed[0].ID, claimed[0].ReceiptToken))
+
+	var effects int
+	require.NoError(t, testDB(driver).Get(&effects, "SELECT COUNT(*) FROM cancellation_effects"))
+	require.Zero(t, effects)
+}
+
 func TestSQLiteCallerTransactionSerializesWriterWithoutLoss(t *testing.T) {
 	queue, driver, topic := setupQueue(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
