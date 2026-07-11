@@ -9,6 +9,12 @@ import (
 	"github.com/yudhasubki/blockqueue"
 )
 
+const (
+	completionOperationAck    = "ack"
+	completionOperationNack   = "nack"
+	completionOperationCancel = "cancel"
+)
+
 type retryError struct {
 	delay time.Duration
 	err   error

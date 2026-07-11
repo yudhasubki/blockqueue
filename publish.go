@@ -86,7 +86,7 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 		return PublishReceipt{}, err
 	}
 	receipt := PublishReceipt{
-		MessageID: write.MessageID, State: "admitted", ScheduledAt: scheduledAt,
+		MessageID: write.MessageID, State: PublishStateAdmitted, ScheduledAt: scheduledAt,
 	}
 	if durable {
 		duplicates, err := q.writer.waitAdmission(ctx, admission)
@@ -94,7 +94,7 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 			return PublishReceipt{}, err
 		}
 		duplicate := duplicates[0]
-		receipt.State = "persisted"
+		receipt.State = PublishStatePersisted
 		receipt.Duplicate = &duplicate
 	}
 	return receipt, nil
@@ -159,7 +159,7 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 			batch[i] = write
 			receipts[i] = PublishReceipt{
 				MessageID:   write.MessageID,
-				State:       "admitted",
+				State:       PublishStateAdmitted,
 				Duplicate:   nil,
 				ScheduledAt: scheduledAt,
 			}
@@ -179,7 +179,7 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 		}
 		for i := range receipts {
 			duplicate := duplicates[i]
-			receipts[i].State = "persisted"
+			receipts[i].State = PublishStatePersisted
 			receipts[i].Duplicate = &duplicate
 		}
 	}

@@ -15,6 +15,14 @@ import (
 	"github.com/yudhasubki/blockqueue/store"
 )
 
+const (
+	driverName                = "pgx"
+	connectionScheme          = "postgres"
+	defaultSSLMode            = "require"
+	synchronousCommitStrict   = "on"
+	synchronousCommitBalanced = "local"
+)
+
 type Driver struct {
 	db            *sqlx.DB
 	connectionURL string
@@ -40,7 +48,7 @@ func Open(config Config) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := sqlx.Connect("pgx", connectionString)
+	db, err := sqlx.Connect(driverName, connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("connect postgres: %w", err)
 	}
@@ -73,21 +81,21 @@ func Open(config Config) (*Driver, error) {
 func buildConnectionURL(config Config) (string, error) {
 	sslMode := config.SSLMode
 	if sslMode == "" {
-		sslMode = "require"
+		sslMode = defaultSSLMode
 	}
 	user := url.User(config.Username)
 	if config.Password != "" {
 		user = url.UserPassword(config.Username, config.Password)
 	}
-	connectionURL := &url.URL{Scheme: "postgres", User: user, Host: config.Host, Path: config.Name}
+	connectionURL := &url.URL{Scheme: connectionScheme, User: user, Host: config.Host, Path: config.Name}
 	if config.Port > 0 {
 		connectionURL.Host = config.Host + ":" + strconv.Itoa(config.Port)
 	}
-	synchronousCommit := "on"
+	synchronousCommit := synchronousCommitStrict
 	switch config.Durability {
 	case "", store.DurabilityStrict:
 	case store.DurabilityBalanced:
-		synchronousCommit = "local"
+		synchronousCommit = synchronousCommitBalanced
 	default:
 		return "", fmt.Errorf("unsupported postgres durability mode %q", config.Durability)
 	}
@@ -104,7 +112,7 @@ func buildConnectionURL(config Config) (string, error) {
 
 func (driver *Driver) DB() *sql.DB            { return driver.db.DB }
 func (driver *Driver) Dialect() store.Dialect { return store.DialectPostgres }
-func (driver *Driver) DriverName() string     { return "pgx" }
+func (driver *Driver) DriverName() string     { return driverName }
 func (driver *Driver) Close() error           { return driver.db.Close() }
 
 func (driver *Driver) Listen(ctx context.Context, channel string) (<-chan string, error) {

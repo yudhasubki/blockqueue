@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,21 +22,6 @@ type Topics []Topic
 type TopicFilter struct {
 	Names       []string
 	WithDeleted bool
-}
-
-func (filter TopicFilter) filter(operator string) (string, map[string]any) {
-	clauses := make([]string, 0, 2)
-	arguments := make(map[string]any)
-	if len(filter.Names) > 0 {
-		arguments["name"] = filter.Names
-		clauses = append(clauses, "name IN(:name)")
-	}
-	if filter.WithDeleted {
-		clauses = append(clauses, "deleted_at IS NOT NULL")
-	} else {
-		clauses = append(clauses, "deleted_at IS NULL")
-	}
-	return strings.Join(clauses, " "+operator+" "), arguments
 }
 
 type Subscriber struct {
@@ -65,25 +49,6 @@ type subscriberFilter struct {
 	TopicIDs    []uuid.UUID
 	Names       []string
 	WithDeleted bool
-}
-
-func (filter subscriberFilter) filter(operator string) (string, map[string]any) {
-	clauses := make([]string, 0, 3)
-	arguments := make(map[string]any)
-	if len(filter.TopicIDs) > 0 {
-		arguments["topic_id"] = filter.TopicIDs
-		clauses = append(clauses, "topic_subscribers.topic_id IN(:topic_id)")
-	}
-	if len(filter.Names) > 0 {
-		arguments["name"] = filter.Names
-		clauses = append(clauses, "topic_subscribers.name IN(:name)")
-	}
-	if filter.WithDeleted {
-		clauses = append(clauses, "topic_subscribers.deleted_at IS NOT NULL")
-	} else {
-		clauses = append(clauses, "topic_subscribers.deleted_at IS NULL")
-	}
-	return strings.Join(clauses, " "+operator+" "), arguments
 }
 
 type SubscriberOptions struct {

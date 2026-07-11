@@ -36,12 +36,12 @@ func (m *Main) Run(ctx context.Context, args []string) error {
 	}
 
 	switch cmd {
-	case "http":
+	case commandHTTP:
 		return (&HTTP{}).Run(ctx, args)
-	case "migrate":
+	case commandMigrate:
 		return (&Migrate{}).Run(ctx, args)
 	default:
-		if cmd == "" || cmd == "help" {
+		if cmd == "" || cmd == commandHelp {
 			m.Usage()
 			return flag.ErrHelp
 		}
@@ -94,10 +94,10 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		config.Http.Shutdown = 30 * time.Second
 	}
 	if config.Http.Host == "" {
-		config.Http.Host = "127.0.0.1"
+		config.Http.Host = defaultHTTPHost
 	}
 	if config.Http.Port == "" {
-		config.Http.Port = "8080"
+		config.Http.Port = defaultHTTPPort
 	}
 	if config.Http.ReadHeaderTimeout <= 0 {
 		config.Http.ReadHeaderTimeout = 5 * time.Second
@@ -119,23 +119,23 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 	}
 
 	if config.Http.Driver == "" {
-		config.Http.Driver = "sqlite"
+		config.Http.Driver = storageDriverSQLite
 	}
 
 	switch strings.ToUpper(config.Logging.Level) {
-	case "DEBUG":
+	case logLevelDebug:
 		logOpts.Level = slog.LevelDebug
-	case "WARN", "WARNING":
+	case logLevelWarn, logLevelWarning:
 		logOpts.Level = slog.LevelWarn
-	case "ERROR":
+	case logLevelError:
 		logOpts.Level = slog.LevelError
 	}
 
 	var logHandler slog.Handler
 	switch config.Logging.Type {
-	case "json":
+	case logFormatJSON:
 		logHandler = slog.NewJSONHandler(logOutput, &logOpts)
-	case "text", "":
+	case logFormatText, "":
 		logHandler = slog.NewTextHandler(logOutput, &logOpts)
 	default:
 		return config, fmt.Errorf("unsupported logging type %q", config.Logging.Type)

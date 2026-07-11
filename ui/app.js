@@ -1,4 +1,12 @@
 const API_BASE = "./v1";
+const DELIVERY_STATUS = Object.freeze({
+    PENDING: 'pending',
+    DELIVERED: 'delivered',
+});
+const TOAST_TYPE = Object.freeze({
+    SUCCESS: 'success',
+    ERROR: 'error',
+});
 
 // State
 let currentTopic = null;
@@ -176,7 +184,7 @@ async function handleCreateTopic(e) {
         selectTopic(name);
         showToast('Topic created!');
     } catch (err) {
-        showToast('Error creating topic: ' + err.message, 'error');
+        showToast('Error creating topic: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 
@@ -193,7 +201,7 @@ async function deleteTopic() {
         fetchTopics();
         showToast('Topic deleted');
     } catch (err) {
-        showToast('Error deleting topic: ' + err.message, 'error');
+        showToast('Error deleting topic: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 
@@ -227,12 +235,12 @@ async function handlePublish(e) {
         closeModal('publishModal');
         e.target.reset();
 
-        showToast('Message published successfully!', 'success');
+        showToast('Message published successfully!', TOAST_TYPE.SUCCESS);
 
         selectTopic(currentTopic.name);
 
     } catch (err) {
-        showToast('Error publishing: ' + err.message, 'error');
+        showToast('Error publishing: ' + err.message, TOAST_TYPE.ERROR);
     } finally {
         // Reset button
         btn.classList.remove('loading');
@@ -240,12 +248,12 @@ async function handlePublish(e) {
     }
 }
 
-function showToast(message, type = 'success') {
+function showToast(message, type = TOAST_TYPE.SUCCESS) {
     const container = document.getElementById('toastContainer');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
 
-    const icon = type === 'success'
+    const icon = type === TOAST_TYPE.SUCCESS
         ? '<i class="fa-solid fa-circle-check"></i>'
         : '<i class="fa-solid fa-circle-exclamation"></i>';
 
@@ -293,7 +301,7 @@ async function handleCreateSubscriber(e) {
         selectTopic(currentTopic.name);
         showToast('Subscriber created');
     } catch (err) {
-        showToast('Error creating subscriber: ' + err.message, 'error');
+        showToast('Error creating subscriber: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 
@@ -306,7 +314,7 @@ async function deleteSubscriber(name) {
         selectTopic(currentTopic.name);
         showToast('Subscriber deleted');
     } catch (err) {
-        showToast('Error deleting subscriber: ' + err.message, 'error');
+        showToast('Error deleting subscriber: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 
@@ -375,14 +383,14 @@ async function openInspect(subscriberName) {
                         </div>
                     </div>
                     <div style="display: flex; gap: 0.5rem; align-items: center;">
-                        <span class="status-badge ${m.status === 'pending' ? 'warning' : 'success'}">${m.status}</span>
-                         ${m.status === 'delivered' ? `<button class="btn btn-sm btn-primary" onclick='ackMessage(${inlineJSON(subscriberName)}, ${inlineJSON(m.id)}, ${inlineJSON(m.receipt_token)})' title="Ack Message" style="padding: 0.2rem 0.6rem; font-size: 0.7rem;">
+                        <span class="status-badge ${m.status === DELIVERY_STATUS.PENDING ? 'warning' : 'success'}">${m.status}</span>
+                         ${m.status === DELIVERY_STATUS.DELIVERED ? `<button class="btn btn-sm btn-primary" onclick='ackMessage(${inlineJSON(subscriberName)}, ${inlineJSON(m.id)}, ${inlineJSON(m.receipt_token)})' title="Ack Message" style="padding: 0.2rem 0.6rem; font-size: 0.7rem;">
                             <i class="fa-solid fa-check"></i> Ack
                         </button>` : ''}
                     </div>
                 </div>
                 <div style="background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 0.5rem; width: 100%; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem;">${escapeHTML(m.message)}</div>
-                ${m.status === 'delivered' ? `
+                ${m.status === DELIVERY_STATUS.DELIVERED ? `
                     <div style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--accent-color);">
                         <i class="fa-solid fa-stopwatch"></i> Lease expires at: ${new Date(m.lease_expires_at).toLocaleTimeString()}
                     </div>
@@ -412,7 +420,7 @@ async function ackMessage(subscriberName, messageID, receiptToken) {
         // Refresh stats
         selectTopic(currentTopic.name);
     } catch (err) {
-        showToast('Error acking message: ' + err.message, 'error');
+        showToast('Error acking message: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 
@@ -431,7 +439,7 @@ async function replayDLQ(subscriberName, messageID) {
         selectTopic(currentTopic.name);
         showToast('Message replayed');
     } catch (err) {
-        showToast('Error replaying message: ' + err.message, 'error');
+        showToast('Error replaying message: ' + err.message, TOAST_TYPE.ERROR);
     }
 }
 

@@ -15,13 +15,13 @@ import (
 // queue code depends only on store.Driver and its optional capabilities.
 func openConfiguredDriver(config Config) (store.Driver, error) {
 	switch strings.ToLower(strings.TrimSpace(config.Http.Driver)) {
-	case "turso":
+	case storageDriverTurso:
 		driver, err := turso.Open(config.Turso.URL)
 		if err != nil {
 			return nil, fmt.Errorf("open turso: %w", err)
 		}
 		return driver, nil
-	case "pgsql", "postgres", "postgresql":
+	case storageDriverPGSQL, storageDriverPostgres, storageDriverPostgreSQL:
 		driver, err := postgres.Open(postgres.Config{
 			Host:         config.PgSQL.Host,
 			Username:     config.PgSQL.Username,
@@ -38,7 +38,7 @@ func openConfiguredDriver(config Config) (store.Driver, error) {
 			return nil, fmt.Errorf("open postgres: %w", err)
 		}
 		return driver, nil
-	case "sqlite", "":
+	case storageDriverSQLite, "":
 		driver, err := sqlite.Open(config.SQLite.DatabaseName, sqlite.Config{
 			BusyTimeout:  config.SQLite.BusyTimeout,
 			MaxOpenConns: config.SQLite.MaxOpenConns,
@@ -58,7 +58,7 @@ func openConfiguredDriver(config Config) (store.Driver, error) {
 
 func configuredCheckpointInterval(config Config) (time.Duration, error) {
 	driver := strings.ToLower(strings.TrimSpace(config.Http.Driver))
-	if (driver != "" && driver != "sqlite") || config.SQLite.CheckpointInterval == "" {
+	if (driver != "" && driver != storageDriverSQLite) || config.SQLite.CheckpointInterval == "" {
 		return 0, nil
 	}
 	interval, err := time.ParseDuration(config.SQLite.CheckpointInterval)

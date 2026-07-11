@@ -46,7 +46,7 @@ type topicContextKey struct{}
 func New(service Service, mapper ErrorMapper) *Handler {
 	if mapper == nil {
 		mapper = func(error) (int, string, string) {
-			return http.StatusInternalServerError, "internal_error", "internal server error"
+			return http.StatusInternalServerError, problemCodeInternal, "internal server error"
 		}
 	}
 	return &Handler{service: service, mapError: mapper}
@@ -152,7 +152,7 @@ func (h *Handler) createSubscribers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteSubscriber(w http.ResponseWriter, r *http.Request) {
-	if err := h.service.DeleteSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName")); err != nil {
+	if err := h.service.DeleteSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName)); err != nil {
 		h.writeError(w, err)
 		return
 	}
@@ -164,15 +164,15 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &request) {
 		return
 	}
-	waitFor := r.URL.Query().Get("wait_for")
-	if waitFor != "" && waitFor != "commit" {
+	waitFor := r.URL.Query().Get(queryParamWaitFor)
+	if waitFor != "" && waitFor != waitForCommit {
 		h.validation(w, errors.New("wait_for must be commit"))
 		return
 	}
 	var receipt blockqueue.PublishReceipt
 	var err error
 	status := http.StatusAccepted
-	if waitFor == "commit" {
+	if waitFor == waitForCommit {
 		receipt, err = h.service.PublishDurable(r.Context(), topicFrom(r.Context()), request.command())
 		status = http.StatusOK
 	} else {
@@ -198,12 +198,12 @@ func (h *Handler) batchPublish(w http.ResponseWriter, r *http.Request) {
 	for i, item := range request {
 		commands[i] = item.command()
 	}
-	waitFor := r.URL.Query().Get("wait_for")
+	waitFor := r.URL.Query().Get(queryParamWaitFor)
 	var receipts blockqueue.PublishReceipts
 	var err error
 	status := http.StatusAccepted
 	switch waitFor {
-	case "commit":
+	case waitForCommit:
 		receipts, err = h.service.BatchPublishDurable(r.Context(), topicFrom(r.Context()), commands)
 		status = http.StatusOK
 	case "":
@@ -217,7 +217,7 @@ func (h *Handler) batchPublish(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) getMessageStatus(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.GetMessageStatus(
-		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "messageID"),
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamMessageID),
 	)
 	h.respond(w, http.StatusOK, result, err)
 }
@@ -228,14 +228,14 @@ func (h *Handler) cancelMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.service.CancelMessage(
-		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "messageID"), request.Reason,
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamMessageID), request.Reason,
 	)
 	h.respond(w, http.StatusOK, result, err)
 }
 
 func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 	timeout := defaultPoll
-	if raw := r.URL.Query().Get("timeout"); raw != "" {
+	if raw := r.URL.Query().Get(queryParamTimeout); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil || parsed <= 0 || parsed > maximumPoll {
 			h.validation(w, errors.New("timeout must be >0 and <=60s"))
@@ -244,7 +244,7 @@ func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 		timeout = parsed
 	}
 	lease := time.Duration(0)
-	if raw := r.URL.Query().Get("lease"); raw != "" {
+	if raw := r.URL.Query().Get(queryParamLease); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil || parsed <= 0 || parsed > maximumLease {
 			h.validation(w, errors.New("lease must be >0 and <=12h"))
@@ -254,7 +254,7 @@ func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
-	result, err := h.service.ClaimWait(ctx, topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), queryLimit(r, 10), lease)
+	result, err := h.service.ClaimWait(ctx, topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), queryLimit(r, 10), lease)
 	h.respond(w, http.StatusOK, result, err)
 }
 
@@ -263,8 +263,10 @@ func (h *Handler) ack(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &request) {
 		return
 	}
-	err := h.service.AckDelivery(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), chi.URLParam(r, "messageID"), request.ReceiptToken)
-	h.respond(w, http.StatusOK, map[string]string{"status": "processed"}, err)
+	err := h.service.AckDelivery(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), chi.URLParam(r, urlParamMessageID), request.ReceiptToken)
+	h.respond(w, http.StatusOK, map[string]string{
+		responseFieldStatus: blockqueue.DeliveryStatusProcessed,
+	}, err)
 }
 
 func (h *Handler) nack(w http.ResponseWriter, r *http.Request) {
@@ -277,8 +279,10 @@ func (h *Handler) nack(w http.ResponseWriter, r *http.Request) {
 		h.validation(w, err)
 		return
 	}
-	err = h.service.NackDelivery(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), chi.URLParam(r, "messageID"), request.ReceiptToken, delay, request.Error)
-	h.respond(w, http.StatusOK, map[string]string{"status": "pending"}, err)
+	err = h.service.NackDelivery(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), chi.URLParam(r, urlParamMessageID), request.ReceiptToken, delay, request.Error)
+	h.respond(w, http.StatusOK, map[string]string{
+		responseFieldStatus: blockqueue.DeliveryStatusPending,
+	}, err)
 }
 
 func (h *Handler) snooze(w http.ResponseWriter, r *http.Request) {
@@ -292,11 +296,12 @@ func (h *Handler) snooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	visibleAt, err := h.service.SnoozeDelivery(
-		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
-		chi.URLParam(r, "messageID"), request.ReceiptToken, delay,
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName),
+		chi.URLParam(r, urlParamMessageID), request.ReceiptToken, delay,
 	)
 	h.respond(w, http.StatusOK, map[string]string{
-		"status": "pending", "visible_at": visibleAt.Format(time.RFC3339Nano),
+		responseFieldStatus:    blockqueue.DeliveryStatusPending,
+		responseFieldVisibleAt: visibleAt.Format(time.RFC3339Nano),
 	}, err)
 }
 
@@ -306,16 +311,18 @@ func (h *Handler) cancelDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := h.service.CancelDelivery(
-		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
-		chi.URLParam(r, "messageID"), request.Reason,
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName),
+		chi.URLParam(r, urlParamMessageID), request.Reason,
 	)
-	h.respond(w, http.StatusOK, map[string]string{"status": "cancelled"}, err)
+	h.respond(w, http.StatusOK, map[string]string{
+		responseFieldStatus: blockqueue.DeliveryStatusCancelled,
+	}, err)
 }
 
 func (h *Handler) deliveryErrors(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.DeliveryErrors(
-		r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"),
-		chi.URLParam(r, "messageID"), queryLimit(r, 100), r.URL.Query().Get("cursor"),
+		r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName),
+		chi.URLParam(r, urlParamMessageID), queryLimit(r, 100), r.URL.Query().Get(queryParamCursor),
 	)
 	h.respond(w, http.StatusOK, result, err)
 }
@@ -334,8 +341,10 @@ func (h *Handler) lease(w http.ResponseWriter, r *http.Request) {
 		h.validation(w, errors.New("lease extension must be <=12h"))
 		return
 	}
-	expires, err := h.service.ExtendLease(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), chi.URLParam(r, "messageID"), request.ReceiptToken, extension)
-	h.respond(w, http.StatusOK, map[string]string{"lease_expires_at": expires.Format(time.RFC3339Nano)}, err)
+	expires, err := h.service.ExtendLease(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), chi.URLParam(r, urlParamMessageID), request.ReceiptToken, extension)
+	h.respond(w, http.StatusOK, map[string]string{
+		responseFieldLeaseExpiresAt: expires.Format(time.RFC3339Nano),
+	}, err)
 }
 
 func (h *Handler) batchAck(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +360,7 @@ func (h *Handler) batchAck(w http.ResponseWriter, r *http.Request) {
 	for i, item := range request {
 		items[i] = blockqueue.BatchAckItem{MessageID: item.MessageID, ReceiptToken: item.ReceiptToken}
 	}
-	write(w, http.StatusOK, h.service.BatchAckDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), items))
+	write(w, http.StatusOK, h.service.BatchAckDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), items))
 }
 
 func (h *Handler) batchNack(w http.ResponseWriter, r *http.Request) {
@@ -372,13 +381,13 @@ func (h *Handler) batchNack(w http.ResponseWriter, r *http.Request) {
 		}
 		items[i] = blockqueue.BatchNackItem{MessageID: item.MessageID, ReceiptToken: item.ReceiptToken, RetryDelay: delay, Error: item.Error}
 	}
-	write(w, http.StatusOK, h.service.BatchNackDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), items))
+	write(w, http.StatusOK, h.service.BatchNackDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), items))
 }
 
 func (h *Handler) activeMessages(w http.ResponseWriter, r *http.Request) { h.deliveryPage(w, r, false) }
 func (h *Handler) deadLetters(w http.ResponseWriter, r *http.Request)    { h.deliveryPage(w, r, true) }
 func (h *Handler) deliveryPage(w http.ResponseWriter, r *http.Request, deadLetter bool) {
-	result, err := h.service.ListDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), deadLetter, queryLimit(r, 100), r.URL.Query().Get("cursor"))
+	result, err := h.service.ListDeliveries(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), deadLetter, queryLimit(r, 100), r.URL.Query().Get(queryParamCursor))
 	h.respond(w, http.StatusOK, result, err)
 }
 
@@ -391,7 +400,7 @@ func (h *Handler) replayDeadLetters(w http.ResponseWriter, r *http.Request) {
 		h.validation(w, errors.New("invalid replay batch"))
 		return
 	}
-	write(w, http.StatusOK, h.service.ReplayDeadLetters(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"), request.MessageIDs))
+	write(w, http.StatusOK, h.service.ReplayDeadLetters(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), request.MessageIDs))
 }
 
 func (h *Handler) pauseTopic(w http.ResponseWriter, r *http.Request)  { h.setTopicPause(w, r, true) }
@@ -403,7 +412,7 @@ func (h *Handler) setTopicPause(w http.ResponseWriter, r *http.Request, paused b
 	} else {
 		err = h.service.ResumeTopic(r.Context(), topicFrom(r.Context()))
 	}
-	h.respond(w, http.StatusOK, map[string]bool{"paused": paused}, err)
+	h.respond(w, http.StatusOK, map[string]bool{responseFieldPaused: paused}, err)
 }
 
 func (h *Handler) pauseSubscriber(w http.ResponseWriter, r *http.Request) {
@@ -415,11 +424,11 @@ func (h *Handler) resumeSubscriber(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) setSubscriberPause(w http.ResponseWriter, r *http.Request, paused bool) {
 	var err error
 	if paused {
-		err = h.service.PauseSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"))
+		err = h.service.PauseSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName))
 	} else {
-		err = h.service.ResumeSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "subscriberName"))
+		err = h.service.ResumeSubscriber(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName))
 	}
-	h.respond(w, http.StatusOK, map[string]bool{"paused": paused}, err)
+	h.respond(w, http.StatusOK, map[string]bool{responseFieldPaused: paused}, err)
 }
 
 func (h *Handler) listSchedules(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +446,7 @@ func (h *Handler) createSchedule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getSchedule(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.GetSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId"))
+	result, err := h.service.GetSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID))
 	h.respond(w, http.StatusOK, result, err)
 }
 
@@ -450,12 +459,12 @@ func (h *Handler) updateSchedule(w http.ResponseWriter, r *http.Request) {
 		h.validation(w, errors.New("version is required"))
 		return
 	}
-	result, err := h.service.UpdateSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId"), request.Version, request.command())
+	result, err := h.service.UpdateSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID), request.Version, request.command())
 	h.respond(w, http.StatusOK, result, err)
 }
 
 func (h *Handler) deleteSchedule(w http.ResponseWriter, r *http.Request) {
-	if err := h.service.DeleteSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId")); err != nil {
+	if err := h.service.DeleteSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID)); err != nil {
 		h.writeError(w, err)
 		return
 	}
@@ -469,30 +478,30 @@ func (h *Handler) resumeSchedule(w http.ResponseWriter, r *http.Request) {
 	h.setSchedulePause(w, r, false)
 }
 func (h *Handler) setSchedulePause(w http.ResponseWriter, r *http.Request, paused bool) {
-	err := h.service.PauseSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId"), paused)
-	h.respond(w, http.StatusOK, map[string]bool{"paused": paused}, err)
+	err := h.service.PauseSchedule(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID), paused)
+	h.respond(w, http.StatusOK, map[string]bool{responseFieldPaused: paused}, err)
 }
 
 func (h *Handler) runScheduleNow(w http.ResponseWriter, r *http.Request) {
-	force, err := strconv.ParseBool(defaultString(r.URL.Query().Get("force"), "false"))
+	force, err := strconv.ParseBool(defaultString(r.URL.Query().Get(queryParamForce), defaultFalse))
 	if err != nil {
 		h.validation(w, errors.New("force must be boolean"))
 		return
 	}
-	result, err := h.service.RunScheduleNow(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId"), force)
+	result, err := h.service.RunScheduleNow(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID), force)
 	h.respond(w, http.StatusAccepted, result, err)
 }
 
 func (h *Handler) scheduleRuns(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.ScheduleRunHistory(r.Context(), topicFrom(r.Context()), chi.URLParam(r, "scheduleId"), queryLimit(r, 100), r.URL.Query().Get("cursor"))
+	result, err := h.service.ScheduleRunHistory(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamScheduleID), queryLimit(r, 100), r.URL.Query().Get(queryParamCursor))
 	h.respond(w, http.StatusOK, result, err)
 }
 
 func (h *Handler) topicExists(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		topic, exists := h.service.GetTopic(chi.URLParam(r, "topicName"))
+		topic, exists := h.service.GetTopic(chi.URLParam(r, urlParamTopicName))
 		if !exists {
-			writeProblem(w, r, http.StatusNotFound, "topic_not_found", "topic not found")
+			writeProblem(w, r, http.StatusNotFound, problemCodeTopicNotFound, "topic not found")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), topicContextKey{}, topic)))
@@ -547,7 +556,7 @@ func (h *Handler) decodeOptional(w http.ResponseWriter, r *http.Request, destina
 }
 
 func (h *Handler) validation(w http.ResponseWriter, err error) {
-	writeProblem(w, nil, http.StatusBadRequest, "validation_error", err.Error())
+	writeProblem(w, nil, http.StatusBadRequest, problemCodeValidation, err.Error())
 }
 
 func (h *Handler) respond(w http.ResponseWriter, status int, data any, err error) {
@@ -564,13 +573,13 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 }
 
 func write(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", mediaTypeJSON)
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(envelope{Data: data})
 }
 
 func writeProblem(w http.ResponseWriter, request *http.Request, status int, code, message string) {
-	w.Header().Set("Content-Type", "application/problem+json")
+	w.Header().Set("Content-Type", mediaTypeProblemJSON)
 	w.WriteHeader(status)
 	instance := ""
 	if request != nil {
@@ -583,7 +592,7 @@ func writeProblem(w http.ResponseWriter, request *http.Request, status int, code
 }
 
 func queryLimit(r *http.Request, fallback int) int {
-	value, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	value, err := strconv.Atoi(r.URL.Query().Get(queryParamLimit))
 	if err != nil || value <= 0 {
 		return fallback
 	}

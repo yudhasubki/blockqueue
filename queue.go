@@ -11,19 +11,20 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
 	"github.com/yudhasubki/blockqueue/store"
 )
 
 var (
-	ErrTopicNotFound      = errors.New("topic not found")
+	ErrTopicNotFound      = persistence.ErrTopicNotFound
 	ErrQueueNotRunning    = errors.New("blockqueue is not running")
 	ErrQueueStopping      = errors.New("blockqueue is stopping")
-	ErrNoActiveSubscriber = errors.New("topic has no active subscriber")
-	ErrInvalidPublish     = errors.New("invalid publish request")
+	ErrNoActiveSubscriber = persistence.ErrNoActiveSubscriber
+	ErrInvalidPublish     = persistence.ErrInvalidPublish
 	ErrInvalidTopic       = errors.New("invalid topic")
 	ErrInvalidSubscriber  = errors.New("invalid subscriber")
-	ErrResourceConflict   = errors.New("resource already exists")
+	ErrResourceConflict   = persistence.ErrResourceConflict
 )
 
 type LifecycleState uint32
@@ -99,7 +100,7 @@ func New(driver store.Driver, opt Options) *Queue {
 		schedulerOwner:  uuid.NewString(),
 		activeTx:        make(map[*sql.Tx]struct{}),
 	}
-	queue.db.disableMetrics = opt.DisableMetrics
+	queue.db.setMetricsDisabled(opt.DisableMetrics)
 	queue.schedulerHealthy.Store(true)
 	queue.deliveryHealthy.Store(true)
 	queue.registry.Store(&topicRegistry{

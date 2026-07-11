@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"encoding/json"
@@ -22,7 +22,7 @@ func normalizeResourceConflict(err error) error {
 		return nil
 	}
 	var postgresError *pgconn.PgError
-	if errors.As(err, &postgresError) && postgresError.Code == "23505" {
+	if errors.As(err, &postgresError) && postgresError.Code == postgresUniqueViolationCode {
 		return ErrResourceConflict
 	}
 	var sqliteError sqlite3.Error

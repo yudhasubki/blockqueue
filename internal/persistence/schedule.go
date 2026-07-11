@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
@@ -36,7 +36,7 @@ func (d *db) createSchedule(ctx context.Context, schedule Schedule) error {
 		schedule.Timezone, schedule.Message, schedule.Headers, nullString(schedule.CorrelationID.String),
 		schedule.Priority, schedule.MisfirePolicy, schedule.OverlapPolicy, schedule.NextRunAt)
 	if err == nil {
-		_ = d.notifyDatabase(ctx, "scheduler")
+		_ = d.notifyDatabase(ctx, EventScheduler)
 	}
 	return normalizeResourceConflict(err)
 }
@@ -74,7 +74,7 @@ func (d *db) updateSchedule(ctx context.Context, topicID uuid.UUID, scheduleID s
 	}
 	rows, _ := result.RowsAffected()
 	if rows > 0 {
-		_ = d.notifyDatabase(ctx, "scheduler")
+		_ = d.notifyDatabase(ctx, EventScheduler)
 		return nil
 	}
 	exists, err := d.scheduleExists(ctx, topicID, scheduleID)
@@ -104,7 +104,7 @@ func (d *db) deleteSchedule(ctx context.Context, topicID uuid.UUID, scheduleID s
 	if rows == 0 {
 		return ErrScheduleNotFound
 	}
-	_ = d.notifyDatabase(ctx, "scheduler")
+	_ = d.notifyDatabase(ctx, EventScheduler)
 	return nil
 }
 
@@ -119,7 +119,7 @@ func (d *db) setSchedulePaused(ctx context.Context, topicID uuid.UUID, scheduleI
 	if rows == 0 {
 		return ErrScheduleNotFound
 	}
-	_ = d.notifyDatabase(ctx, "scheduler")
+	_ = d.notifyDatabase(ctx, EventScheduler)
 	return nil
 }
 
@@ -244,7 +244,7 @@ func (d *db) persistScheduleOccurrence(
 			if active > 0 {
 				resultRun = ScheduleRun{
 					ID: uuid.NewString(), ScheduleID: schedule.ID,
-					ScheduledFor: scheduledFor, Status: "skipped",
+					ScheduledFor: scheduledFor, Status: ScheduleRunStatusSkipped,
 				}
 				if _, err := tx.ExecContext(ctx, tx.Rebind(`
 					INSERT INTO schedule_runs
@@ -260,7 +260,7 @@ func (d *db) persistScheduleOccurrence(
 
 		resultRun = ScheduleRun{
 			ID: uuid.NewString(), ScheduleID: schedule.ID,
-			ScheduledFor: scheduledFor, Status: "running",
+			ScheduledFor: scheduledFor, Status: ScheduleRunStatusRunning,
 		}
 		insertRun, err := tx.ExecContext(ctx, tx.Rebind(`
 			INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status)
@@ -343,10 +343,10 @@ func (d *db) persistScheduleOccurrence(
 			return err
 		}
 		resultRun.MessageID = sql.NullString{String: messageID, Valid: true}
-		if err := d.notifyTx(ctx, tx, "delivery:"+schedule.TopicID); err != nil {
+		if err := d.notifyTx(ctx, tx, deliveryEvent(schedule.TopicID)); err != nil {
 			return err
 		}
-		if err := d.notifyTx(ctx, tx, "scheduler"); err != nil {
+		if err := d.notifyTx(ctx, tx, EventScheduler); err != nil {
 			return err
 		}
 		return d.advanceClaimedScheduleTx(ctx, tx, schedule, nextRunAt, advance, owner, claimed.FencingToken)

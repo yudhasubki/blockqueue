@@ -15,7 +15,8 @@ HTTP /v1 -> httpapi.Service port --------┘
                   |                      |                      |
                   +----------------------+----------------------+
                                          v
-             db_control / db_delivery / db_schedule / db_sqlite
+                       internal/persistence.Store
+                  topology / publish / delivery / schedule
                                          |
                             sqlDialect + store.Driver
                                   /                 \
@@ -34,16 +35,22 @@ HTTP /v1 -> httpapi.Service port --------┘
   root package and never owns `Queue` lifecycle or durable state.
 - `httpapi` owns routing, strict wire DTO validation, body limits, status
   mapping, and the narrow service interface implemented by `Queue`.
+- `internal/persistence` is the only package that owns queue SQL, schema
+  migrations, prepared-statement caching, backend dialect strategy, and
+  durable row models. The root engine reaches it through one concrete adapter;
+  it is intentionally not a public extension point and does not expose a broad
+  repository interface.
 - `store` exposes a small `database/sql` driver contract. `store/sqlite` and
   `store/postgres` own connection configuration; PostgreSQL uses pgx and native
   UUID columns. `store/turso` is experimental.
-- The unexported `sqlDialect` strategy owns backend syntax, bind limits,
+- The persistence package's unexported `sqlDialect` strategy owns backend syntax, bind limits,
   lock clauses, notifications, and migration locking. Backend selection happens
   once during construction; queue operations do not scatter driver-name
   conditionals through hot paths.
-- SQL is grouped by storage concern in `db_control.go`, `db_writer.go`,
-  `db_delivery.go`, `db_schedule.go`, and `db_sqlite.go`. Queue orchestration does not embed
-  control-plane or delivery queries.
+- SQL is grouped by storage concern in `topology.go`, `publish.go`,
+  `delivery.go`, `schedule.go`, `retention.go`, and `sqlite_maintenance.go` under
+  `internal/persistence`. Queue orchestration does not embed control-plane or
+  delivery queries.
 - Public domain models live at the module root, so embedded callers never need
   transport or persistence implementation packages.
 

@@ -22,6 +22,12 @@ import (
 
 var identifierPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
+const (
+	postgresDriverName = "pgx"
+	postgresScheme     = "postgres"
+	postgresqlScheme   = "postgresql"
+)
+
 type Schema struct {
 	Driver       store.Driver
 	DatabaseName string
@@ -40,7 +46,7 @@ type schemaDriver struct {
 
 func (driver *schemaDriver) DB() *sql.DB            { return driver.database.DB }
 func (driver *schemaDriver) Dialect() store.Dialect { return store.DialectPostgres }
-func (driver *schemaDriver) DriverName() string     { return "pgx" }
+func (driver *schemaDriver) DriverName() string     { return postgresDriverName }
 func (driver *schemaDriver) Close() error {
 	driver.closeOnce.Do(func() { driver.closeErr = driver.database.Close() })
 	return driver.closeErr
@@ -58,7 +64,7 @@ func OpenPostgreSQLSchema(ctx context.Context, rawURL, requiredDatabaseSuffix, p
 		return nil, fmt.Errorf("invalid schema prefix %q", prefix)
 	}
 	schemaName := prefix + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	admin, err := sqlx.ConnectContext(ctx, "pgx", parsed.String())
+	admin, err := sqlx.ConnectContext(ctx, postgresDriverName, parsed.String())
 	if err != nil {
 		return nil, fmt.Errorf("connect PostgreSQL test database: %w", err)
 	}
@@ -70,7 +76,7 @@ func OpenPostgreSQLSchema(ctx context.Context, rawURL, requiredDatabaseSuffix, p
 	query := parsed.Query()
 	query.Set("search_path", schemaName)
 	parsed.RawQuery = query.Encode()
-	connection, err := sqlx.ConnectContext(ctx, "pgx", parsed.String())
+	connection, err := sqlx.ConnectContext(ctx, postgresDriverName, parsed.String())
 	if err != nil {
 		_, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+pgx.Identifier{schemaName}.Sanitize()+" CASCADE")
 		_ = admin.Close()
@@ -115,7 +121,7 @@ func guardedURL(rawURL, requiredDatabaseSuffix string) (*url.URL, string, error)
 		return nil, "", errors.New("PostgreSQL URL is required")
 	}
 	parsed, err := url.Parse(rawURL)
-	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
+	if err != nil || (parsed.Scheme != postgresScheme && parsed.Scheme != postgresqlScheme) {
 		return nil, "", fmt.Errorf("invalid PostgreSQL URL")
 	}
 	databaseName, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/"))

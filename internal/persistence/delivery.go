@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
@@ -59,7 +59,9 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 		if err != nil {
 			return err
 		}
-		if _, err := d.requeueExpiredDeliveriesTx(ctx, tx, &subscriberID, 1000, now); err != nil {
+		if _, err := d.requeueExpiredDeliveriesTx(
+			ctx, tx, &subscriberID, defaultDeliveryReaperBatchSize, now,
+		); err != nil {
 			return err
 		}
 		candidates := make([]deliveryRow, 0, limit)
@@ -97,7 +99,7 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 			if _, ok := updated[candidate.MessageID]; !ok {
 				continue
 			}
-			candidate.Status = "delivered"
+			candidate.Status = DeliveryStatusDelivered
 			candidate.DeliveryCount++
 			candidate.ReceiptToken = sql.NullString{String: tokens[candidate.MessageID], Valid: true}
 			candidate.LeaseExpiresAt = sql.NullTime{Time: leaseExpires, Valid: true}
@@ -147,7 +149,7 @@ func (d *db) requeueExpiredDeliveriesTx(
 		updateArgs := make([]any, 0, len(chunk)*6+1)
 		for _, row := range chunk {
 			failureCount := row.FailureCount + 1
-			status := "pending"
+			status := DeliveryStatusPending
 			visibleAt := now.Add(retryDelayFor(subscriberOptions{
 				RetryInitialDelay: time.Duration(row.RetryInitialMillis) * time.Millisecond,
 				RetryMaxDelay:     time.Duration(row.RetryMaxMillis) * time.Millisecond,
@@ -156,7 +158,7 @@ func (d *db) requeueExpiredDeliveriesTx(
 			}, failureCount, row.MessageID))
 			var processedAt any
 			if failureCount >= row.MaxAttempts {
-				status = "dead_letter"
+				status = DeliveryStatusDeadLetter
 				visibleAt = now
 				processedAt = now
 				if _, exists := terminalSeen[row.MessageID]; !exists {
@@ -205,7 +207,7 @@ func (d *db) insertDeliveryErrorsTx(ctx context.Context, tx *sqlx.Tx, rows []exp
 // claim. Run completion happens in the same transaction.
 func (d *db) reapExpiredDeliveries(ctx context.Context, limit int) (int64, error) {
 	if limit <= 0 {
-		limit = 1000
+		limit = defaultDeliveryReaperBatchSize
 	}
 	var affected int64
 	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
@@ -272,7 +274,7 @@ func (d *db) ackDeliveryWithTx(ctx context.Context, external *sql.Tx, subscriber
 		if err != nil {
 			return err
 		}
-		if state.Status == "processed" && state.Receipt.String == receipt {
+		if state.Status == DeliveryStatusProcessed && state.Receipt.String == receipt {
 			return nil
 		}
 		return ErrLeaseLost
@@ -377,7 +379,7 @@ func (d *db) batchAckDeliveries(ctx context.Context, subscriberID uuid.UUID, req
 				results[index] = ErrDeliveryNotFound
 				continue
 			}
-			if state.Status != "processed" || state.ReceiptToken.String != request.ReceiptToken {
+			if state.Status != DeliveryStatusProcessed || state.ReceiptToken.String != request.ReceiptToken {
 				results[index] = ErrLeaseLost
 				continue
 			}
@@ -461,11 +463,11 @@ func (d *db) nackDeliveryTx(
 			RetryJitter:       state.RetryJitter,
 		}, failureCount, messageID)
 	}
-	status := "pending"
+	status := DeliveryStatusPending
 	visibleAt := now.Add(delay)
 	var processedAt any
 	if terminal {
-		status = "dead_letter"
+		status = DeliveryStatusDeadLetter
 		visibleAt = now
 		processedAt = now
 	}
@@ -564,7 +566,7 @@ func (d *db) extendDeliveryLease(ctx context.Context, subscriberID uuid.UUID, me
 			return err
 		}
 		expires = current.Add(extension)
-		maximumExpiry := now.Add(maximumDeliveryLease)
+		maximumExpiry := now.Add(MaximumDeliveryLease)
 		if expires.After(maximumExpiry) {
 			expires = maximumExpiry
 		}

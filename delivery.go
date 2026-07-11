@@ -8,31 +8,36 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
 )
 
 var (
-	ErrLeaseLost        = errors.New("delivery lease lost")
-	ErrDeliveryNotFound = errors.New("delivery not found")
-	ErrInvalidReceipt   = errors.New("receipt_token is required")
+	ErrLeaseLost        = persistence.ErrLeaseLost
+	ErrDeliveryNotFound = persistence.ErrDeliveryNotFound
+	ErrInvalidReceipt   = persistence.ErrInvalidReceipt
 	ErrResourcePaused   = errors.New("topic or subscriber is paused")
 )
 
-const maximumDeliveryLease = 12 * time.Hour
+const (
+	maximumDeliveryLease    = persistence.MaximumDeliveryLease
+	maxDeliveryClaimSize    = 1000
+	maxDeliveryPageSize     = 1000
+	deliveryReaperBatchSize = 1000
+)
 
 // MaxDeliveryTextBytes is the maximum persisted size of a NACK error or
 // cancellation reason. Longer values are truncated on a valid UTF-8 boundary.
-const MaxDeliveryTextBytes = 16 << 10
+const MaxDeliveryTextBytes = persistence.MaxDeliveryTextBytes
 
 // Claim atomically leases visible deliveries in canonical priority order.
 // Every redelivery receives a fresh receipt token.
 func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit int, lease time.Duration) (Deliveries, error) {
 	started := time.Now()
-	defer q.observeDeliveryDuration("claim", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationClaim, started)
 	if q.State() != LifecycleRunning {
 		return nil, ErrQueueNotRunning
 	}
@@ -46,8 +51,8 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	if limit <= 0 {
 		limit = subscriberRuntime.options.DequeueBatchSize
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > maxDeliveryClaimSize {
+		limit = maxDeliveryClaimSize
 	}
 	if lease <= 0 {
 		lease = subscriberRuntime.options.VisibilityDuration
@@ -60,12 +65,16 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	rows, err := q.db.claimDeliveries(ctx, subscriberRuntime.id, limit, lease)
 	if err != nil {
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("claim", "failed").Inc()
+			metric.DeliveryOperations.WithLabelValues(
+				metric.DeliveryOperationClaim, metric.OutcomeFailed,
+			).Inc()
 		}
 		return nil, err
 	}
 	if !q.options.DisableMetrics {
-		metric.DeliveryOperations.WithLabelValues("claim", "success").Add(float64(len(rows)))
+		metric.DeliveryOperations.WithLabelValues(
+			metric.DeliveryOperationClaim, metric.OutcomeSuccess,
+		).Add(float64(len(rows)))
 	}
 	if len(rows) > 0 {
 		q.signalReaper()
@@ -149,7 +158,7 @@ func (q *Queue) ClaimWait(ctx context.Context, topic Topic, subscriber string, l
 
 func (q *Queue) AckDelivery(ctx context.Context, topic Topic, subscriber, messageID, receipt string) error {
 	started := time.Now()
-	defer q.observeDeliveryDuration("ack", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationAck, started)
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err
@@ -164,34 +173,40 @@ func (q *Queue) AckDelivery(ctx context.Context, topic Topic, subscriber, messag
 		return ErrLeaseLost
 	}
 	if err := q.db.ackDelivery(ctx, subscriberRuntime.id, messageID, receipt); err != nil {
-		result := "failed"
+		result := metric.OutcomeFailed
 		if errors.Is(err, ErrLeaseLost) {
-			result = "lease_lost"
+			result = metric.OutcomeLeaseLost
 		}
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("ack", result).Inc()
+			metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationAck, result).Inc()
 		}
 		return err
 	}
 	if !q.options.DisableMetrics {
-		metric.DeliveryOperations.WithLabelValues("ack", "success").Inc()
+		metric.DeliveryOperations.WithLabelValues(
+			metric.DeliveryOperationAck, metric.OutcomeSuccess,
+		).Inc()
 	}
 	return nil
 }
 
 func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messageID, receipt string, retryDelay time.Duration, errorText string) error {
 	started := time.Now()
-	defer q.observeDeliveryDuration("nack", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationNack, started)
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("nack", "failed").Inc()
+			metric.DeliveryOperations.WithLabelValues(
+				metric.DeliveryOperationNack, metric.OutcomeFailed,
+			).Inc()
 		}
 		return err
 	}
 	if receipt == "" {
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("nack", "failed").Inc()
+			metric.DeliveryOperations.WithLabelValues(
+				metric.DeliveryOperationNack, metric.OutcomeFailed,
+			).Inc()
 		}
 		return ErrInvalidReceipt
 	}
@@ -203,27 +218,29 @@ func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messa
 	}
 	if retryDelay < 0 {
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("nack", "failed").Inc()
+			metric.DeliveryOperations.WithLabelValues(
+				metric.DeliveryOperationNack, metric.OutcomeFailed,
+			).Inc()
 		}
 		return fmt.Errorf("%w: retry delay cannot be negative", ErrInvalidPublish)
 	}
 	terminal, err := q.db.nackDelivery(ctx, subscriberRuntime.id, messageID, receipt, retryDelay, errorText)
 	if err != nil {
-		result := "failed"
+		result := metric.OutcomeFailed
 		if errors.Is(err, ErrLeaseLost) {
-			result = "lease_lost"
+			result = metric.OutcomeLeaseLost
 		}
 		if !q.options.DisableMetrics {
-			metric.DeliveryOperations.WithLabelValues("nack", result).Inc()
+			metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationNack, result).Inc()
 		}
 		return err
 	}
 	if !q.options.DisableMetrics {
-		result := "success"
+		result := metric.OutcomeSuccess
 		if terminal {
-			result = "dead_letter"
+			result = metric.OutcomeDeadLetter
 		}
-		metric.DeliveryOperations.WithLabelValues("nack", result).Inc()
+		metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationNack, result).Inc()
 	}
 	subscriberRuntime.notify()
 	return nil
@@ -231,7 +248,7 @@ func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messa
 
 func (q *Queue) ExtendLease(ctx context.Context, topic Topic, subscriber, messageID, receipt string, extension time.Duration) (time.Time, error) {
 	started := time.Now()
-	defer q.observeDeliveryDuration("lease", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationLease, started)
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return time.Time{}, err
@@ -251,15 +268,15 @@ func (q *Queue) ExtendLease(ctx context.Context, topic Topic, subscriber, messag
 		return time.Time{}, fmt.Errorf("%w: lease extension cannot exceed 12h", ErrInvalidPublish)
 	}
 	expires, err := q.db.extendDeliveryLease(ctx, subscriberRuntime.id, messageID, receipt, extension)
-	result := "success"
+	result := metric.OutcomeSuccess
 	if err != nil {
-		result = "failed"
+		result = metric.OutcomeFailed
 		if errors.Is(err, ErrLeaseLost) {
-			result = "lease_lost"
+			result = metric.OutcomeLeaseLost
 		}
 	}
 	if !q.options.DisableMetrics {
-		metric.DeliveryOperations.WithLabelValues("lease", result).Inc()
+		metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationLease, result).Inc()
 	}
 	return expires, err
 }
@@ -316,10 +333,10 @@ func (q *Queue) startDeliveryReaper() {
 		case <-timer.C:
 		}
 
-		var total int64
+		reapedAny := false
 		reapFailed := false
 		for {
-			count, err := q.db.reapExpiredDeliveries(q.serverCtx, 1000)
+			count, err := q.db.reapExpiredDeliveries(q.serverCtx, deliveryReaperBatchSize)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
@@ -329,12 +346,12 @@ func (q *Queue) startDeliveryReaper() {
 				reapFailed = true
 				break
 			}
-			total += count
-			if count < 1000 {
+			reapedAny = reapedAny || count > 0
+			if count < deliveryReaperBatchSize {
 				break
 			}
 		}
-		if total > 0 {
+		if reapedAny {
 			for _, topic := range q.registry.Load().byID {
 				topic.notify()
 			}
@@ -347,7 +364,7 @@ func (q *Queue) startDeliveryReaper() {
 
 func (q *Queue) BatchAckDeliveries(ctx context.Context, topic Topic, subscriber string, requests []BatchAckItem) []DeliveryResult {
 	started := time.Now()
-	defer q.observeDeliveryDuration("batch_ack", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationBatchAck, started)
 	results := make([]DeliveryResult, len(requests))
 	_, subscriberRuntime, targetErr := q.deliveryTarget(topic, subscriber)
 	itemErrors := make([]error, len(requests))
@@ -366,21 +383,21 @@ func (q *Queue) BatchAckDeliveries(ctx context.Context, topic Topic, subscriber 
 	}
 	for index, item := range requests {
 		err := itemErrors[index]
-		result := DeliveryResult{MessageID: item.MessageID, Status: "processed"}
+		result := DeliveryResult{MessageID: item.MessageID, Status: DeliveryStatusProcessed}
 		if err != nil {
-			result.Status = "failed"
+			result.Status = DeliveryResultStatusFailed
 			result.Error = publicDeliveryError(err)
 		}
 		results[index] = result
 		if !q.options.DisableMetrics {
-			label := "success"
+			label := metric.OutcomeSuccess
 			if err != nil {
-				label = "failed"
+				label = metric.OutcomeFailed
 				if errors.Is(err, ErrLeaseLost) {
-					label = "lease_lost"
+					label = metric.OutcomeLeaseLost
 				}
 			}
-			metric.DeliveryOperations.WithLabelValues("ack", label).Inc()
+			metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationAck, label).Inc()
 		}
 	}
 	return results
@@ -388,7 +405,7 @@ func (q *Queue) BatchAckDeliveries(ctx context.Context, topic Topic, subscriber 
 
 func (q *Queue) BatchNackDeliveries(ctx context.Context, topic Topic, subscriber string, requests []BatchNackItem) []DeliveryResult {
 	started := time.Now()
-	defer q.observeDeliveryDuration("batch_nack", started)
+	defer q.observeDeliveryDuration(metric.DeliveryOperationBatchNack, started)
 	results := make([]DeliveryResult, len(requests))
 	terminal := make([]bool, len(requests))
 	itemErrors := make([]error, len(requests))
@@ -408,28 +425,28 @@ func (q *Queue) BatchNackDeliveries(ctx context.Context, topic Topic, subscriber
 	}
 	for index, item := range requests {
 		err := itemErrors[index]
-		status := "pending"
+		status := DeliveryStatusPending
 		if terminal[index] {
-			status = "dead_letter"
+			status = DeliveryStatusDeadLetter
 		}
 		result := DeliveryResult{MessageID: item.MessageID, Status: status}
 		if err != nil {
-			result.Status = "failed"
+			result.Status = DeliveryResultStatusFailed
 			result.Error = publicDeliveryError(err)
 		}
 		results[index] = result
 		if !q.options.DisableMetrics {
-			label := "success"
+			label := metric.OutcomeSuccess
 			if terminal[index] {
-				label = "dead_letter"
+				label = metric.OutcomeDeadLetter
 			}
 			if err != nil {
-				label = "failed"
+				label = metric.OutcomeFailed
 				if errors.Is(err, ErrLeaseLost) {
-					label = "lease_lost"
+					label = metric.OutcomeLeaseLost
 				}
 			}
-			metric.DeliveryOperations.WithLabelValues("nack", label).Inc()
+			metric.DeliveryOperations.WithLabelValues(metric.DeliveryOperationNack, label).Inc()
 		}
 	}
 	if targetErr == nil {
@@ -506,8 +523,8 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 	if limit <= 0 {
 		limit = 100
 	}
-	if limit > 1000 {
-		limit = 1000
+	if limit > maxDeliveryPageSize {
+		limit = maxDeliveryPageSize
 	}
 	rows, err := q.db.listDeliveries(ctx, subscriberRuntime.id, deadLetter, limit+1, cursor)
 	if err != nil {
@@ -540,17 +557,17 @@ func (q *Queue) ReplayDeadLetters(ctx context.Context, topic Topic, subscriber s
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	results := make([]DeliveryResult, 0, len(messageIDs))
 	for _, messageID := range messageIDs {
-		result := DeliveryResult{MessageID: messageID, Status: "pending"}
+		result := DeliveryResult{MessageID: messageID, Status: DeliveryStatusPending}
 		if err != nil {
-			result.Status = "failed"
+			result.Status = DeliveryResultStatusFailed
 			result.Error = publicDeliveryError(err)
 		} else if _, parseErr := uuid.Parse(messageID); parseErr != nil {
-			result.Status = "failed"
+			result.Status = DeliveryResultStatusFailed
 			result.Error = ErrDeliveryNotFound.Error()
 		} else {
 			updated, replayErr := q.db.replayDeadLetter(ctx, subscriberRuntime.id, messageID)
 			if replayErr != nil || !updated {
-				result.Status = "failed"
+				result.Status = DeliveryResultStatusFailed
 				if replayErr != nil {
 					result.Error = "replay failed"
 				} else {
@@ -602,19 +619,6 @@ func publicDeliveryError(err error) string {
 
 func encodeDeliveryCursor(createdAt time.Time, messageID string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(createdAt.UTC().Format(time.RFC3339Nano) + "|" + messageID))
-}
-
-func decodeDeliveryCursor(cursor string) (time.Time, string, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(cursor)
-	if err != nil {
-		return time.Time{}, "", err
-	}
-	parts := strings.SplitN(string(raw), "|", 2)
-	if len(parts) != 2 {
-		return time.Time{}, "", errors.New("malformed cursor")
-	}
-	createdAt, err := time.Parse(time.RFC3339Nano, parts[0])
-	return createdAt, parts[1], err
 }
 
 func optionalTime(value sql.NullTime) *time.Time {

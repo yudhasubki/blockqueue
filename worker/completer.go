@@ -166,7 +166,7 @@ func (worker *Worker) batchContext(parent context.Context, requests []completion
 
 func (worker *Worker) finishBatch(requests []completionRequest, results []blockqueue.DeliveryResult) {
 	for index, request := range requests {
-		if index < len(results) && results[index].Status != "failed" {
+		if index < len(results) && results[index].Status != blockqueue.DeliveryResultStatusFailed {
 			request.result <- nil
 			continue
 		}
@@ -189,7 +189,7 @@ func (worker *Worker) completeIndividually(
 	failure error,
 ) error {
 	if kind == completionAck {
-		return worker.retryOperation(ctx, "ack", func(operationContext context.Context) error {
+		return worker.retryOperation(ctx, completionOperationAck, func(operationContext context.Context) error {
 			return worker.client.AckDelivery(
 				operationContext, worker.topic, worker.subscriber, job.ID, job.ReceiptToken,
 			)
@@ -200,7 +200,7 @@ func (worker *Worker) completeIndividually(
 		errorText = failure.Error()
 	}
 	errorText = boundedDeliveryText(errorText)
-	return worker.retryOperation(ctx, "nack", func(operationContext context.Context) error {
+	return worker.retryOperation(ctx, completionOperationNack, func(operationContext context.Context) error {
 		return worker.client.NackDelivery(
 			operationContext, worker.topic, worker.subscriber,
 			job.ID, job.ReceiptToken, retryDelay, errorText,

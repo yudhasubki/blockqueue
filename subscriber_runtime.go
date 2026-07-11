@@ -8,10 +8,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 )
 
 var (
-	ErrSubscriberNotFound = errors.New("subscriber not found")
+	ErrSubscriberNotFound = persistence.ErrSubscriberNotFound
 	ErrSubscriberDeleted  = errors.New("subscriber was deleted")
 )
 

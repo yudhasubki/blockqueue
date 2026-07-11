@@ -1,15 +1,12 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/store"
 )
-
-var ErrUnsupportedDialect = errors.New("unsupported database dialect")
 
 // sqlDialect owns the small set of SQL and concurrency differences that are
 // genuinely backend-specific. Durable queue transactions remain in db so
@@ -34,7 +31,7 @@ type sqlDialect interface {
 type sqliteDialect struct{}
 
 func (sqliteDialect) kind() store.Dialect        { return store.DialectSQLite }
-func (sqliteDialect) migrationDirectory() string { return "sqlite" }
+func (sqliteDialect) migrationDirectory() string { return migrationBackendSQLite }
 func (sqliteDialect) boolLiteral(value bool) string {
 	if value {
 		return "1"
@@ -56,7 +53,7 @@ func (sqliteDialect) lockMigrations(context.Context, *sqlx.Tx) error { return ni
 type postgresDialect struct{}
 
 func (postgresDialect) kind() store.Dialect        { return store.DialectPostgres }
-func (postgresDialect) migrationDirectory() string { return "pgsql" }
+func (postgresDialect) migrationDirectory() string { return migrationBackendPostgres }
 func (postgresDialect) boolLiteral(value bool) string {
 	if value {
 		return "TRUE"

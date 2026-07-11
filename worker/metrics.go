@@ -38,20 +38,44 @@ func newWorkerMetrics(options Options, topic, subscriber string) (workerMetrics,
 	return workerMetrics{
 		active: metric.WorkerActiveHandlers.WithLabelValues(labels...),
 
-		processed:        metric.WorkerJobs.WithLabelValues(topic, subscriber, "processed"),
-		nacked:           metric.WorkerJobs.WithLabelValues(topic, subscriber, "nacked"),
-		cancelled:        metric.WorkerJobs.WithLabelValues(topic, subscriber, "cancelled"),
-		leaseLost:        metric.WorkerJobs.WithLabelValues(topic, subscriber, "lease_lost"),
-		completionFailed: metric.WorkerJobs.WithLabelValues(topic, subscriber, "completion_failed"),
+		processed: metric.WorkerJobs.WithLabelValues(
+			topic, subscriber, metric.WorkerOutcomeProcessed,
+		),
+		nacked: metric.WorkerJobs.WithLabelValues(
+			topic, subscriber, metric.WorkerOutcomeNacked,
+		),
+		cancelled: metric.WorkerJobs.WithLabelValues(
+			topic, subscriber, metric.WorkerOutcomeCancelled,
+		),
+		leaseLost: metric.WorkerJobs.WithLabelValues(
+			topic, subscriber, metric.WorkerOutcomeLeaseLost,
+		),
+		completionFailed: metric.WorkerJobs.WithLabelValues(
+			topic, subscriber, metric.WorkerOutcomeCompletionFailed,
+		),
 
-		handlerOK:              metric.WorkerHandlerDuration.WithLabelValues(topic, subscriber, "ok"),
-		handlerError:           metric.WorkerHandlerDuration.WithLabelValues(topic, subscriber, "error"),
-		handlerCancelRequested: metric.WorkerHandlerDuration.WithLabelValues(topic, subscriber, "cancel_requested"),
-		handlerPanic:           metric.WorkerHandlerDuration.WithLabelValues(topic, subscriber, "panic"),
+		handlerOK: metric.WorkerHandlerDuration.WithLabelValues(
+			topic, subscriber, metric.WorkerHandlerResultOK,
+		),
+		handlerError: metric.WorkerHandlerDuration.WithLabelValues(
+			topic, subscriber, metric.WorkerHandlerResultError,
+		),
+		handlerCancelRequested: metric.WorkerHandlerDuration.WithLabelValues(
+			topic, subscriber, metric.WorkerHandlerResultCancelRequested,
+		),
+		handlerPanic: metric.WorkerHandlerDuration.WithLabelValues(
+			topic, subscriber, metric.WorkerHandlerResultPanic,
+		),
 
-		heartbeatSuccess:   metric.WorkerHeartbeats.WithLabelValues(topic, subscriber, "success"),
-		heartbeatFailed:    metric.WorkerHeartbeats.WithLabelValues(topic, subscriber, "failed"),
-		heartbeatLeaseLost: metric.WorkerHeartbeats.WithLabelValues(topic, subscriber, "lease_lost"),
+		heartbeatSuccess: metric.WorkerHeartbeats.WithLabelValues(
+			topic, subscriber, metric.OutcomeSuccess,
+		),
+		heartbeatFailed: metric.WorkerHeartbeats.WithLabelValues(
+			topic, subscriber, metric.OutcomeFailed,
+		),
+		heartbeatLeaseLost: metric.WorkerHeartbeats.WithLabelValues(
+			topic, subscriber, metric.OutcomeLeaseLost,
+		),
 	}, nil
 }
 
@@ -68,11 +92,11 @@ func (metrics workerMetrics) handlerFinished(result string, started time.Time) {
 	metrics.active.Dec()
 	duration := time.Since(started).Seconds()
 	switch result {
-	case "ok":
+	case metric.WorkerHandlerResultOK:
 		metrics.handlerOK.Observe(duration)
-	case "cancel_requested":
+	case metric.WorkerHandlerResultCancelRequested:
 		metrics.handlerCancelRequested.Observe(duration)
-	case "panic":
+	case metric.WorkerHandlerResultPanic:
 		metrics.handlerPanic.Observe(duration)
 	default:
 		metrics.handlerError.Observe(duration)
@@ -110,9 +134,9 @@ func (metrics workerMetrics) heartbeat(result string) {
 		return
 	}
 	switch result {
-	case "success":
+	case metric.OutcomeSuccess:
 		metrics.heartbeatSuccess.Inc()
-	case "lease_lost":
+	case metric.OutcomeLeaseLost:
 		metrics.heartbeatLeaseLost.Inc()
 	default:
 		metrics.heartbeatFailed.Inc()

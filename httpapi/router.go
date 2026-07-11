@@ -91,7 +91,7 @@ func principalMiddleware(resolve PrincipalResolver) func(http.Handler) http.Hand
 			principal, err := resolve(request)
 			principal = strings.TrimSpace(principal)
 			if err != nil || principal == "" {
-				writeProblem(w, request, http.StatusUnauthorized, "unauthorized", "authentication failed")
+				writeProblem(w, request, http.StatusUnauthorized, problemCodeUnauthorized, "authentication failed")
 				return
 			}
 			ctx := context.WithValue(request.Context(), principalContextKey{}, principal)
@@ -103,32 +103,32 @@ func principalMiddleware(resolve PrincipalResolver) func(http.Handler) http.Hand
 func queueErrorMapper(queue *blockqueue.Queue) ErrorMapper {
 	return func(err error) (int, string, string) {
 		status := http.StatusInternalServerError
-		code := "internal_error"
+		code := problemCodeInternal
 		message := "internal server error"
 		switch {
 		case errors.Is(err, blockqueue.ErrInvalidPublish), errors.Is(err, blockqueue.ErrInvalidReceipt),
 			errors.Is(err, blockqueue.ErrInvalidTopic), errors.Is(err, blockqueue.ErrInvalidSubscriber):
-			status, code, message = http.StatusBadRequest, "validation_error", err.Error()
+			status, code, message = http.StatusBadRequest, problemCodeValidation, err.Error()
 		case errors.Is(err, blockqueue.ErrTopicNotFound), errors.Is(err, blockqueue.ErrSubscriberNotFound),
 			errors.Is(err, blockqueue.ErrSubscriberDeleted), errors.Is(err, blockqueue.ErrDeliveryNotFound),
 			errors.Is(err, blockqueue.ErrScheduleNotFound):
-			status, code, message = http.StatusNotFound, "resource_not_found", err.Error()
+			status, code, message = http.StatusNotFound, problemCodeResourceNotFound, err.Error()
 		case errors.Is(err, blockqueue.ErrLeaseLost), errors.Is(err, blockqueue.ErrIdempotencyConflict),
 			errors.Is(err, blockqueue.ErrNoActiveSubscriber), errors.Is(err, blockqueue.ErrScheduleVersion),
 			errors.Is(err, blockqueue.ErrScheduleOverlap), errors.Is(err, blockqueue.ErrResourcePaused),
 			errors.Is(err, blockqueue.ErrScheduleLeaseLost), errors.Is(err, blockqueue.ErrResourceConflict),
 			errors.Is(err, blockqueue.ErrDeliveryTerminal):
-			status, code, message = http.StatusConflict, "conflict", err.Error()
+			status, code, message = http.StatusConflict, problemCodeConflict, err.Error()
 		case errors.Is(err, blockqueue.ErrPendingBudgetExceeded):
-			status, code, message = http.StatusTooManyRequests, "buffer_pressure", err.Error()
+			status, code, message = http.StatusTooManyRequests, problemCodeBufferPressure, err.Error()
 			if !queue.WriterHealthy() {
 				status = http.StatusServiceUnavailable
-				code = "writer_unhealthy"
+				code = problemCodeWriterUnhealthy
 			}
 		case errors.Is(err, blockqueue.ErrQueueNotRunning), errors.Is(err, blockqueue.ErrQueueStopping),
 			errors.Is(err, blockqueue.ErrWriterClosed), errors.Is(err, blockqueue.ErrWriterDrainTimeout),
 			errors.Is(err, blockqueue.ErrCommitUnknown):
-			status, code, message = http.StatusServiceUnavailable, "service_unavailable", err.Error()
+			status, code, message = http.StatusServiceUnavailable, problemCodeServiceUnavailable, err.Error()
 		}
 		return status, code, message
 	}

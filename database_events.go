@@ -44,14 +44,14 @@ func (q *Queue) startDatabaseEvents() {
 				continue
 			}
 			switch {
-			case event == "topology":
+			case event == databaseEventTopology:
 				if err := q.reloadRuntime(q.serverCtx); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Warn("topology notification reload failed", "error", err)
 				}
-			case event == "scheduler":
+			case event == databaseEventScheduler:
 				q.signalScheduler()
-			case strings.HasPrefix(event, "delivery:"):
-				if topicID, err := uuid.Parse(strings.TrimPrefix(event, "delivery:")); err == nil {
+			case strings.HasPrefix(event, databaseEventDeliveryPrefix):
+				if topicID, err := uuid.Parse(strings.TrimPrefix(event, databaseEventDeliveryPrefix)); err == nil {
 					q.notify(topicID)
 				}
 			}

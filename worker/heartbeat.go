@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
 )
 
 func (worker *Worker) heartbeat(
@@ -23,7 +24,7 @@ func (worker *Worker) heartbeat(
 		remaining := time.Until(leaseDeadline)
 		if remaining <= 0 {
 			if !job.Completed() {
-				worker.metrics.heartbeat("lease_lost")
+				worker.metrics.heartbeat(metric.OutcomeLeaseLost)
 				cancel(blockqueue.ErrLeaseLost)
 			}
 			return
@@ -72,7 +73,7 @@ func (worker *Worker) heartbeat(
 			return
 		}
 		if err == nil {
-			worker.metrics.heartbeat("success")
+			worker.metrics.heartbeat(metric.OutcomeSuccess)
 			// The database applies leaseDuration from its own current time. Using
 			// request start is a conservative local deadline that avoids relying
 			// on application/database wall clocks being identical.
@@ -81,9 +82,9 @@ func (worker *Worker) heartbeat(
 			continue
 		}
 		if terminalHeartbeatError(err) || time.Now().After(leaseDeadline) {
-			result := "failed"
+			result := metric.OutcomeFailed
 			if errors.Is(err, blockqueue.ErrLeaseLost) || time.Now().After(leaseDeadline) {
-				result = "lease_lost"
+				result = metric.OutcomeLeaseLost
 			}
 			worker.metrics.heartbeat(result)
 			cancel(err)
@@ -91,14 +92,14 @@ func (worker *Worker) heartbeat(
 		}
 		worker.options.Logger.Warn("blockqueue worker heartbeat failed",
 			"message_id", job.ID, "error", err)
-		worker.metrics.heartbeat("failed")
+		worker.metrics.heartbeat(metric.OutcomeFailed)
 		remaining = time.Until(leaseDeadline)
 		next = 100 * time.Millisecond
 		if candidate := remaining / 3; candidate < next {
 			next = candidate
 		}
 		if next <= 0 {
-			worker.metrics.heartbeat("lease_lost")
+			worker.metrics.heartbeat(metric.OutcomeLeaseLost)
 			cancel(blockqueue.ErrLeaseLost)
 			return
 		}

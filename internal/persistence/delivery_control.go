@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
@@ -88,7 +88,7 @@ func (d *db) cancelDeliveryWithTx(
 		}
 		updated, _ := result.RowsAffected()
 		if updated > 0 {
-			status = "cancelled"
+			status = DeliveryStatusCancelled
 			return d.completeScheduleRunsTx(ctx, tx, messageID)
 		}
 		if err := tx.GetContext(ctx, &status, d.Conn().Rebind(
@@ -98,7 +98,7 @@ func (d *db) cancelDeliveryWithTx(
 		} else if err != nil {
 			return err
 		}
-		if status == "cancelled" {
+		if status == DeliveryStatusCancelled {
 			return nil
 		}
 		return fmt.Errorf("%w: delivery is %s", ErrDeliveryTerminal, status)
@@ -144,7 +144,7 @@ func (d *db) cancelClaimedDeliveryWithTx(
 		} else if err != nil {
 			return err
 		}
-		if row.Status == "cancelled" && row.ReceiptToken.Valid && row.ReceiptToken.String == receipt {
+		if row.Status == DeliveryStatusCancelled && row.ReceiptToken.Valid && row.ReceiptToken.String == receipt {
 			return nil
 		}
 		return ErrLeaseLost

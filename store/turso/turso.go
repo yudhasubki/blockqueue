@@ -9,10 +9,12 @@ import (
 	"github.com/yudhasubki/blockqueue/store"
 )
 
+const driverName = "libsql"
+
 type Driver struct{ db *sqlx.DB }
 
 func Open(databaseURL string) (*Driver, error) {
-	db, err := sqlx.Open("libsql", databaseURL)
+	db, err := sqlx.Open(driverName, databaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -25,5 +27,5 @@ func Open(databaseURL string) (*Driver, error) {
 
 func (driver *Driver) DB() *sql.DB            { return driver.db.DB }
 func (driver *Driver) Dialect() store.Dialect { return store.DialectSQLite }
-func (driver *Driver) DriverName() string     { return "libsql" }
+func (driver *Driver) DriverName() string     { return driverName }
 func (driver *Driver) Close() error           { return driver.db.Close() }

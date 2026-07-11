@@ -16,14 +16,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mattn/go-sqlite3"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
 )
 
 var (
-	ErrWriterClosed          = errors.New("writer closed")
+	ErrWriterClosed          = persistence.ErrWriterClosed
 	ErrPendingBudgetExceeded = errors.New("pending write budget exceeded")
 	ErrWriterDrainTimeout    = errors.New("writer shutdown with unpersisted messages")
-	ErrIdempotencyConflict   = errors.New("idempotency key conflicts with a different message")
+	ErrIdempotencyConflict   = persistence.ErrIdempotencyConflict
 	ErrCommitUnknown         = errors.New("publish commit outcome unknown")
 )
 
@@ -48,22 +49,31 @@ func (err *CommitUnknownError) Is(target error) bool {
 const (
 	defaultMaxPendingMessages int64 = 100_000
 	defaultMaxPendingBytes    int64 = 256 << 20
+
+	postgresClassConnectionException  = "08"
+	postgresClassTransactionRollback  = "40"
+	postgresClassInsufficientResource = "53"
+	postgresClassSystemError          = "58"
+	postgresLockNotAvailable          = "55P03"
+	postgresAdminShutdown             = "57P01"
+	postgresCrashShutdown             = "57P02"
+	postgresCannotConnectNow          = "57P03"
 )
 
-// writeRequest is the canonical message admitted to the in-memory writer.
-type writeRequest struct {
-	TopicID        uuid.UUID
-	MessageID      string
-	Message        string
-	Headers        []byte
-	CorrelationID  string
-	IdempotencyKey string
-	Priority       int
-	VisibleAt      time.Time
-	CreatedAt      time.Time
+var transientWriteErrorFragments = []string{
+	"database is locked",
+	"database table is locked",
+	"connection reset",
+	"broken pipe",
+	"connection refused",
+	"server closed",
 }
 
-func (r writeRequest) weight() int64 {
+// writeRequest is the canonical message admitted to the in-memory writer.
+// Its storage representation lives with the persistence implementation.
+type writeRequest = persistence.WriteRequest
+
+func writeRequestWeight(r writeRequest) int64 {
 	return int64(len(r.Message) + len(r.Headers) + len(r.CorrelationID) + len(r.IdempotencyKey) + len(r.MessageID) + 128)
 }
 
@@ -254,7 +264,7 @@ func (w *writer) admitOwned(ctx context.Context, owned []writeRequest, durable b
 		if owned[i].CreatedAt.IsZero() {
 			owned[i].CreatedAt = now
 		}
-		bytes += owned[i].weight()
+		bytes += writeRequestWeight(owned[i])
 	}
 	if err := w.reserve(int64(len(owned)), bytes); err != nil {
 		return nil, err
@@ -279,7 +289,7 @@ func (w *writer) admitOwned(ctx context.Context, owned []writeRequest, durable b
 	case w.queue <- admission:
 		w.admissionMu.RUnlock()
 		if !w.db.disableMetrics {
-			metric.PublishResults.WithLabelValues("admitted").Add(float64(len(owned)))
+			metric.PublishResults.WithLabelValues(metric.PublishResultAdmitted).Add(float64(len(owned)))
 		}
 	case <-ctx.Done():
 		w.admissionMu.RUnlock()
@@ -584,7 +594,7 @@ func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool)
 
 		w.setHealth(false, err)
 		if !w.db.disableMetrics {
-			metric.FlushTotal.WithLabelValues("retry").Inc()
+			metric.FlushTotal.WithLabelValues(metric.OutcomeRetry).Inc()
 		}
 		slog.Error("writer flush failed; retaining batch for retry",
 			"error", err,
@@ -641,18 +651,18 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, duplicates []b
 	}
 
 	if !w.db.disableMetrics {
-		result := "success"
+		result := metric.OutcomeSuccess
 		if outcomeErr != nil {
-			result = "failed"
+			result = metric.OutcomeFailed
 		}
 		metric.FlushTotal.WithLabelValues(result).Inc()
 		metric.FlushSize.Observe(float64(requestCount))
 		metric.FlushDuration.Observe(time.Since(started).Seconds())
 		if outcomeErr == nil {
-			metric.PublishResults.WithLabelValues("persisted").Add(float64(requestCount))
-			metric.PublishResults.WithLabelValues("duplicate").Add(float64(duplicateCount))
+			metric.PublishResults.WithLabelValues(metric.PublishResultPersisted).Add(float64(requestCount))
+			metric.PublishResults.WithLabelValues(metric.PublishResultDuplicate).Add(float64(duplicateCount))
 		} else {
-			metric.PublishResults.WithLabelValues("failed").Add(float64(requestCount))
+			metric.PublishResults.WithLabelValues(metric.OutcomeFailed).Add(float64(requestCount))
 		}
 	}
 
@@ -728,9 +738,12 @@ func isTransientWriteError(err error) bool {
 	var postgresError *pgconn.PgError
 	if errors.As(err, &postgresError) {
 		code := postgresError.Code
-		return strings.HasPrefix(code, "08") || strings.HasPrefix(code, "40") ||
-			strings.HasPrefix(code, "53") || code == "55P03" || code == "57P01" ||
-			code == "57P02" || code == "57P03" || strings.HasPrefix(code, "58")
+		return strings.HasPrefix(code, postgresClassConnectionException) ||
+			strings.HasPrefix(code, postgresClassTransactionRollback) ||
+			strings.HasPrefix(code, postgresClassInsufficientResource) ||
+			code == postgresLockNotAvailable || code == postgresAdminShutdown ||
+			code == postgresCrashShutdown || code == postgresCannotConnectNow ||
+			strings.HasPrefix(code, postgresClassSystemError)
 	}
 	var sqliteError sqlite3.Error
 	if errors.As(err, &sqliteError) {
@@ -742,10 +755,7 @@ func isTransientWriteError(err error) bool {
 		}
 	}
 	lower := strings.ToLower(err.Error())
-	for _, fragment := range []string{
-		"database is locked", "database table is locked", "connection reset",
-		"broken pipe", "connection refused", "server closed",
-	} {
+	for _, fragment := range transientWriteErrorFragments {
 		if strings.Contains(lower, fragment) {
 			return true
 		}

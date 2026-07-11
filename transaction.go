@@ -102,7 +102,7 @@ func (q *Queue) BatchPublishTx(ctx context.Context, tx *sql.Tx, topic Topic, req
 		}
 		writes[index] = write
 		receipts[index] = PublishReceipt{
-			MessageID: write.MessageID, State: "staged", ScheduledAt: scheduledAt,
+			MessageID: write.MessageID, State: PublishStateStaged, ScheduledAt: scheduledAt,
 		}
 	}
 

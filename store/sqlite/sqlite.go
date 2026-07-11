@@ -11,7 +11,11 @@ import (
 	"github.com/yudhasubki/blockqueue/store"
 )
 
-const driverName = "blockqueue_sqlite3"
+const (
+	driverName          = "blockqueue_sqlite3"
+	synchronousStrict   = "full"
+	synchronousBalanced = "normal"
+)
 
 func init() {
 	sql.Register(driverName, &sqlite3.SQLiteDriver{ConnectHook: func(conn *sqlite3.SQLiteConn) error {
@@ -45,11 +49,11 @@ func Open(path string, config Config) (*Driver, error) {
 	if busyTimeout <= 0 {
 		busyTimeout = 5000
 	}
-	synchronous := "full"
+	synchronous := synchronousStrict
 	switch config.Durability {
 	case "", store.DurabilityStrict:
 	case store.DurabilityBalanced:
-		synchronous = "normal"
+		synchronous = synchronousBalanced
 	default:
 		return nil, fmt.Errorf("unsupported sqlite durability mode %q", config.Durability)
 	}

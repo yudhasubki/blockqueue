@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
@@ -11,14 +11,14 @@ import (
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
 
-func TestDBControlTopicLifecycle(t *testing.T) {
+func TestTopologyTopicLifecycle(t *testing.T) {
 	ctx := context.Background()
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "control.db"), sqlite.Config{})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, driver.Close()) })
 	require.NoError(t, Migrate(ctx, driver))
 
 	database := newDb(driver)
+	t.Cleanup(func() { require.NoError(t, database.close()) })
 	topicID := uuid.New()
 	subscriberID := uuid.New()
 	topic := Topic{ID: topicID, Name: "control-topic", Paused: true}
@@ -34,7 +34,7 @@ func TestDBControlTopicLifecycle(t *testing.T) {
 		Topic      bool `db:"topic_paused"`
 		Subscriber bool `db:"subscriber_paused"`
 	}
-	require.NoError(t, testDB(driver).Get(&storedPause, `
+	require.NoError(t, database.Conn().Get(&storedPause, `
 		SELECT topics.paused AS topic_paused, subscribers.paused AS subscriber_paused
 		FROM topics JOIN topic_subscribers subscribers ON subscribers.topic_id = topics.id
 		WHERE topics.id = ?`, topicID))
@@ -45,7 +45,7 @@ func TestDBControlTopicLifecycle(t *testing.T) {
 	scheduleID := uuid.NewString()
 	runID := uuid.NewString()
 	now := time.Now().UTC()
-	_, err = testDB(driver).ExecContext(ctx, `
+	_, err = database.Conn().ExecContext(ctx, `
 		INSERT INTO messages (id, topic_id, message, scheduled_at) VALUES (?, ?, 'payload', ?);
 		INSERT INTO message_deliveries (message_id, subscriber_id, visible_at) VALUES (?, ?, ?);
 		INSERT INTO schedules (id, topic_id, name, cron_expression, message, next_run_at) VALUES (?, ?, 'daily', '0 0 * * *', 'payload', ?);
@@ -59,12 +59,12 @@ func TestDBControlTopicLifecycle(t *testing.T) {
 	require.NoError(t, database.deleteTopic(ctx, topicID))
 
 	var activeTopics int
-	require.NoError(t, testDB(driver).GetContext(ctx, &activeTopics,
+	require.NoError(t, database.Conn().GetContext(ctx, &activeTopics,
 		"SELECT COUNT(*) FROM topics WHERE id = ? AND deleted_at IS NULL", topicID))
 	require.Zero(t, activeTopics)
 
 	var activeSubscribers int
-	require.NoError(t, testDB(driver).GetContext(ctx, &activeSubscribers,
+	require.NoError(t, database.Conn().GetContext(ctx, &activeSubscribers,
 		"SELECT COUNT(*) FROM topic_subscribers WHERE topic_id = ? AND deleted_at IS NULL", topicID))
 	require.Zero(t, activeSubscribers)
 
@@ -75,25 +75,19 @@ func TestDBControlTopicLifecycle(t *testing.T) {
 		"schedules",
 	} {
 		var count int
-		require.NoError(t, testDB(driver).GetContext(ctx, &count, "SELECT COUNT(*) FROM "+table))
+		require.NoError(t, database.Conn().GetContext(ctx, &count, "SELECT COUNT(*) FROM "+table))
 		require.Zero(t, count, table)
 	}
 }
 
-func TestSQLiteCheckpointRejectsUnknownMode(t *testing.T) {
-	database := &db{}
-	_, err := database.checkpointSQLite(context.Background(), sqliteCheckpointMode("INVALID"))
-	require.ErrorContains(t, err, "unsupported SQLite checkpoint mode")
-}
-
-func TestDBControlDeleteSubscriber(t *testing.T) {
+func TestTopologyDeleteSubscriber(t *testing.T) {
 	ctx := context.Background()
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "subscriber-control.db"), sqlite.Config{})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, driver.Close()) })
 	require.NoError(t, Migrate(ctx, driver))
 
 	database := newDb(driver)
+	t.Cleanup(func() { require.NoError(t, database.close()) })
 	topicID := uuid.New()
 	subscriberID := uuid.New()
 	subscriberName := "removed-subscriber"
@@ -107,7 +101,7 @@ func TestDBControlDeleteSubscriber(t *testing.T) {
 
 	messageID := uuid.NewString()
 	now := time.Now().UTC()
-	_, err = testDB(driver).ExecContext(ctx, `
+	_, err = database.Conn().ExecContext(ctx, `
 		INSERT INTO messages (id, topic_id, message, scheduled_at) VALUES (?, ?, 'payload', ?);
 		INSERT INTO message_deliveries (message_id, subscriber_id, visible_at) VALUES (?, ?, ?)
 	`, messageID, topicID, now, messageID, subscriberID, now)
@@ -117,17 +111,17 @@ func TestDBControlDeleteSubscriber(t *testing.T) {
 	require.ErrorIs(t, database.deleteSubscriber(ctx, topicID, subscriberID, subscriberName), ErrSubscriberNotFound)
 
 	var activeSubscribers int
-	require.NoError(t, testDB(driver).GetContext(ctx, &activeSubscribers,
+	require.NoError(t, database.Conn().GetContext(ctx, &activeSubscribers,
 		"SELECT COUNT(*) FROM topic_subscribers WHERE id = ? AND deleted_at IS NULL", subscriberID))
 	require.Zero(t, activeSubscribers)
 
 	for _, table := range []string{"message_deliveries"} {
 		var count int
-		require.NoError(t, testDB(driver).GetContext(ctx, &count, "SELECT COUNT(*) FROM "+table))
+		require.NoError(t, database.Conn().GetContext(ctx, &count, "SELECT COUNT(*) FROM "+table))
 		require.Zero(t, count, table)
 	}
 
 	var canonicalMessages int
-	require.NoError(t, testDB(driver).GetContext(ctx, &canonicalMessages, "SELECT COUNT(*) FROM messages WHERE id = ?", messageID))
+	require.NoError(t, database.Conn().GetContext(ctx, &canonicalMessages, "SELECT COUNT(*) FROM messages WHERE id = ?", messageID))
 	require.Equal(t, 1, canonicalMessages, "subscriber deletion must not remove the canonical message")
 }

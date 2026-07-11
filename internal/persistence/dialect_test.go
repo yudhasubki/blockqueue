@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"testing"

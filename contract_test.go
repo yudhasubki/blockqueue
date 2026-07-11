@@ -58,6 +58,7 @@ func TestStorageContract(t *testing.T) {
 }
 
 func runStorageContract(t *testing.T, driver store.Driver) {
+	database := testDB(driver)
 	queue := New(driver, Options{
 		Writer: WriterOptions{BatchSize: 20, FlushInterval: time.Millisecond},
 	})
@@ -285,11 +286,11 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.NoError(t, queue.NackDelivery(context.Background(), retentionTopic, retentionSubscriber.Name,
 		retentionClaim[0].ID, retentionClaim[0].ReceiptToken, time.Hour, "retained until delivery removal"))
 	var retainedErrors int
-	require.NoError(t, queue.db.Conn().Get(&retainedErrors, queue.db.Conn().Rebind(
+	require.NoError(t, database.Get(&retainedErrors, database.Rebind(
 		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
 	require.Equal(t, 1, retainedErrors)
 	require.NoError(t, queue.DeleteSubscriber(context.Background(), retentionTopic, retentionSubscriber.Name))
-	require.NoError(t, queue.db.Conn().Get(&retainedErrors, queue.db.Conn().Rebind(
+	require.NoError(t, database.Get(&retainedErrors, database.Rebind(
 		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
 	require.Zero(t, retainedErrors, "failure history retention must follow its delivery row")
 
@@ -447,55 +448,6 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		return historyErr == nil && len(history.Runs) == 1 && history.Runs[0].Status == "completed"
 	}, 3*time.Second, 20*time.Millisecond, "lease-expiry DLQ must complete only its related schedule run")
 
-	retentionCutoff := time.Now().UTC().Add(-31 * 24 * time.Hour)
-	_, err = queue.db.Conn().ExecContext(context.Background(), queue.db.Conn().Rebind(
-		"UPDATE schedule_runs SET created_at = ?, finished_at = ? WHERE id = ?"),
-		retentionCutoff, retentionCutoff, run.ID)
-	require.NoError(t, err)
-	runningRunID := uuid.NewString()
-	_, err = queue.db.Conn().ExecContext(context.Background(), queue.db.Conn().Rebind(`
-		INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status, created_at)
-		VALUES (?, ?, ?, 'running', ?)`),
-		runningRunID, schedule.ID, retentionCutoff.Add(-time.Hour), retentionCutoff)
-	require.NoError(t, err)
-	require.NoError(t, queue.db.pruneScheduleRuns(context.Background(), 30*24*time.Hour))
-	var completedRunRows, runningRunRows int
-	require.NoError(t, queue.db.Conn().Get(&completedRunRows, queue.db.Conn().Rebind(
-		"SELECT COUNT(*) FROM schedule_runs WHERE id = ?"), run.ID))
-	require.NoError(t, queue.db.Conn().Get(&runningRunRows, queue.db.Conn().Rebind(
-		"SELECT COUNT(*) FROM schedule_runs WHERE id = ?"), runningRunID))
-	require.Zero(t, completedRunRows)
-	require.Equal(t, 1, runningRunRows, "retention must never delete an active run")
-
-	// Retrying the exact generated message ID models a connection loss after
-	// COMMIT. The retry must succeed without another fanout, while a payload
-	// mismatch on the same ID remains a hard conflict.
-	ambiguousTopic, _ := createContractTopic(t, queue, "contract-ambiguous-commit", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
-	})
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	ambiguousRequest := writeRequest{
-		TopicID: ambiguousTopic.ID, MessageID: newMessageIDAt(now), Message: "commit-once",
-		Headers: []byte("{}"), VisibleAt: now, CreatedAt: now,
-	}
-	duplicates, err := queue.db.persistWriteRequests(context.Background(), []writeRequest{ambiguousRequest})
-	require.NoError(t, err)
-	require.Equal(t, []bool{false}, duplicates)
-	duplicates, err = queue.db.persistWriteRequests(context.Background(), []writeRequest{ambiguousRequest})
-	require.NoError(t, err)
-	require.Equal(t, []bool{true}, duplicates)
-	var canonicalRows, deliveryRows int
-	require.NoError(t, queue.db.Conn().Get(&canonicalRows,
-		queue.db.Conn().Rebind("SELECT COUNT(*) FROM messages WHERE id = ?"), ambiguousRequest.MessageID))
-	require.NoError(t, queue.db.Conn().Get(&deliveryRows,
-		queue.db.Conn().Rebind("SELECT COUNT(*) FROM message_deliveries WHERE message_id = ?"), ambiguousRequest.MessageID))
-	require.Equal(t, 1, canonicalRows)
-	require.Equal(t, 1, deliveryRows)
-	conflict := ambiguousRequest
-	conflict.Message = "different-payload"
-	_, err = queue.db.persistWriteRequests(context.Background(), []writeRequest{conflict})
-	require.ErrorIs(t, err, ErrIdempotencyConflict)
-
 	defaultTopic, defaultSubscriber := createContractTopic(t, queue, "contract-default-attempts", SubscriberOptions{
 		VisibilityDuration: "25ms", DequeueBatchSize: 1,
 	})
@@ -507,7 +459,7 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Len(t, defaultClaim, 1)
 	require.Eventually(t, func() bool {
 		var status string
-		statusErr := queue.db.Conn().Get(&status, queue.db.Conn().Rebind(
+		statusErr := database.Get(&status, database.Rebind(
 			"SELECT status FROM message_deliveries WHERE message_id = ? AND subscriber_id = ?"),
 			defaultReceipt.MessageID, defaultSubscriber.ID)
 		return statusErr == nil && status == "pending"

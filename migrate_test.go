@@ -9,7 +9,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/internal/testdb"
-	"github.com/yudhasubki/blockqueue/store"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
 
@@ -57,36 +56,6 @@ func TestStartupFailureClosesOwnedDriver(t *testing.T) {
 	require.Equal(t, LifecycleStopped, queue.State())
 	require.Error(t, driver.DB().Ping(), "failed startup must release the owned database")
 	require.NoError(t, queue.Shutdown(context.Background()), "shutdown after failed startup must be idempotent")
-}
-
-func TestMigrationStatementAndLedgerRollbackTogether(t *testing.T) {
-	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "rollback.db"), sqlite.Config{})
-	require.NoError(t, err)
-	defer func() { require.NoError(t, driver.Close()) }()
-	connection := newDb(driver).Conn()
-	require.NoError(t, ensureMigrationTable(context.Background(), connection, "sqlite"))
-
-	migration := embeddedMigration{
-		version: "9999999999_transaction_rollback",
-		path:    "test migration",
-		contents: `
-			CREATE TABLE migration_must_rollback (id INTEGER PRIMARY KEY);
-			INSERT INTO missing_table (id) VALUES (1);`,
-		checksum: "test-checksum",
-	}
-	dialect, err := newSQLDialect(store.DialectSQLite)
-	require.NoError(t, err)
-	err = applyMigrations(context.Background(), connection, dialect, []embeddedMigration{migration})
-	require.Error(t, err)
-
-	var exists int
-	require.NoError(t, connection.Get(&exists,
-		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?", "migration_must_rollback"))
-	require.Zero(t, exists)
-	var applied int
-	require.NoError(t, connection.Get(&applied,
-		"SELECT COUNT(*) FROM schema_migrations WHERE version = ?", migration.version))
-	require.Zero(t, applied)
 }
 
 func TestConcurrentSQLiteMigrationsAreSerialized(t *testing.T) {

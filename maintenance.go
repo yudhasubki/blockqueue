@@ -69,14 +69,14 @@ func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode)
 	}
 	if err != nil {
 		if !q.options.DisableMetrics {
-			metric.CheckpointResults.WithLabelValues("failed").Inc()
+			metric.CheckpointResults.WithLabelValues(metric.OutcomeFailed).Inc()
 		}
 		slog.Error("sqlite checkpoint failed", "error", err, "mode", mode)
 		return
 	}
-	label := "success"
+	label := metric.OutcomeSuccess
 	if result.Busy != 0 {
-		label = "busy"
+		label = metric.OutcomeBusy
 	}
 	if !q.options.DisableMetrics {
 		metric.CheckpointResults.WithLabelValues(label).Inc()

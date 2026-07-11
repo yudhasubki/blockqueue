@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
 )
 
 // Run claims and processes deliveries until ctx is canceled or a terminal
@@ -194,13 +195,13 @@ func (worker *Worker) process(parent context.Context, delivery blockqueue.Delive
 	handlerStarted := time.Now()
 	worker.metrics.handlerStarted()
 	handlerErr, panicked := safelyHandle(worker.handler, jobContext, job, worker.options.Logger)
-	handlerResult := "ok"
+	handlerResult := metric.WorkerHandlerResultOK
 	if panicked {
-		handlerResult = "panic"
+		handlerResult = metric.WorkerHandlerResultPanic
 	} else if _, cancelled := cancellationDetails(handlerErr); cancelled {
-		handlerResult = "cancel_requested"
+		handlerResult = metric.WorkerHandlerResultCancelRequested
 	} else if handlerErr != nil {
-		handlerResult = "error"
+		handlerResult = metric.WorkerHandlerResultError
 	}
 	worker.metrics.handlerFinished(handlerResult, handlerStarted)
 	if job.Completed() {
@@ -226,7 +227,7 @@ func (worker *Worker) process(parent context.Context, delivery blockqueue.Delive
 	var completionErr error
 	if cancellation, requested := cancellationDetails(handlerErr); requested {
 		completionErr = job.completeWith(jobOutcomeCancelled, func() error {
-			return worker.retryOperation(operationContext, "cancel", func(ctx context.Context) error {
+			return worker.retryOperation(operationContext, completionOperationCancel, func(ctx context.Context) error {
 				return worker.client.CancelClaimedDelivery(
 					ctx, worker.topic, worker.subscriber, job.ID, job.ReceiptToken,
 					boundedDeliveryText(cancellation.Error()),

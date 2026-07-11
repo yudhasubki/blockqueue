@@ -20,7 +20,7 @@ func parseCron(expression, timezone string) (cronExpression, error) {
 		return cronExpression{}, errors.New("cron must contain exactly five fields")
 	}
 	if timezone == "" {
-		timezone = "UTC"
+		timezone = time.UTC.String()
 	}
 	if _, err := time.LoadLocation(timezone); err != nil {
 		return cronExpression{}, fmt.Errorf("invalid IANA timezone %q: %w", timezone, err)

@@ -102,15 +102,15 @@ func (q *Queue) State() LifecycleState {
 func (s LifecycleState) String() string {
 	switch s {
 	case LifecycleNew:
-		return "new"
+		return lifecycleStateNameNew
 	case LifecycleRunning:
-		return "running"
+		return lifecycleStateNameRunning
 	case LifecycleStopping:
-		return "stopping"
+		return lifecycleStateNameStopping
 	case LifecycleStopped:
-		return "stopped"
+		return lifecycleStateNameStopped
 	default:
-		return "unknown"
+		return lifecycleStateNameUnknown
 	}
 }
 

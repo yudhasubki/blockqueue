@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"hash/fnv"
@@ -9,8 +9,6 @@ import (
 
 const leaseExpiredError = "delivery lease expired"
 
-// retryDelayFor applies deterministic jitter. The same failed delivery always
-// receives the same delay, while different message IDs avoid retry stampedes.
 func retryDelayFor(options subscriberOptions, failureCount int, messageID string) time.Duration {
 	if failureCount < 1 {
 		failureCount = 1
@@ -27,7 +25,7 @@ func retryDelayFor(options subscriberOptions, failureCount int, messageID string
 	_, _ = hash.Write([]byte(messageID))
 	_, _ = hash.Write([]byte{':'})
 	_, _ = hash.Write([]byte(strconv.Itoa(failureCount)))
-	unit := float64(hash.Sum64()%1_000_001) / 1_000_000 // [0, 1]
+	unit := float64(hash.Sum64()%1_000_001) / 1_000_000
 	factor := 1 + ((unit*2)-1)*options.RetryJitter
 	delay := time.Duration(base * factor)
 	if delay < 0 {

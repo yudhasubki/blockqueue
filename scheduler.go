@@ -12,18 +12,20 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 	"github.com/yudhasubki/blockqueue/pkg/metric"
 )
 
 const (
-	defaultScheduleLease = 30 * time.Second
+	defaultScheduleLease    = 30 * time.Second
+	defaultScheduleTimezone = "UTC"
 )
 
 var (
-	ErrScheduleNotFound  = errors.New("schedule not found")
-	ErrScheduleVersion   = errors.New("stale schedule version")
-	ErrScheduleOverlap   = errors.New("previous schedule run is still active")
-	ErrScheduleLeaseLost = errors.New("schedule lease lost")
+	ErrScheduleNotFound  = persistence.ErrScheduleNotFound
+	ErrScheduleVersion   = persistence.ErrScheduleVersion
+	ErrScheduleOverlap   = persistence.ErrScheduleOverlap
+	ErrScheduleLeaseLost = persistence.ErrScheduleLeaseLost
 )
 
 type Clock interface {
@@ -48,7 +50,7 @@ func validateScheduleInput(input ScheduleInput, now time.Time) (ScheduleInput, c
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: schedule name is required and must be <=150 bytes", ErrInvalidPublish)
 	}
 	if input.Timezone == "" {
-		input.Timezone = "UTC"
+		input.Timezone = defaultScheduleTimezone
 	}
 	parsed, err := parseCron(input.CronExpression, input.Timezone)
 	if err != nil {
@@ -61,15 +63,15 @@ func validateScheduleInput(input ScheduleInput, now time.Time) (ScheduleInput, c
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: correlation_id exceeds 255 bytes", ErrInvalidPublish)
 	}
 	if input.MisfirePolicy == "" {
-		input.MisfirePolicy = "fire_once"
+		input.MisfirePolicy = ScheduleMisfirePolicyFireOnce
 	}
-	if input.MisfirePolicy != "fire_once" {
+	if input.MisfirePolicy != ScheduleMisfirePolicyFireOnce {
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: unsupported misfire_policy", ErrInvalidPublish)
 	}
 	if input.OverlapPolicy == "" {
-		input.OverlapPolicy = "skip"
+		input.OverlapPolicy = ScheduleOverlapPolicySkip
 	}
-	if input.OverlapPolicy != "skip" {
+	if input.OverlapPolicy != ScheduleOverlapPolicySkip {
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: unsupported overlap_policy", ErrInvalidPublish)
 	}
 	headers, err := json.Marshal(input.Headers)
@@ -283,20 +285,26 @@ func (q *Queue) startScheduler() {
 				break
 			}
 			if !q.options.DisableMetrics {
-				metric.SchedulerOperations.WithLabelValues("claimed", "success").Inc()
+				metric.SchedulerOperations.WithLabelValues(
+					metric.SchedulerOperationClaimed, metric.OutcomeSuccess,
+				).Inc()
 			}
 			if _, err := q.processScheduleOccurrence(q.serverCtx, schedule, schedule.NextRunAt, false, true); err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
 				if !q.options.DisableMetrics {
-					metric.SchedulerOperations.WithLabelValues("published", "failed").Inc()
+					metric.SchedulerOperations.WithLabelValues(
+						metric.SchedulerOperationPublished, metric.OutcomeFailed,
+					).Inc()
 				}
 				q.schedulerHealthy.Store(false)
 				slog.Error("scheduler publish failed", "schedule_id", schedule.ID, "error", err)
 			} else {
 				if !q.options.DisableMetrics {
-					metric.SchedulerOperations.WithLabelValues("published", "success").Inc()
+					metric.SchedulerOperations.WithLabelValues(
+						metric.SchedulerOperationPublished, metric.OutcomeSuccess,
+					).Inc()
 				}
 			}
 		}

@@ -1,4 +1,4 @@
-package blockqueue
+package persistence
 
 import (
 	"context"
@@ -206,7 +206,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 					return err
 				}
 			}
-			if err := d.notifyTx(ctx, tx, "delivery:"+topicID.String()); err != nil {
+			if err := d.notifyTx(ctx, tx, deliveryEvent(topicID.String())); err != nil {
 				return err
 			}
 		}

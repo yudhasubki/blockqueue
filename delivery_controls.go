@@ -3,16 +3,16 @@ package blockqueue
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/internal/persistence"
 )
 
 // ErrDeliveryTerminal reports an attempted cancellation of a delivery that
 // was already processed or dead-lettered.
-var ErrDeliveryTerminal = errors.New("delivery is already terminal")
+var ErrDeliveryTerminal = persistence.ErrDeliveryTerminal
 
 // SnoozeDelivery returns an active lease to pending without recording a
 // failure or consuming the subscriber's failure budget.
