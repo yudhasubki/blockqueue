@@ -73,6 +73,32 @@ func TestMaintenanceYieldUsesBoundedClockDelay(t *testing.T) {
 	require.True(t, <-done)
 }
 
+func TestRunResumesDeferredTopologyCleanupImmediately(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "startup-pruner.db"), sqlite.Config{})
+	require.NoError(t, err)
+	require.NoError(t, Migrate(context.Background(), driver))
+	topicID := uuid.New()
+	_, err = testDB(driver).Exec(
+		"INSERT INTO topics (id, name, deleted_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+		topicID, "deleted-before-restart",
+	)
+	require.NoError(t, err)
+
+	queue := New(driver, Options{DisableMetrics: true})
+	require.NoError(t, queue.Run(context.Background()))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+
+	require.Eventually(t, func() bool {
+		var count int
+		return testDB(driver).Get(&count, "SELECT COUNT(*) FROM topics WHERE id = ?", topicID) == nil && count == 0
+	}, 3*time.Second, 10*time.Millisecond,
+		"startup must not leave deferred physical cleanup waiting for the hourly retention tick")
+}
+
 func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC()}
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "reaper-backoff.db"), sqlite.Config{})

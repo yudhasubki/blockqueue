@@ -26,6 +26,10 @@ func (q *Queue) Run(ctx context.Context) error {
 		q.state.Store(uint32(LifecycleStopped))
 		return errors.Join(q.db.dialectErr, q.db.close())
 	}
+	if err := q.validateRuntimeConfiguration(); err != nil {
+		q.state.Store(uint32(LifecycleStopped))
+		return errors.Join(err, q.db.close())
+	}
 	if err := Migrate(ctx, q.db.Database); err != nil {
 		q.state.Store(uint32(LifecycleStopped))
 		return errors.Join(err, q.db.close())
@@ -38,6 +42,11 @@ func (q *Queue) Run(ctx context.Context) error {
 	if err != nil {
 		q.state.Store(uint32(LifecycleStopped))
 		return errors.Join(err, q.db.close())
+	}
+	resumeTopologyCleanup, err := q.db.hasDeletedTopology(ctx)
+	if err != nil {
+		q.state.Store(uint32(LifecycleStopped))
+		return errors.Join(fmt.Errorf("inspect deferred topology cleanup: %w", err), q.db.close())
 	}
 
 	// Replace the construction context only after storage and metadata have
@@ -87,6 +96,12 @@ func (q *Queue) Run(ctx context.Context) error {
 	go func() { defer q.workers.Done(); q.startScheduler() }()
 	go func() { defer q.workers.Done(); q.startDeliveryReaper() }()
 	go func() { defer q.workers.Done(); q.startDatabaseEvents() }()
+	// Logical deletion is durable, while physical cleanup is deliberately
+	// asynchronous. Seed one maintenance pass so cleanup interrupted by a prior
+	// process shutdown resumes immediately instead of waiting for the hourly tick.
+	if resumeTopologyCleanup {
+		q.signalPruner()
+	}
 	go func() {
 		<-qCtx.Done()
 		if q.State() == LifecycleRunning {
@@ -236,7 +251,7 @@ func (q *Queue) WriterHealthy() bool {
 
 func (q *Queue) Ready(ctx context.Context) bool {
 	if q.State() != LifecycleRunning || q.writer == nil || !q.writer.Healthy() ||
-		!q.schedulerHealthy.Load() || !q.deliveryHealthy.Load() || !q.listenerHealthy.Load() {
+		!q.schedulerHealthy.Load() || !q.deliveryHealthy.Load() {
 		return false
 	}
 	if err := q.db.Conn().PingContext(ctx); err != nil {
@@ -248,4 +263,15 @@ func (q *Queue) Ready(ctx context.Context) bool {
 		threshold = q.writer.maxMessages * 9 / 10
 	}
 	return messages < threshold && bytes < q.writer.maxBytes*9/10
+}
+
+func (q *Queue) validateRuntimeConfiguration() error {
+	if q.db.dialect.kind() != store.DialectPostgres {
+		return nil
+	}
+	maxOpen := q.db.Database.DB().Stats().MaxOpenConnections
+	if maxOpen == 1 {
+		return errors.New("postgres max open connections must be unlimited or at least 2: maintenance leadership pins one connection")
+	}
+	return nil
 }

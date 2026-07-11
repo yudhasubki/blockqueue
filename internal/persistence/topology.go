@@ -207,6 +207,21 @@ func (d *db) deleteSubscriber(ctx context.Context, topicID, subscriberID uuid.UU
 	})
 }
 
+// hasDeletedTopology keeps startup recovery cheap for the common case. A
+// maintenance pass is only queued when a previous process left durable
+// tombstones behind; fresh databases do not pay a competing cleanup cycle
+// immediately after Run returns.
+func (d *db) hasDeletedTopology(ctx context.Context) (bool, error) {
+	var exists bool
+	err := d.Conn().GetContext(ctx, &exists, `
+		SELECT EXISTS (
+			SELECT 1 FROM topics WHERE deleted_at IS NOT NULL
+			UNION ALL
+			SELECT 1 FROM topic_subscribers WHERE deleted_at IS NOT NULL
+		)`)
+	return exists, err
+}
+
 // pruneDeletedTopology physically removes logically deleted queue topology in
 // dependency order. Every statement is independently committed and bounded;
 // the shared deadline prevents one maintenance cycle from monopolizing the

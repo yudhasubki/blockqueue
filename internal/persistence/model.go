@@ -322,3 +322,12 @@ type WriteRequest struct {
 }
 
 type writeRequest = WriteRequest
+
+// PersistWriteResult describes the storage-resolved identity of each request
+// in input order. ScheduledAt is calculated from the database clock for
+// immediate and relative-delay publishes, and is authoritative even when the
+// caller owns the surrounding transaction and has not committed it yet.
+type PersistWriteResult struct {
+	Duplicates  []bool
+	ScheduledAt []time.Time
+}

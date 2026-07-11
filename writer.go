@@ -79,8 +79,8 @@ func writeRequestWeight(r writeRequest) int64 {
 }
 
 type writeOutcome struct {
-	duplicates []bool
-	err        error
+	result persistWriteResult
+	err    error
 }
 
 type writeAdmission struct {
@@ -100,7 +100,7 @@ type WriterOptions struct {
 	RetryMin           time.Duration
 	RetryMax           time.Duration
 	notify             func(topicID uuid.UUID)
-	persist            func(context.Context, []writeRequest) ([]bool, error)
+	persist            func(context.Context, []writeRequest) (persistWriteResult, error)
 }
 
 func DefaultWriterOptions() WriterOptions {
@@ -126,7 +126,7 @@ type writer struct {
 	retryMin      time.Duration
 	retryMax      time.Duration
 	notify        func(uuid.UUID)
-	persist       func(context.Context, []writeRequest) ([]bool, error)
+	persist       func(context.Context, []writeRequest) (persistWriteResult, error)
 	metricID      uint64
 
 	maxMessages  int64
@@ -246,7 +246,8 @@ func (w *writer) enqueue(ctx context.Context, requests []writeRequest, durable b
 	if err != nil {
 		return nil, err
 	}
-	return w.waitAdmission(ctx, admission)
+	result, err := w.waitAdmission(ctx, admission)
+	return result.Duplicates, err
 }
 
 func (w *writer) admitOne(ctx context.Context, request writeRequest, durable bool) (*writeAdmission, error) {
@@ -311,23 +312,23 @@ func (w *writer) admitOwned(ctx context.Context, owned []writeRequest, durable b
 	return admission, nil
 }
 
-func (w *writer) waitAdmission(ctx context.Context, admission *writeAdmission) ([]bool, error) {
+func (w *writer) waitAdmission(ctx context.Context, admission *writeAdmission) (persistWriteResult, error) {
 	if admission == nil || admission.result == nil {
-		return nil, nil
+		return persistWriteResult{}, nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	select {
 	case outcome := <-admission.result:
-		return outcome.duplicates, outcome.err
+		return outcome.result, outcome.err
 	case <-ctx.Done():
 		// Admission remains owned by the writer even if its waiter leaves.
 		ids := make([]string, len(admission.requests))
 		for index, request := range admission.requests {
 			ids[index] = request.MessageID
 		}
-		return nil, &CommitUnknownError{MessageIDs: ids, Cause: ctx.Err()}
+		return persistWriteResult{}, &CommitUnknownError{MessageIDs: ids, Cause: ctx.Err()}
 	}
 }
 
@@ -537,6 +538,9 @@ func (w *writer) run() {
 					if admission.barrier != nil {
 						if flush() {
 							admission.barrier <- nil
+						} else {
+							admission.barrier <- ErrWriterDrainTimeout
+							return
 						}
 						continue
 					}
@@ -557,13 +561,13 @@ func (w *writer) flush(admissions []*writeAdmission) bool {
 		requests = append(requests, admission.requests...)
 	}
 
-	duplicates, err, aborted := w.persistWithRetry(requests)
+	result, err, aborted := w.persistWithRetry(requests)
 	if aborted {
-		w.completeAdmissions(admissions, nil, ErrWriterDrainTimeout, started)
+		w.completeAdmissions(admissions, persistWriteResult{}, ErrWriterDrainTimeout, started)
 		return false
 	}
 	if err == nil {
-		w.completeAdmissions(admissions, duplicates, nil, started)
+		w.completeAdmissions(admissions, result, nil, started)
 		return true
 	}
 
@@ -577,17 +581,17 @@ func (w *writer) flush(admissions []*writeAdmission) bool {
 			"batch_size", len(requests),
 		)
 		for index, admission := range admissions {
-			duplicates, admissionErr, aborted := w.persistWithRetry(admission.requests)
+			result, admissionErr, aborted := w.persistWithRetry(admission.requests)
 			if aborted {
-				w.completeAdmissions(admissions[index:], nil, ErrWriterDrainTimeout, started)
+				w.completeAdmissions(admissions[index:], persistWriteResult{}, ErrWriterDrainTimeout, started)
 				return false
 			}
-			w.completeAdmissions([]*writeAdmission{admission}, duplicates, admissionErr, started)
+			w.completeAdmissions([]*writeAdmission{admission}, result, admissionErr, started)
 		}
 		return true
 	}
 
-	w.completeAdmissions(admissions, nil, err, started)
+	w.completeAdmissions(admissions, persistWriteResult{}, err, started)
 	return true
 }
 
@@ -595,21 +599,21 @@ func (w *writer) flush(admissions []*writeAdmission) bool {
 // transient. Validation, constraint, and idempotency failures are returned to
 // the owning admission immediately instead of making the writer unhealthy
 // forever.
-func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool) {
+func (w *writer) persistWithRetry(requests []writeRequest) (persistWriteResult, error, bool) {
 	backoff := w.retryMin
 	for {
 		select {
 		case <-w.abort:
-			return nil, ErrWriterDrainTimeout, true
+			return persistWriteResult{}, ErrWriterDrainTimeout, true
 		default:
 		}
-		duplicates, err := w.persist(w.persistCtx, requests)
+		result, err := w.persist(w.persistCtx, requests)
 		if err == nil {
 			w.setHealth(true, nil)
-			return duplicates, nil, false
+			return result, nil, false
 		}
 		if w.persistCtx.Err() != nil {
-			return nil, ErrWriterDrainTimeout, true
+			return persistWriteResult{}, ErrWriterDrainTimeout, true
 		}
 		if !isTransientWriteError(err) {
 			if isDomainWriteError(err) {
@@ -623,7 +627,7 @@ func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool)
 				w.setHealth(false, err)
 				w.initiateClose()
 			}
-			return nil, err, false
+			return persistWriteResult{}, err, false
 		}
 
 		w.setHealth(false, err)
@@ -644,16 +648,16 @@ func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool)
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return nil, err, true
+			return persistWriteResult{}, err, true
 		}
 	}
 }
 
-func (w *writer) completeAdmissions(admissions []*writeAdmission, duplicates []bool, outcomeErr error, started time.Time) {
+func (w *writer) completeAdmissions(admissions []*writeAdmission, result persistWriteResult, outcomeErr error, started time.Time) {
 	requestCount := 0
 	duplicateCount := 0
 	uniqueTopics := make(map[uuid.UUID]struct{})
-	for _, duplicate := range duplicates {
+	for _, duplicate := range result.Duplicates {
 		if duplicate {
 			duplicateCount++
 		}
@@ -706,7 +710,8 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, duplicates []b
 		if admission.result != nil {
 			outcome := writeOutcome{err: outcomeErr}
 			if outcomeErr == nil {
-				outcome.duplicates = append([]bool(nil), duplicates[offset:offset+n]...)
+				outcome.result.Duplicates = append([]bool(nil), result.Duplicates[offset:offset+n]...)
+				outcome.result.ScheduledAt = append([]time.Time(nil), result.ScheduledAt[offset:offset+n]...)
 			}
 			admission.result <- outcome
 		}
@@ -749,7 +754,7 @@ func (w *writer) failQueuedAdmissions(outcomeErr error) {
 			queued = append(queued, admission)
 		default:
 			if len(queued) > 0 {
-				w.completeAdmissions(queued, nil, outcomeErr, time.Now())
+				w.completeAdmissions(queued, persistWriteResult{}, outcomeErr, time.Now())
 			}
 			return
 		}
@@ -789,10 +794,10 @@ func isTransientWriteError(err error) bool {
 			code == postgresCrashShutdown || code == postgresCannotConnectNow ||
 			strings.HasPrefix(code, postgresClassSystemError)
 	}
-	var sqliteError sqlite3.Error
-	if errors.As(err, &sqliteError) {
-		switch sqliteError.Code {
-		case sqlite3.ErrBusy, sqlite3.ErrLocked, sqlite3.ErrIoErr, sqlite3.ErrInterrupt, sqlite3.ErrProtocol:
+	if sqliteCode, ok := sqlitePrimaryErrorCode(err); ok {
+		switch sqliteCode {
+		case sqlite3.ErrBusy, sqlite3.ErrLocked, sqlite3.ErrIoErr, sqlite3.ErrInterrupt,
+			sqlite3.ErrProtocol, sqlite3.ErrFull, sqlite3.ErrNomem:
 			return true
 		default:
 			return false
@@ -808,6 +813,11 @@ func isTransientWriteError(err error) bool {
 }
 
 func isAmbiguousCommitError(err error) bool {
+	// Once Commit has been invoked, a context cancellation or deadline cannot
+	// prove whether the server committed before the client stopped waiting.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
@@ -822,9 +832,8 @@ func isAmbiguousCommitError(err error) bool {
 			strings.HasPrefix(code, postgresClassSystemError) ||
 			code == postgresAdminShutdown || code == postgresCrashShutdown || code == postgresCannotConnectNow
 	}
-	var sqliteError sqlite3.Error
-	if errors.As(err, &sqliteError) {
-		return sqliteError.Code == sqlite3.ErrIoErr || sqliteError.Code == sqlite3.ErrProtocol
+	if sqliteCode, ok := sqlitePrimaryErrorCode(err); ok {
+		return sqliteCode == sqlite3.ErrIoErr || sqliteCode == sqlite3.ErrProtocol
 	}
 	lower := strings.ToLower(err.Error())
 	for _, fragment := range transientWriteErrorFragments {
@@ -834,4 +843,27 @@ func isAmbiguousCommitError(err error) bool {
 		}
 	}
 	return false
+}
+
+// sqlitePrimaryErrorCode accepts every error shape exposed by go-sqlite3:
+// value or pointer Error structs as well as bare primary/extended result codes.
+// Extended result codes retain the primary code in their low byte.
+func sqlitePrimaryErrorCode(err error) (sqlite3.ErrNo, bool) {
+	var value sqlite3.Error
+	if errors.As(err, &value) {
+		return value.Code, true
+	}
+	var pointer *sqlite3.Error
+	if errors.As(err, &pointer) && pointer != nil {
+		return pointer.Code, true
+	}
+	var primary sqlite3.ErrNo
+	if errors.As(err, &primary) {
+		return primary, true
+	}
+	var extended sqlite3.ErrNoExtended
+	if errors.As(err, &extended) {
+		return sqlite3.ErrNo(int(extended) & 0xff), true
+	}
+	return 0, false
 }

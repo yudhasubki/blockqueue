@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,17 +19,22 @@ import (
 )
 
 type ambiguousCommitStore struct {
-	database  *sql.DB
-	name      string
-	armed     atomic.Bool
-	commitErr error
+	database             *sql.DB
+	name                 string
+	armed                atomic.Bool
+	commitErr            error
+	scheduledReadFault   atomic.Pointer[scheduledReadFault]
+	scheduledReadQueries atomic.Int64
 }
+
+type scheduledReadFault struct{ err error }
 
 func openAmbiguousCommitStore(t *testing.T, commitErr error) *ambiguousCommitStore {
 	t.Helper()
 	storage := &ambiguousCommitStore{name: "blockqueue_commit_fault_" + uuid.NewString(), commitErr: commitErr}
 	sql.Register(storage.name, &commitFaultDriver{
 		inner: &sqlite3.SQLiteDriver{}, armed: &storage.armed, commitErr: commitErr,
+		scheduledReadFault: &storage.scheduledReadFault, scheduledReadQueries: &storage.scheduledReadQueries,
 	})
 	dsn := fmt.Sprintf("file:%s?_synchronous=full&_journal_mode=wal&_foreign_keys=on&_busy_timeout=5000&_txlock=immediate&_auto_vacuum=2",
 		filepath.Join(t.TempDir(), "ambiguous-commit.db"))
@@ -47,9 +53,11 @@ func (storage *ambiguousCommitStore) DriverName() string     { return storage.na
 func (storage *ambiguousCommitStore) Close() error           { return storage.database.Close() }
 
 type commitFaultDriver struct {
-	inner     driver.Driver
-	armed     *atomic.Bool
-	commitErr error
+	inner                driver.Driver
+	armed                *atomic.Bool
+	commitErr            error
+	scheduledReadFault   *atomic.Pointer[scheduledReadFault]
+	scheduledReadQueries *atomic.Int64
 }
 
 func (fault *commitFaultDriver) Open(name string) (driver.Conn, error) {
@@ -57,13 +65,18 @@ func (fault *commitFaultDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &commitFaultConn{Conn: connection, armed: fault.armed, commitErr: fault.commitErr}, nil
+	return &commitFaultConn{
+		Conn: connection, armed: fault.armed, commitErr: fault.commitErr,
+		scheduledReadFault: fault.scheduledReadFault, scheduledReadQueries: fault.scheduledReadQueries,
+	}, nil
 }
 
 type commitFaultConn struct {
 	driver.Conn
-	armed     *atomic.Bool
-	commitErr error
+	armed                *atomic.Bool
+	commitErr            error
+	scheduledReadFault   *atomic.Pointer[scheduledReadFault]
+	scheduledReadQueries *atomic.Int64
 }
 
 func (connection *commitFaultConn) Begin() (driver.Tx, error) {
@@ -97,6 +110,12 @@ func (connection *commitFaultConn) ExecContext(ctx context.Context, query string
 }
 
 func (connection *commitFaultConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if fault := connection.scheduledReadFault.Load(); fault != nil &&
+		strings.Contains(strings.ToLower(query), "select id, scheduled_at from messages") &&
+		connection.scheduledReadFault.CompareAndSwap(fault, nil) {
+		connection.scheduledReadQueries.Add(1)
+		return nil, fault.err
+	}
 	if queryer, ok := connection.Conn.(driver.QueryerContext); ok {
 		return queryer.QueryContext(ctx, query, args)
 	}
@@ -197,8 +216,84 @@ func testWriterRecoversFromAmbiguousCommit(t *testing.T, commitErr error) {
 	require.Equal(t, 1, deliveries)
 }
 
+func TestDurableDelayReceiptDoesNotDependOnPostCommitRead(t *testing.T) {
+	driver := openAmbiguousCommitStore(t, nil)
+	queue := New(driver, Options{Writer: WriterOptions{
+		BatchSize: 1, FlushInterval: time.Millisecond,
+	}})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("post-commit-read")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		if queue.State() != LifecycleStopped {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = queue.Shutdown(ctx)
+		}
+	})
+
+	readErr := fmt.Errorf("injected post-commit scheduled_at read failure")
+	driver.scheduledReadFault.Store(&scheduledReadFault{err: readErr})
+	receipt, err := queue.PublishDurable(context.Background(), topic, Message{
+		Message: "database-clock delay", IdempotencyKey: "database-clock-delay", Delay: "2s",
+	})
+	require.NoError(t, err)
+	require.Equal(t, PublishStatePersisted, receipt.State)
+	require.NotNil(t, receipt.Duplicate)
+	require.False(t, *receipt.Duplicate)
+	require.Zero(t, driver.scheduledReadQueries.Load(),
+		"durable publish must carry scheduled_at out of its persistence transaction")
+
+	// Prove the one-shot read fault was still armed after Publish returned. The
+	// pre-fix post-commit restore query would have consumed this error and made a
+	// committed message look like a failed publish.
+	var ignored struct {
+		ID          string    `db:"id"`
+		ScheduledAt time.Time `db:"scheduled_at"`
+	}
+	err = queue.db.Conn().Get(&ignored,
+		queue.db.Conn().Rebind("SELECT id, scheduled_at FROM messages WHERE id = ?"), receipt.MessageID)
+	require.ErrorIs(t, err, readErr)
+	require.EqualValues(t, 1, driver.scheduledReadQueries.Load())
+
+	var persistedScheduledAt time.Time
+	require.NoError(t, queue.db.Conn().Get(&persistedScheduledAt,
+		queue.db.Conn().Rebind("SELECT scheduled_at FROM messages WHERE id = ?"), receipt.MessageID))
+	require.Equal(t, persistedScheduledAt, receipt.ScheduledAt)
+
+	retry, err := queue.PublishDurable(context.Background(), topic, Message{
+		Message: "database-clock delay", IdempotencyKey: "database-clock-delay", Delay: "2s",
+	})
+	require.NoError(t, err)
+	require.Equal(t, receipt.MessageID, retry.MessageID)
+	require.NotNil(t, retry.Duplicate)
+	require.True(t, *retry.Duplicate)
+	require.Equal(t, persistedScheduledAt, retry.ScheduledAt)
+	var messages, deliveries int
+	require.NoError(t, queue.db.Conn().Get(&messages,
+		queue.db.Conn().Rebind("SELECT COUNT(*) FROM messages WHERE id = ?"), receipt.MessageID))
+	require.NoError(t, queue.db.Conn().Get(&deliveries,
+		queue.db.Conn().Rebind("SELECT COUNT(*) FROM message_deliveries WHERE message_id = ?"), receipt.MessageID))
+	require.Equal(t, 1, messages)
+	require.Equal(t, 1, deliveries)
+}
+
 func TestWithTxReportsAmbiguousCommitWithoutRetryingBusinessLogic(t *testing.T) {
-	driver := openAmbiguousCommitStore(t, driver.ErrBadConn)
+	for name, commitErr := range map[string]error{
+		"bad_connection":    driver.ErrBadConn,
+		"context_canceled":  context.Canceled,
+		"deadline_exceeded": context.DeadlineExceeded,
+	} {
+		t.Run(name, func(t *testing.T) {
+			testWithTxReportsAmbiguousCommit(t, commitErr)
+		})
+	}
+}
+
+func testWithTxReportsAmbiguousCommit(t *testing.T, commitErr error) {
+	t.Helper()
+	driver := openAmbiguousCommitStore(t, commitErr)
 	queue := New(driver, Options{})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("ambiguous-business-transaction")
@@ -229,6 +324,7 @@ func TestWithTxReportsAmbiguousCommitWithoutRetryingBusinessLogic(t *testing.T) 
 		return err
 	})
 	require.ErrorIs(t, err, ErrTransactionCommitUnknown)
+	require.ErrorIs(t, err, commitErr)
 	require.Equal(t, 1, callbackCalls, "WithTx must never retry application code")
 
 	var businessRows, messageRows int

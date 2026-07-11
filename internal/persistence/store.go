@@ -88,6 +88,10 @@ func (store *Store) ListSubscriberStatuses(ctx context.Context, topicID uuid.UUI
 	return store.database.listSubscriberStatuses(ctx, topicID, limit, afterName, afterID)
 }
 
+func (store *Store) HasDeletedTopology(ctx context.Context) (bool, error) {
+	return store.database.hasDeletedTopology(ctx)
+}
+
 func (store *Store) PruneDeletedTopology(ctx context.Context, budget time.Duration) (int64, bool, bool, error) {
 	return store.database.pruneDeletedTopology(ctx, budget)
 }
@@ -112,16 +116,12 @@ func (store *Store) IncrementalVacuum(ctx context.Context) error {
 	return store.database.incrementalVacuum(ctx)
 }
 
-func (store *Store) PersistWriteRequests(ctx context.Context, requests []WriteRequest) ([]bool, error) {
+func (store *Store) PersistWriteRequests(ctx context.Context, requests []WriteRequest) (PersistWriteResult, error) {
 	return store.database.persistWriteRequests(ctx, requests)
 }
 
-func (store *Store) PersistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, requests []WriteRequest) ([]bool, error) {
+func (store *Store) PersistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, requests []WriteRequest) (PersistWriteResult, error) {
 	return store.database.persistWriteRequestsWithTx(ctx, tx, requests)
-}
-
-func (store *Store) MessageScheduledTimes(ctx context.Context, tx *sql.Tx, messageIDs []string) (map[string]time.Time, error) {
-	return store.database.messageScheduledTimes(ctx, tx, messageIDs)
 }
 
 func (store *Store) ClaimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration) ([]DeliveryRow, error) {

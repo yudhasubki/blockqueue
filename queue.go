@@ -22,6 +22,7 @@ var (
 	ErrQueueStopping      = errors.New("blockqueue is stopping")
 	ErrNoActiveSubscriber = persistence.ErrNoActiveSubscriber
 	ErrInvalidPublish     = persistence.ErrInvalidPublish
+	ErrInvalidCursor      = persistence.ErrInvalidCursor
 	ErrInvalidTopic       = errors.New("invalid topic")
 	ErrInvalidSubscriber  = errors.New("invalid subscriber")
 	ErrResourceConflict   = persistence.ErrResourceConflict

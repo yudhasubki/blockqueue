@@ -131,12 +131,14 @@ func TestAmbiguousCommitRetryContract(t *testing.T) {
 			Headers: []byte("{}"), VisibleAt: now, CreatedAt: now,
 		}
 
-		duplicates, err := database.persistWriteRequests(context.Background(), []WriteRequest{request})
+		result, err := database.persistWriteRequests(context.Background(), []WriteRequest{request})
 		require.NoError(t, err)
-		require.Equal(t, []bool{false}, duplicates)
-		duplicates, err = database.persistWriteRequests(context.Background(), []WriteRequest{request})
+		require.Equal(t, []bool{false}, result.Duplicates)
+		require.Equal(t, []time.Time{now}, result.ScheduledAt)
+		result, err = database.persistWriteRequests(context.Background(), []WriteRequest{request})
 		require.NoError(t, err)
-		require.Equal(t, []bool{true}, duplicates)
+		require.Equal(t, []bool{true}, result.Duplicates)
+		require.Equal(t, []time.Time{now}, result.ScheduledAt)
 
 		var canonicalRows, deliveryRows int
 		require.NoError(t, database.Conn().Get(&canonicalRows, database.Conn().Rebind(
@@ -174,8 +176,9 @@ func TestPublishSchedulingUsesDatabaseClockContract(t *testing.T) {
 				VisibleAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
 		}
-		_, err = database.persistWriteRequests(ctx, requests)
+		result, err := database.persistWriteRequests(ctx, requests)
 		require.NoError(t, err)
+		require.Len(t, result.ScheduledAt, len(requests))
 		after, err := database.databaseNow(ctx)
 		require.NoError(t, err)
 
@@ -197,6 +200,8 @@ func TestPublishSchedulingUsesDatabaseClockContract(t *testing.T) {
 			require.False(t, row.CreatedAt.Before(before.Add(-time.Millisecond)))
 			require.False(t, row.CreatedAt.After(after.Add(time.Millisecond)))
 		}
+		require.WithinDuration(t, byID[requests[0].MessageID].ScheduledAt, result.ScheduledAt[0], time.Millisecond)
+		require.WithinDuration(t, byID[requests[1].MessageID].ScheduledAt, result.ScheduledAt[1], time.Millisecond)
 		require.WithinDuration(t, byID[requests[0].MessageID].CreatedAt, byID[requests[0].MessageID].ScheduledAt, time.Millisecond)
 		require.WithinDuration(t, byID[requests[1].MessageID].CreatedAt.Add(2*time.Second), byID[requests[1].MessageID].ScheduledAt, time.Millisecond)
 	})

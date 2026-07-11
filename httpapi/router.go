@@ -106,7 +106,8 @@ func queueErrorMapper(queue *blockqueue.Queue) ErrorMapper {
 		code := problemCodeInternal
 		message := "internal server error"
 		switch {
-		case errors.Is(err, blockqueue.ErrInvalidPublish), errors.Is(err, blockqueue.ErrInvalidReceipt),
+		case errors.Is(err, blockqueue.ErrInvalidPublish), errors.Is(err, blockqueue.ErrInvalidCursor),
+			errors.Is(err, blockqueue.ErrInvalidReceipt),
 			errors.Is(err, blockqueue.ErrInvalidTopic), errors.Is(err, blockqueue.ErrInvalidSubscriber):
 			status, code, message = http.StatusBadRequest, problemCodeValidation, err.Error()
 		case errors.Is(err, blockqueue.ErrTopicNotFound), errors.Is(err, blockqueue.ErrSubscriberNotFound),

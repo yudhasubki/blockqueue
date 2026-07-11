@@ -80,10 +80,10 @@ func (q *Queue) ListTopics(ctx context.Context, limit int, cursor string) (Topic
 		var err error
 		afterName, afterID, err = decodeResourceCursor(cursor)
 		if err != nil {
-			return TopicPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return TopicPage{}, ErrInvalidCursor
 		}
 		if _, err := uuid.Parse(afterID); err != nil {
-			return TopicPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return TopicPage{}, ErrInvalidCursor
 		}
 	}
 	rows, err := q.db.listTopics(ctx, limit+1, afterName, afterID)
@@ -134,10 +134,10 @@ func (q *Queue) ListSubscriberStatuses(ctx context.Context, topic Topic, limit i
 		var err error
 		afterName, afterID, err = decodeResourceCursor(cursor)
 		if err != nil {
-			return SubscriberStatusPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return SubscriberStatusPage{}, ErrInvalidCursor
 		}
 		if _, err := uuid.Parse(afterID); err != nil {
-			return SubscriberStatusPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return SubscriberStatusPage{}, ErrInvalidCursor
 		}
 	}
 	rows, err := q.db.listSubscriberStatuses(ctx, runtime.id, limit+1, afterName, afterID)

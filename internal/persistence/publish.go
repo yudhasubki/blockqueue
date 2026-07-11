@@ -15,54 +15,16 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) ([]bool, error) {
+func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) (PersistWriteResult, error) {
 	return d.persistWriteRequestsWithTx(ctx, nil, requests)
-}
-
-func (d *db) messageScheduledTimes(
-	ctx context.Context,
-	external *sql.Tx,
-	messageIDs []string,
-) (map[string]time.Time, error) {
-	result := make(map[string]time.Time, len(messageIDs))
-	if len(messageIDs) == 0 {
-		return result, nil
-	}
-	type row struct {
-		ID          string    `db:"id"`
-		ScheduledAt time.Time `db:"scheduled_at"`
-	}
-	for start := 0; start < len(messageIDs); start += deliveryIdentityLookupChunk {
-		end := min(start+deliveryIdentityLookupChunk, len(messageIDs))
-		query, args, err := sqlx.In(
-			"SELECT id, scheduled_at FROM messages WHERE id IN (?)", messageIDs[start:end],
-		)
-		if err != nil {
-			return nil, err
-		}
-		rows := make([]row, 0, end-start)
-		query = d.Conn().Rebind(query)
-		if external == nil {
-			err = d.Conn().SelectContext(ctx, &rows, query, args...)
-		} else {
-			err = (&sqlx.Tx{Tx: external, Mapper: d.Conn().Mapper}).SelectContext(ctx, &rows, query, args...)
-		}
-		if err != nil {
-			return nil, err
-		}
-		for _, item := range rows {
-			result[item.ID] = item.ScheduledAt
-		}
-	}
-	return result, nil
 }
 
 // persistWriteRequestsWithTx uses a caller-owned transaction when supplied.
 // The caller retains commit/rollback ownership; a nil transaction preserves
 // the normal writer-owned transaction boundary.
-func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, requests []writeRequest) ([]bool, error) {
+func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, requests []writeRequest) (PersistWriteResult, error) {
 	if len(requests) == 0 {
-		return []bool{}, nil
+		return PersistWriteResult{Duplicates: []bool{}, ScheduledAt: []time.Time{}}, nil
 	}
 	normalized := append([]writeRequest(nil), requests...)
 	for i := range normalized {
@@ -70,7 +32,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			normalized[i].Headers = []byte("{}")
 		}
 		if !json.Valid(normalized[i].Headers) {
-			return nil, fmt.Errorf("%w: invalid headers JSON", ErrInvalidPublish)
+			return PersistWriteResult{}, fmt.Errorf("%w: invalid headers JSON", ErrInvalidPublish)
 		}
 	}
 	messageChunk := d.dialect.messageChunkSize()
@@ -83,7 +45,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			}
 			statement, err := d.statements.get(ctx, d.Conn(), cachedMessageInsertQuery(d, rows))
 			if err != nil {
-				return nil, err
+				return PersistWriteResult{}, err
 			}
 			messageStatements[rows] = statement
 		}
@@ -102,13 +64,16 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 				}
 				statement, err := d.statements.get(ctx, d.Conn(), cachedDeliveryInsertQuery(d, rows))
 				if err != nil {
-					return nil, err
+					return PersistWriteResult{}, err
 				}
 				deliveryStatements[rows] = statement
 			}
 		}
 	}
-	duplicates := make([]bool, len(requests))
+	result := PersistWriteResult{
+		Duplicates:  make([]bool, len(requests)),
+		ScheduledAt: make([]time.Time, len(requests)),
+	}
 	run := func(ctx context.Context, tx *sqlx.Tx) error {
 		topicIDs := make([]uuid.UUID, 0)
 		seenTopics := make(map[uuid.UUID]struct{})
@@ -176,6 +141,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			default:
 				return fmt.Errorf("%w: unsupported schedule mode %q", ErrInvalidPublish, request.ScheduleMode)
 			}
+			result.ScheduledAt[index] = request.VisibleAt.UTC()
 		}
 
 		insertedIDs := make(map[string]struct{}, len(normalized))
@@ -214,7 +180,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 					continue
 				}
 			}
-			duplicates[i] = true
+			result.Duplicates[i] = true
 			var existing struct {
 				ID              string         `db:"id"`
 				TopicID         string         `db:"topic_id"`
@@ -239,6 +205,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			if err := tx.GetContext(ctx, &existing, d.Conn().Rebind(query), args...); err != nil {
 				return err
 			}
+			result.ScheduledAt[i] = existing.ScheduledAt.UTC()
 			if existing.TopicID != request.TopicID.String() || existing.Message != request.Message ||
 				!equalJSON(existing.Headers, string(request.Headers)) || existing.CorrelationID.String != request.CorrelationID ||
 				existing.IdempotencyKey.String != request.IdempotencyKey || existing.Priority != request.Priority {
@@ -297,7 +264,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 	} else {
 		err = run(ctx, &sqlx.Tx{Tx: external, Mapper: d.Conn().Mapper})
 	}
-	return duplicates, err
+	return result, err
 }
 
 func cachedMessageInsertQuery(d *db, rows int) string {

@@ -16,7 +16,7 @@ sqlite:
   max_idle_conns: 10
   cache_size: -64000
   mmap_size: 268435456
-  checkpoint_interval: "1s"
+  checkpoint_interval: "30s"
   durability: "strict"
 writer:
   batch_size: 1000

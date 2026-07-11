@@ -34,12 +34,15 @@ type Driver struct {
 }
 
 type Config struct {
-	Host            string
-	Username        string
-	Password        string
-	Name            string
-	Port            int
-	Timezone        string
+	Host     string
+	Username string
+	Password string
+	Name     string
+	Port     int
+	Timezone string
+	// MaxOpenConns defaults to 25. A positive value must be at least 2 because
+	// the maintenance leader pins one pooled connection while running queries on
+	// another.
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
@@ -55,6 +58,9 @@ func Open(config Config) (*Driver, error) {
 	if config.Port < 0 || config.Port > 65535 || config.MaxOpenConns < 0 || config.MaxIdleConns < 0 ||
 		config.ConnMaxLifetime < 0 || config.ConnMaxIdleTime < 0 {
 		return nil, errors.New("postgres connection settings are invalid")
+	}
+	if config.MaxOpenConns == 1 {
+		return nil, errors.New("postgres max open connections must be 0 (default) or at least 2")
 	}
 	connectionString, err := buildConnectionURL(config)
 	if err != nil {

@@ -136,7 +136,22 @@ POST /v1/topics/orders/messages/{message_id}/cancel
 The HTTP contract is served at `/openapi.json`. Error bodies now use RFC 9457
 `application/problem+json` and include a stable machine-readable `code`.
 Control-plane list endpoints are cursor-paginated; follow `next_cursor` instead
-of assuming an unbounded array response.
+of assuming an unbounded array response. In particular, the previous bare
+`{"data":[...]}` shape is now a resource page such as
+`{"data":{"topics":[...],"next_cursor":"..."}}` or
+`{"data":{"subscribers":[...],"next_cursor":"..."}}`. The same
+`limit`/opaque-`cursor` contract applies to topics, subscribers, schedules,
+active deliveries, DLQ, delivery errors, and schedule-run history.
+
+An embedding `http.Server` must set `WriteTimeout` to at least 65 seconds so a
+valid 60-second claim long poll still has response-write headroom. The
+standalone binary applies this minimum during configuration validation.
+
+When a database connection is lost during commit, the writer retries with the
+same stable message ID. If the first commit actually reached the database, the
+durable receipt can report `duplicate: true` even though the caller invoked
+publish only once; this confirms reconciliation of the already-committed row,
+not a second message.
 
 ## Safe rollout
 

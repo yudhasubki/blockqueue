@@ -14,7 +14,7 @@ sqlite:
   busy_timeout: 5000
   cache_size: -64000
   mmap_size: 268435456
-  checkpoint_interval: "1s"
+  checkpoint_interval: "30s"
   durability: "balanced" # Matches the historical synchronous=NORMAL baseline.
 writer:
   batch_size: 1000

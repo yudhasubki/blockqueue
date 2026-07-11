@@ -52,3 +52,24 @@ func TestDatabaseEventsReconnectAfterInitialListenFailure(t *testing.T) {
 	}
 	require.NoError(t, underlying.Close())
 }
+
+func TestDatabaseListenerFailureDoesNotGateReadiness(t *testing.T) {
+	queue, _, _ := setupQueue(t)
+	queue.setListenerHealthy(false)
+
+	require.False(t, queue.listenerHealthy.Load(), "listener health must remain observable")
+	require.True(t, queue.Ready(context.Background()),
+		"bounded database reconciliation is authoritative when notification hints are unavailable")
+}
+
+func TestRunRejectsPostgresPoolThatMaintenanceLeadershipWouldExhaust(t *testing.T) {
+	underlying, err := sqlite.Open(filepath.Join(t.TempDir(), "postgres-pool-capacity.db"), sqlite.Config{})
+	require.NoError(t, err)
+	underlying.DB().SetMaxOpenConns(1)
+	driver := &reconnectNotificationDriver{Driver: underlying, events: make(chan string)}
+	queue := New(driver, Options{DisableMetrics: true})
+
+	err = queue.Run(context.Background())
+	require.ErrorContains(t, err, "at least 2")
+	require.Equal(t, LifecycleStopped, queue.State())
+}

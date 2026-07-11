@@ -559,7 +559,7 @@ func runPaginationContract(t *testing.T, queue *Queue, topic Topic) {
 	require.Len(t, seenSchedules, 3)
 
 	_, err := queue.ListTopics(ctx, 10, "not-a-cursor")
-	require.ErrorIs(t, err, ErrInvalidPublish)
+	require.ErrorIs(t, err, ErrInvalidCursor)
 }
 
 func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Driver, topic Topic) {

@@ -334,11 +334,22 @@ history. Database transaction methods are intentionally Go-only: a remote HTTP
 request cannot join the caller's local transaction; cross-database systems
 should use the documented [transactional outbox relay](docs/http-outbox.md).
 Async single-message publish returns a `Location` header for the canonical
-message status resource. Embedders can install `AuthMiddleware`, a typed
+message status resource. If an ambiguous commit is reconciled by the writer's
+internal retry, a first durable call can return `duplicate: true`; this means
+the same stable message row was already committed, not that BlockQueue created
+a second publish. Embedders can install `AuthMiddleware`, a typed
 `PrincipalResolver`, or both; the standalone binary remains loopback-only by
 default and warns when configured on a non-loopback address. Topic, subscriber,
 schedule, active-delivery, DLQ, failure-history, and schedule-run lists use
 bounded cursor pagination (`limit` plus opaque `cursor`).
+
+List responses are page objects inside the common `data` envelope, not bare
+arrays. For example, topics use `{"data":{"topics":[...],"next_cursor":"..."}}`
+and subscriber status uses
+`{"data":{"subscribers":[...],"next_cursor":"..."}}`. Omit `cursor` for the
+first request and pass the returned `next_cursor` unchanged for the next page.
+Because claims may long-poll for up to 60 seconds, embedded HTTP servers must
+configure `WriteTimeout` to at least 65 seconds.
 
 ## Delivery contract
 

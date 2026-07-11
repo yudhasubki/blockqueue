@@ -33,6 +33,72 @@ function pathSegment(value) {
     return encodeURIComponent(String(value));
 }
 
+function pageItems(response, field) {
+    const page = response?.data;
+    return Array.isArray(page?.[field]) ? page[field] : [];
+}
+
+function topicsFromResponse(response) {
+    return pageItems(response, 'topics');
+}
+
+function subscribersFromResponse(response) {
+    return pageItems(response, 'subscribers');
+}
+
+function subscriberSummary(subscribers) {
+    return subscribers.reduce((summary, subscriber) => ({
+        count: summary.count + 1,
+        pending: summary.pending + (Number(subscriber.unpublished_message) || 0),
+        unacked: summary.unacked + (Number(subscriber.unacked_message) || 0),
+    }), { count: 0, pending: 0, unacked: 0 });
+}
+
+function topicListHTML(topicItems, activeTopic) {
+    return topicItems.map(topic => `
+        <div class="topic-item ${activeTopic?.id === topic.id ? 'active' : ''}" onclick='selectTopic(${inlineJSON(topic.name)})'>
+            <span><i class="fa-solid fa-hashtag"></i> ${escapeHTML(topic.name)}</span>
+            <span style="font-size: 0.75em; opacity: 0.5">${escapeHTML(String(topic.id).substring(0, 8))}</span>
+        </div>
+    `).join('');
+}
+
+function subscriberListHTML(subscribers) {
+    if (subscribers.length === 0) {
+        return '<div style="text-align:center; padding: 2rem; color: var(--text-secondary)">No subscribers yet.</div>';
+    }
+
+    return subscribers.map(subscriber => `
+        <div class="subscriber-card">
+            <div class="subscriber-info">
+                <h3>${escapeHTML(subscriber.name)}</h3>
+                <span class="status-badge">Active</span>
+            </div>
+            <div class="subscriber-stats">
+                 <div class="stat-item" title="Pending Messages">
+                    <i class="fa-solid fa-hourglass-start" style="color: var(--accent-color)"></i>
+                    ${escapeHTML(subscriber.unpublished_message)}
+                </div>
+                <div class="stat-item" title="Unacked Messages">
+                    <i class="fa-solid fa-envelope-open-text" style="color: #fbbf24"></i>
+                    ${escapeHTML(subscriber.unacked_message)}
+                </div>
+                <div class="stat-item">
+                     <button class="btn btn-sm btn-primary" onclick='openInspect(${inlineJSON(subscriber.name)})' title="Inspect Queue">
+                         <i class="fa-solid fa-eye"></i> Peek
+                    </button>
+                    <button class="btn btn-sm btn-danger" onclick='openDLQ(${inlineJSON(subscriber.name)})' title="View Dead Letter Queue" style="margin-left: 0.5rem">
+                         <i class="fa-solid fa-skull"></i> DLQ
+                    </button>
+                     <button class="btn btn-sm btn-danger" onclick='deleteSubscriber(${inlineJSON(subscriber.name)})' title="Delete Subscriber" style="margin-left: 0.5rem">
+                         <i class="fa-solid fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
 // DOM Elements
 const topicListEl = document.getElementById('topicList');
 const dashboardView = document.getElementById('dashboardView');
@@ -57,8 +123,7 @@ async function fetchTopics() {
         const res = await fetch(`${API_BASE}/topics`);
         if (res.ok) {
             const data = await res.json();
-            // Adjust based on actual API response structure
-            topics = data.data || [];
+            topics = topicsFromResponse(data);
             renderTopics();
         }
     } catch (err) {
@@ -67,12 +132,7 @@ async function fetchTopics() {
 }
 
 function renderTopics() {
-    topicListEl.innerHTML = topics.map(t => `
-        <div class="topic-item ${currentTopic?.id === t.id ? 'active' : ''}" onclick='selectTopic(${inlineJSON(t.name)})'>
-            <span><i class="fa-solid fa-hashtag"></i> ${escapeHTML(t.name)}</span>
-            <span style="font-size: 0.75em; opacity: 0.5">${escapeHTML(t.id.substring(0, 8))}</span>
-        </div>
-    `).join('');
+    topicListEl.innerHTML = topicListHTML(topics, currentTopic);
 }
 
 async function selectTopic(name) {
@@ -83,7 +143,7 @@ async function selectTopic(name) {
 
         const response = await res.json();
 
-        const statusData = response.data || [];
+        const statusData = subscribersFromResponse(response);
 
         const selectedTopic = topics.find(topic => topic.name === name);
         const topicId = selectedTopic?.id || statusData[0]?.topic_id || 'Unknown';
@@ -100,12 +160,10 @@ async function selectTopic(name) {
         topicIdEl.textContent = `ID: ${topicId}`;
 
         // Stats
-        statsSubscribers.textContent = statusData.length;
-        const totalPending = statusData.reduce((acc, s) => acc + s.unpublished_message, 0);
-        const totalUnacked = statusData.reduce((acc, s) => acc + s.unacked_message, 0);
-
-        statsPending.textContent = totalPending;
-        statsUnacked.textContent = totalUnacked;
+        const summary = subscriberSummary(statusData);
+        statsSubscribers.textContent = summary.count;
+        statsPending.textContent = summary.pending;
+        statsUnacked.textContent = summary.unacked;
 
         renderSubscribers(statusData);
 
@@ -115,40 +173,7 @@ async function selectTopic(name) {
 }
 
 function renderSubscribers(subscribers) {
-    if (subscribers.length === 0) {
-        subscriberListEl.innerHTML = '<div style="text-align:center; padding: 2rem; color: var(--text-secondary)">No subscribers yet.</div>';
-        return;
-    }
-
-    subscriberListEl.innerHTML = subscribers.map(s => `
-        <div class="subscriber-card">
-            <div class="subscriber-info">
-                <h3>${escapeHTML(s.name)}</h3>
-                <span class="status-badge">Active</span>
-            </div>
-            <div class="subscriber-stats">
-                 <div class="stat-item" title="Pending Messages">
-                    <i class="fa-solid fa-hourglass-start" style="color: var(--accent-color)"></i>
-                    ${s.unpublished_message}
-                </div>
-                <div class="stat-item" title="Unacked Messages">
-                    <i class="fa-solid fa-envelope-open-text" style="color: #fbbf24"></i>
-                    ${s.unacked_message}
-                </div>
-                <div class="stat-item">
-                     <button class="btn btn-sm btn-primary" onclick='openInspect(${inlineJSON(s.name)})' title="Inspect Queue">
-                         <i class="fa-solid fa-eye"></i> Peek
-                    </button>
-                    <button class="btn btn-sm btn-danger" onclick='openDLQ(${inlineJSON(s.name)})' title="View Dead Letter Queue" style="margin-left: 0.5rem">
-                         <i class="fa-solid fa-skull"></i> DLQ
-                    </button>
-                     <button class="btn btn-sm btn-danger" onclick='deleteSubscriber(${inlineJSON(s.name)})' title="Delete Subscriber" style="margin-left: 0.5rem">
-                         <i class="fa-solid fa-trash"></i>
-                    </button>
-                </div>
-            </div>
-        </div>
-    `).join('');
+    subscriberListEl.innerHTML = subscriberListHTML(subscribers);
 }
 
 // Actions
@@ -469,3 +494,13 @@ window.openInspect = openInspect;
 window.replayDLQ = replayDLQ;
 window.ackMessage = ackMessage;
 selectTopic = selectTopic; // Make sure this is accessible for topic list click
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        subscriberListHTML,
+        subscriberSummary,
+        subscribersFromResponse,
+        topicListHTML,
+        topicsFromResponse,
+    };
+}

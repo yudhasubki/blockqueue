@@ -150,10 +150,10 @@ func (q *Queue) ListSchedulesPage(ctx context.Context, topic Topic, limit int, c
 		var err error
 		afterName, afterID, err = decodeResourceCursor(cursor)
 		if err != nil {
-			return SchedulePage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return SchedulePage{}, ErrInvalidCursor
 		}
 		if _, err := uuid.Parse(afterID); err != nil {
-			return SchedulePage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return SchedulePage{}, ErrInvalidCursor
 		}
 	}
 	rows, err := q.db.listSchedulesPage(ctx, runtime.id, limit+1, afterName, afterID)
@@ -257,7 +257,7 @@ func (q *Queue) ScheduleRunHistory(ctx context.Context, topic Topic, scheduleID 
 	if cursor != "" {
 		when, id, err := decodeScheduleCursor(cursor)
 		if err != nil {
-			return ScheduleRunPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return ScheduleRunPage{}, ErrInvalidCursor
 		}
 		before, beforeID = when, id
 	}
@@ -352,8 +352,9 @@ func (q *Queue) startScheduler() {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				handled := false
-				if permanentScheduleOccurrenceError(err) {
+				ownershipLost := errors.Is(err, ErrScheduleLeaseLost)
+				handled := ownershipLost
+				if !ownershipLost && permanentScheduleOccurrenceError(err) {
 					_, recordErr := q.recordScheduleFailure(
 						q.serverCtx, schedule, schedule.NextRunAt, true, err,
 					)
@@ -371,7 +372,12 @@ func (q *Queue) startScheduler() {
 				if !handled {
 					q.setSchedulerHealthy(false)
 				}
-				slog.Error("scheduler publish failed", "schedule_id", schedule.ID, "error", err)
+				if ownershipLost {
+					slog.Debug("scheduler ownership lost before occurrence commit",
+						"schedule_id", schedule.ID, "error", err)
+				} else {
+					slog.Error("scheduler publish failed", "schedule_id", schedule.ID, "error", err)
+				}
 			} else {
 				if !q.options.DisableMetrics {
 					metric.SchedulerOperations.WithLabelValues(

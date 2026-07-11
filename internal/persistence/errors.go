@@ -6,6 +6,7 @@ var (
 	ErrTopicNotFound      = errors.New("topic not found")
 	ErrNoActiveSubscriber = errors.New("topic has no active subscriber")
 	ErrInvalidPublish     = errors.New("invalid publish request")
+	ErrInvalidCursor      = errors.New("invalid pagination cursor")
 	ErrResourceConflict   = errors.New("resource already exists")
 	ErrSubscriberNotFound = errors.New("subscriber not found")
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
@@ -424,13 +425,13 @@ func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
 	permanent := errors.New("injected permanent admission failure")
 	blocked := make(chan struct{})
 	var blockedOnce sync.Once
-	persist := func(ctx context.Context, requests []writeRequest) ([]bool, error) {
+	persist := func(ctx context.Context, requests []writeRequest) (persistWriteResult, error) {
 		if len(requests) > 1 || requests[0].Message == "permanent" {
-			return nil, permanent
+			return persistWriteResult{}, permanent
 		}
 		blockedOnce.Do(func() { close(blocked) })
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return persistWriteResult{}, ctx.Err()
 	}
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize: 2, FlushInterval: time.Hour,
@@ -466,8 +467,8 @@ func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize: 1, FlushInterval: time.Millisecond,
 		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
-		persist: func(context.Context, []writeRequest) ([]bool, error) {
-			return nil, storageFailure
+		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
+			return persistWriteResult{}, storageFailure
 		},
 	})
 	now := time.Now().UTC()
@@ -489,8 +490,8 @@ func TestDomainWriteFailureDoesNotPoisonWriterHealth(t *testing.T) {
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize: 1, FlushInterval: time.Millisecond,
 		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
-		persist: func(context.Context, []writeRequest) ([]bool, error) {
-			return nil, ErrNoActiveSubscriber
+		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
+			return persistWriteResult{}, ErrNoActiveSubscriber
 		},
 	})
 	now := time.Now().UTC()
@@ -505,6 +506,37 @@ func TestDomainWriteFailureDoesNotPoisonWriterHealth(t *testing.T) {
 	require.NoError(t, wb.CloseContext(context.Background()))
 }
 
+func TestTransientWriteErrorClassifiesRecoverableSQLiteCapacityFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{
+			name: "database full value",
+			err: sqlite3.Error{
+				Code: sqlite3.ErrFull, ExtendedCode: sqlite3.ErrFull.Extend(0),
+			},
+			transient: true,
+		},
+		{
+			name: "database full wrapped pointer",
+			err: errors.Join(errors.New("wrapped"), &sqlite3.Error{
+				Code: sqlite3.ErrFull, ExtendedCode: sqlite3.ErrFull.Extend(0),
+			}),
+			transient: true,
+		},
+		{name: "out of memory primary code", err: sqlite3.ErrNomem, transient: true},
+		{name: "io out of memory extended code", err: sqlite3.ErrIoErrNoMem, transient: true},
+		{name: "constraint remains permanent", err: sqlite3.ErrConstraint, transient: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.Equal(t, test.transient, isTransientWriteError(test.err))
+		})
+	}
+}
+
 func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
 	persistStarted := make(chan struct{})
 	var startedOnce sync.Once
@@ -512,10 +544,10 @@ func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
 		BatchSize: 1, FlushInterval: time.Hour,
 		MaxPendingMessages: 1, MaxPendingBytes: 1 << 20,
 		RetryMin: time.Millisecond, RetryMax: time.Millisecond,
-		persist: func(ctx context.Context, _ []writeRequest) ([]bool, error) {
+		persist: func(ctx context.Context, _ []writeRequest) (persistWriteResult, error) {
 			startedOnce.Do(func() { close(persistStarted) })
 			<-ctx.Done()
-			return nil, ctx.Err()
+			return persistWriteResult{}, ctx.Err()
 		},
 	})
 	now := time.Now().UTC()

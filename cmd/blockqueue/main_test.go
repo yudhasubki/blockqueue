@@ -127,8 +127,21 @@ func TestExampleConfigurationsParse(t *testing.T) {
 	for _, path := range paths {
 		path := path
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			if _, err := ReadConfigFile(path); err != nil {
+			config, err := ReadConfigFile(path)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if config.Http.WriteTimeout < 65*time.Second {
+				t.Fatalf("write_timeout = %s, want at least 65s", config.Http.WriteTimeout)
+			}
+			if config.Http.Driver == storageDriverSQLite {
+				interval, err := configuredCheckpointInterval(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if interval < 30*time.Second {
+					t.Fatalf("checkpoint_interval = %s, want at least 30s", interval)
+				}
 			}
 		})
 	}

@@ -808,7 +808,7 @@ func (d *db) listDeliveries(ctx context.Context, subscriberID uuid.UUID, deadLet
 	if cursor != "" {
 		createdAt, messageID, err := decodeDeliveryCursor(cursor)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+			return nil, ErrInvalidCursor
 		}
 		query += " AND (deliveries.message_created_at < ? OR (deliveries.message_created_at = ? AND deliveries.message_id < ?))"
 		args = append(args, createdAt, createdAt, messageID)

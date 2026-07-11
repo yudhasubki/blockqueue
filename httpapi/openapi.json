@@ -365,6 +365,12 @@
 					},
 					{
 						"$ref": "#/components/parameters/MessageID"
+					},
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
 					}
 				],
 				"responses": {
@@ -383,6 +389,12 @@
 					},
 					{
 						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
 					}
 				],
 				"responses": {
@@ -473,6 +485,12 @@
 					},
 					{
 						"$ref": "#/components/parameters/SubscriberName"
+					},
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
 					}
 				],
 				"responses": {
@@ -636,6 +654,14 @@
 			],
 			"get": {
 				"operationId": "listScheduleRuns",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
+					}
+				],
 				"responses": {
 					"200": {
 						"description": "Schedule run history"

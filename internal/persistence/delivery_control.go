@@ -224,7 +224,7 @@ func (d *db) listDeliveryErrors(
 	if cursor != "" {
 		failedAt, errorID, err := decodeDeliveryCursor(cursor)
 		if err != nil {
-			return nil, fmt.Errorf("%w: invalid error cursor", ErrInvalidPublish)
+			return nil, ErrInvalidCursor
 		}
 		query += " AND (failed_at < ? OR (failed_at = ? AND id < ?))"
 		args = append(args, failedAt, failedAt, errorID)

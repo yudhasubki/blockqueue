@@ -3,7 +3,6 @@ package blockqueue
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -90,18 +89,14 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 		MessageID: write.MessageID, State: PublishStateAdmitted, ScheduledAt: scheduledAt,
 	}
 	if durable {
-		duplicates, err := q.writer.waitAdmission(ctx, admission)
+		result, err := q.writer.waitAdmission(ctx, admission)
 		if err != nil {
 			return PublishReceipt{}, err
 		}
-		duplicate := duplicates[0]
+		duplicate := result.Duplicates[0]
 		receipt.State = PublishStatePersisted
 		receipt.Duplicate = &duplicate
-		receipts := PublishReceipts{receipt}
-		if err := q.restorePersistedScheduledTimes(ctx, nil, receipts); err != nil {
-			return PublishReceipt{}, err
-		}
-		receipt = receipts[0]
+		receipt.ScheduledAt = result.ScheduledAt[0]
 	}
 	return receipt, nil
 }
@@ -179,40 +174,18 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 	}
 
 	if durable {
-		duplicates, err := q.writer.waitAdmission(ctx, admission)
+		result, err := q.writer.waitAdmission(ctx, admission)
 		if err != nil {
 			return nil, err
 		}
 		for i := range receipts {
-			duplicate := duplicates[i]
+			duplicate := result.Duplicates[i]
 			receipts[i].State = PublishStatePersisted
 			receipts[i].Duplicate = &duplicate
-		}
-		if err := q.restorePersistedScheduledTimes(ctx, nil, receipts); err != nil {
-			return nil, err
+			receipts[i].ScheduledAt = result.ScheduledAt[i]
 		}
 	}
 	return receipts, nil
-}
-
-func (q *Queue) restorePersistedScheduledTimes(ctx context.Context, tx *sql.Tx, receipts PublishReceipts) error {
-	ids := make([]string, 0, len(receipts))
-	for _, receipt := range receipts {
-		ids = append(ids, receipt.MessageID)
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	times, err := q.db.messageScheduledTimes(ctx, tx, ids)
-	if err != nil {
-		return err
-	}
-	for index := range receipts {
-		if persisted, ok := times[receipts[index].MessageID]; ok {
-			receipts[index].ScheduledAt = persisted
-		}
-	}
-	return nil
 }
 
 func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (writeRequest, time.Time, error) {

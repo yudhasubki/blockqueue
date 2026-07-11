@@ -74,3 +74,12 @@ func TestConnectionURLSupportsIPv6Host(t *testing.T) {
 		t.Fatalf("host=%q port=%q", parsed.Hostname(), parsed.Port())
 	}
 }
+
+func TestOpenRejectsPoolTooSmallForMaintenanceLeadership(t *testing.T) {
+	_, err := Open(Config{
+		Host: "localhost", Username: "queue", Name: "queue", MaxOpenConns: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "at least 2") {
+		t.Fatalf("expected maintenance pool capacity error, got %v", err)
+	}
+}

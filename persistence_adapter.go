@@ -51,6 +51,9 @@ func (d *db) statementCacheLen() int          { return d.persistence.StatementCa
 func (d *db) tryMaintenanceLeadership(ctx context.Context) (bool, func() error, error) {
 	return d.persistence.TryMaintenanceLeadership(ctx)
 }
+func (d *db) hasDeletedTopology(ctx context.Context) (bool, error) {
+	return d.persistence.HasDeletedTopology(ctx)
+}
 func (d *db) setMetricsDisabled(disabled bool) {
 	d.disableMetrics = disabled
 }
@@ -70,6 +73,7 @@ const (
 )
 
 type deliveryRow = persistence.DeliveryRow
+type persistWriteResult = persistence.PersistWriteResult
 
 type SubscriberQueueStats struct {
 	Pending   int `db:"pending"`
@@ -248,14 +252,11 @@ func (d *db) pruneDeadLetters(ctx context.Context, retention time.Duration) erro
 	return d.persistence.PruneDeadLetters(ctx, retention)
 }
 
-func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) ([]bool, error) {
+func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) (persistWriteResult, error) {
 	return d.persistence.PersistWriteRequests(ctx, requests)
 }
-func (d *db) persistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, requests []writeRequest) ([]bool, error) {
+func (d *db) persistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, requests []writeRequest) (persistWriteResult, error) {
 	return d.persistence.PersistWriteRequestsWithTx(ctx, tx, requests)
-}
-func (d *db) messageScheduledTimes(ctx context.Context, tx *sql.Tx, messageIDs []string) (map[string]time.Time, error) {
-	return d.persistence.MessageScheduledTimes(ctx, tx, messageIDs)
 }
 
 func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration) ([]deliveryRow, error) {

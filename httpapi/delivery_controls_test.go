@@ -96,6 +96,24 @@ func TestHTTPResourceListsUseCursorPagination(t *testing.T) {
 		secondPage.Data.Topics[0].ID == firstPage.Data.Topics[0].ID {
 		t.Fatalf("unexpected second page status=%d page=%+v", second.Code, secondPage.Data)
 	}
+
+	invalid := httptest.NewRecorder()
+	handler.ServeHTTP(invalid, httptest.NewRequest(
+		http.MethodGet, "/v1/topics?cursor=not-a-cursor", nil,
+	))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cursor status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	var problem struct {
+		Code   string `json:"code"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(invalid.Body.Bytes(), &problem); err != nil {
+		t.Fatal(err)
+	}
+	if problem.Code != "validation_error" || strings.Contains(problem.Detail, "publish") {
+		t.Fatalf("invalid cursor problem=%+v", problem)
+	}
 }
 
 func TestHTTPDeliveryControlsAndProblemDetails(t *testing.T) {
@@ -316,6 +334,59 @@ func TestOpenAPIRouteMethodCoverageIsBidirectional(t *testing.T) {
 	extra := setDifference(actual, expected)
 	if len(missing) > 0 || len(extra) > 0 {
 		t.Fatalf("route/OpenAPI mismatch\nmissing routes: %v\nundocumented routes: %v", missing, extra)
+	}
+}
+
+func TestOpenAPIListEndpointsDeclareCursorPagination(t *testing.T) {
+	queue, handler := setupHTTPQueue(t)
+	_ = queue
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("openapi status=%d body=%s", response.Code, response.Body.String())
+	}
+	type parameter struct {
+		Reference string `json:"$ref"`
+	}
+	type operation struct {
+		Parameters []parameter `json:"parameters"`
+	}
+	var document struct {
+		Paths map[string]struct {
+			Get *operation `json:"get"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{
+		"/topics",
+		"/topics/{topicName}/subscribers",
+		"/topics/{topicName}/subscribers/{subscriberName}/messages",
+		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/errors",
+		"/topics/{topicName}/subscribers/{subscriberName}/dlq",
+		"/topics/{topicName}/schedules",
+		"/topics/{topicName}/schedules/{scheduleId}/runs",
+	}
+	for _, path := range paths {
+		pathItem, exists := document.Paths[path]
+		if !exists || pathItem.Get == nil {
+			t.Errorf("paginated GET %s is missing from OpenAPI", path)
+			continue
+		}
+		references := make(map[string]bool, len(pathItem.Get.Parameters))
+		for _, parameter := range pathItem.Get.Parameters {
+			references[parameter.Reference] = true
+		}
+		for _, required := range []string{
+			"#/components/parameters/Limit",
+			"#/components/parameters/Cursor",
+		} {
+			if !references[required] {
+				t.Errorf("paginated GET %s does not declare %s", path, required)
+			}
+		}
 	}
 }
 

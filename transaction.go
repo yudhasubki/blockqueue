@@ -40,7 +40,10 @@ type activeTransaction struct {
 
 // WithTx runs fn in a transaction owned by the queue. It is the preferred way
 // to atomically change application tables and publish or complete deliveries:
-// the queue can notify local waiters only after commit succeeds.
+// the queue can notify local waiters only after commit succeeds. A context
+// cancellation or deadline reported by Commit is outcome-unknown because the
+// server may have committed before the client stopped waiting; fn is never
+// retried.
 func (q *Queue) WithTx(ctx context.Context, options *sql.TxOptions, fn func(*sql.Tx) error) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -63,8 +66,12 @@ func (q *Queue) WithTx(ctx context.Context, options *sql.TxOptions, fn func(*sql
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		if isAmbiguousCommitError(err) {
-			return &TransactionCommitUnknownError{Cause: err}
+		if contextErr := ctx.Err(); contextErr != nil || isAmbiguousCommitError(err) {
+			cause := err
+			if contextErr != nil && !errors.Is(err, contextErr) {
+				cause = errors.Join(err, contextErr)
+			}
+			return &TransactionCommitUnknownError{Cause: cause}
 		}
 		return err
 	}
@@ -134,16 +141,14 @@ func (q *Queue) BatchPublishTx(ctx context.Context, tx *sql.Tx, topic Topic, req
 		}
 	}
 
-	duplicates, err := q.db.persistWriteRequestsWithTx(ctx, tx, writes)
+	result, err := q.db.persistWriteRequestsWithTx(ctx, tx, writes)
 	if err != nil {
 		return nil, err
 	}
 	for index := range receipts {
-		duplicate := duplicates[index]
+		duplicate := result.Duplicates[index]
 		receipts[index].Duplicate = &duplicate
-	}
-	if err := q.restorePersistedScheduledTimes(ctx, tx, receipts); err != nil {
-		return nil, err
+		receipts[index].ScheduledAt = result.ScheduledAt[index]
 	}
 	q.markTransactionTopic(tx, runtime.id)
 	return receipts, nil
