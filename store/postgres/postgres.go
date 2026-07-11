@@ -4,9 +4,13 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,6 +30,7 @@ const (
 type Driver struct {
 	db            *sqlx.DB
 	connectionURL string
+	listenerOK    atomic.Bool
 }
 
 type Config struct {
@@ -44,6 +49,13 @@ type Config struct {
 }
 
 func Open(config Config) (*Driver, error) {
+	if strings.TrimSpace(config.Host) == "" || strings.TrimSpace(config.Username) == "" || strings.TrimSpace(config.Name) == "" {
+		return nil, errors.New("postgres host, username, and database name are required")
+	}
+	if config.Port < 0 || config.Port > 65535 || config.MaxOpenConns < 0 || config.MaxIdleConns < 0 ||
+		config.ConnMaxLifetime < 0 || config.ConnMaxIdleTime < 0 {
+		return nil, errors.New("postgres connection settings are invalid")
+	}
 	connectionString, err := buildConnectionURL(config)
 	if err != nil {
 		return nil, err
@@ -83,13 +95,18 @@ func buildConnectionURL(config Config) (string, error) {
 	if sslMode == "" {
 		sslMode = defaultSSLMode
 	}
+	switch sslMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	default:
+		return "", fmt.Errorf("unsupported postgres ssl mode %q", sslMode)
+	}
 	user := url.User(config.Username)
 	if config.Password != "" {
 		user = url.UserPassword(config.Username, config.Password)
 	}
 	connectionURL := &url.URL{Scheme: connectionScheme, User: user, Host: config.Host, Path: config.Name}
 	if config.Port > 0 {
-		connectionURL.Host = config.Host + ":" + strconv.Itoa(config.Port)
+		connectionURL.Host = net.JoinHostPort(strings.Trim(config.Host, "[]"), strconv.Itoa(config.Port))
 	}
 	synchronousCommit := synchronousCommitStrict
 	switch config.Durability {
@@ -110,19 +127,23 @@ func buildConnectionURL(config Config) (string, error) {
 	return connectionURL.String(), nil
 }
 
-func (driver *Driver) DB() *sql.DB            { return driver.db.DB }
-func (driver *Driver) Dialect() store.Dialect { return store.DialectPostgres }
-func (driver *Driver) DriverName() string     { return driverName }
-func (driver *Driver) Close() error           { return driver.db.Close() }
+func (driver *Driver) DB() *sql.DB               { return driver.db.DB }
+func (driver *Driver) Dialect() store.Dialect    { return store.DialectPostgres }
+func (driver *Driver) DriverName() string        { return driverName }
+func (driver *Driver) Close() error              { return driver.db.Close() }
+func (driver *Driver) NotificationHealthy() bool { return driver.listenerOK.Load() }
 
 func (driver *Driver) Listen(ctx context.Context, channel string) (<-chan string, error) {
 	connection, err := openListener(ctx, driver.connectionURL, channel)
 	if err != nil {
+		driver.listenerOK.Store(false)
 		return nil, err
 	}
+	driver.listenerOK.Store(true)
 	output := make(chan string, 64)
 	go func() {
 		defer close(output)
+		defer driver.listenerOK.Store(false)
 		defer func() {
 			if connection != nil {
 				_ = connection.Close(context.Background())
@@ -131,6 +152,7 @@ func (driver *Driver) Listen(ctx context.Context, channel string) (<-chan string
 		backoff := time.Second
 		for {
 			if connection == nil {
+				driver.listenerOK.Store(false)
 				timer := time.NewTimer(backoff)
 				select {
 				case <-ctx.Done():
@@ -146,6 +168,7 @@ func (driver *Driver) Listen(ctx context.Context, channel string) (<-chan string
 					backoff = min(backoff*2, 30*time.Second)
 					continue
 				}
+				driver.listenerOK.Store(true)
 				backoff = time.Second
 			}
 			notification, waitErr := connection.WaitForNotification(ctx)
@@ -161,6 +184,7 @@ func (driver *Driver) Listen(ctx context.Context, channel string) (<-chan string
 				return
 			}
 			_ = connection.Close(context.Background())
+			driver.listenerOK.Store(false)
 			connection = nil
 			backoff = min(backoff*2, 30*time.Second)
 		}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -17,16 +18,17 @@ import (
 )
 
 type ambiguousCommitStore struct {
-	database *sql.DB
-	name     string
-	armed    atomic.Bool
+	database  *sql.DB
+	name      string
+	armed     atomic.Bool
+	commitErr error
 }
 
-func openAmbiguousCommitStore(t *testing.T) *ambiguousCommitStore {
+func openAmbiguousCommitStore(t *testing.T, commitErr error) *ambiguousCommitStore {
 	t.Helper()
-	storage := &ambiguousCommitStore{name: "blockqueue_commit_fault_" + uuid.NewString()}
+	storage := &ambiguousCommitStore{name: "blockqueue_commit_fault_" + uuid.NewString(), commitErr: commitErr}
 	sql.Register(storage.name, &commitFaultDriver{
-		inner: &sqlite3.SQLiteDriver{}, armed: &storage.armed,
+		inner: &sqlite3.SQLiteDriver{}, armed: &storage.armed, commitErr: commitErr,
 	})
 	dsn := fmt.Sprintf("file:%s?_synchronous=full&_journal_mode=wal&_foreign_keys=on&_busy_timeout=5000&_txlock=immediate&_auto_vacuum=2",
 		filepath.Join(t.TempDir(), "ambiguous-commit.db"))
@@ -45,8 +47,9 @@ func (storage *ambiguousCommitStore) DriverName() string     { return storage.na
 func (storage *ambiguousCommitStore) Close() error           { return storage.database.Close() }
 
 type commitFaultDriver struct {
-	inner driver.Driver
-	armed *atomic.Bool
+	inner     driver.Driver
+	armed     *atomic.Bool
+	commitErr error
 }
 
 func (fault *commitFaultDriver) Open(name string) (driver.Conn, error) {
@@ -54,12 +57,13 @@ func (fault *commitFaultDriver) Open(name string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &commitFaultConn{Conn: connection, armed: fault.armed}, nil
+	return &commitFaultConn{Conn: connection, armed: fault.armed, commitErr: fault.commitErr}, nil
 }
 
 type commitFaultConn struct {
 	driver.Conn
-	armed *atomic.Bool
+	armed     *atomic.Bool
+	commitErr error
 }
 
 func (connection *commitFaultConn) Begin() (driver.Tx, error) {
@@ -75,7 +79,7 @@ func (connection *commitFaultConn) BeginTx(ctx context.Context, options driver.T
 	if err != nil {
 		return nil, err
 	}
-	return &commitFaultTx{Tx: transaction, armed: connection.armed}, nil
+	return &commitFaultTx{Tx: transaction, armed: connection.armed, commitErr: connection.commitErr}, nil
 }
 
 func (connection *commitFaultConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
@@ -129,7 +133,8 @@ func (connection *commitFaultConn) CheckNamedValue(value *driver.NamedValue) err
 
 type commitFaultTx struct {
 	driver.Tx
-	armed *atomic.Bool
+	armed     *atomic.Bool
+	commitErr error
 }
 
 func (transaction *commitFaultTx) Commit() error {
@@ -137,13 +142,26 @@ func (transaction *commitFaultTx) Commit() error {
 		return err
 	}
 	if transaction.armed.CompareAndSwap(true, false) {
-		return driver.ErrBadConn
+		return transaction.commitErr
 	}
 	return nil
 }
 
 func TestWriterRecoversFromAmbiguousCommitWithoutDuplicateFanout(t *testing.T) {
-	driver := openAmbiguousCommitStore(t)
+	for name, commitErr := range map[string]error{
+		"bad_connection": driver.ErrBadConn,
+		"eof":            io.EOF,
+		"unexpected_eof": io.ErrUnexpectedEOF,
+	} {
+		t.Run(name, func(t *testing.T) {
+			testWriterRecoversFromAmbiguousCommit(t, commitErr)
+		})
+	}
+}
+
+func testWriterRecoversFromAmbiguousCommit(t *testing.T, commitErr error) {
+	t.Helper()
+	driver := openAmbiguousCommitStore(t, commitErr)
 	queue := New(driver, Options{Writer: WriterOptions{
 		BatchSize: 1, FlushInterval: time.Millisecond,
 		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
@@ -177,4 +195,46 @@ func TestWriterRecoversFromAmbiguousCommitWithoutDuplicateFanout(t *testing.T) {
 		queue.db.Conn().Rebind("SELECT COUNT(*) FROM message_deliveries WHERE message_id = ?"), receipt.MessageID))
 	require.Equal(t, 1, messages)
 	require.Equal(t, 1, deliveries)
+}
+
+func TestWithTxReportsAmbiguousCommitWithoutRetryingBusinessLogic(t *testing.T) {
+	driver := openAmbiguousCommitStore(t, driver.ErrBadConn)
+	queue := New(driver, Options{})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("ambiguous-business-transaction")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		if queue.State() != LifecycleStopped {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = queue.Shutdown(ctx)
+		}
+	})
+	require.NoError(t, func() error {
+		_, err := queue.db.Conn().Exec("CREATE TABLE business_events (id TEXT PRIMARY KEY)")
+		return err
+	}())
+
+	driver.armed.Store(true)
+	callbackCalls := 0
+	err := queue.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+		callbackCalls++
+		if _, err := tx.Exec("INSERT INTO business_events (id) VALUES (?)", "paid-order"); err != nil {
+			return err
+		}
+		_, err := queue.PublishTx(context.Background(), tx, topic, Message{
+			Message: "order paid", IdempotencyKey: "paid-order",
+		})
+		return err
+	})
+	require.ErrorIs(t, err, ErrTransactionCommitUnknown)
+	require.Equal(t, 1, callbackCalls, "WithTx must never retry application code")
+
+	var businessRows, messageRows int
+	require.NoError(t, queue.db.Conn().Get(&businessRows, "SELECT COUNT(*) FROM business_events WHERE id = 'paid-order'"))
+	require.NoError(t, queue.db.Conn().Get(&messageRows,
+		queue.db.Conn().Rebind("SELECT COUNT(*) FROM messages WHERE idempotency_key = ?"), "paid-order"))
+	require.Equal(t, 1, businessRows)
+	require.Equal(t, 1, messageRows)
 }

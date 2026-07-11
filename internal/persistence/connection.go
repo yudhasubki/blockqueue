@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"fmt"
 	"strings"
@@ -77,6 +78,72 @@ func databaseTime(value any) (time.Time, bool, error) {
 		}
 	}
 	return time.Time{}, false, fmt.Errorf("invalid database time %q", text)
+}
+
+func (d *db) databaseNow(ctx context.Context) (time.Time, error) {
+	var raw any
+	if err := d.Conn().QueryRowxContext(ctx, d.dialect.currentTimeQuery()).Scan(&raw); err != nil {
+		return time.Time{}, err
+	}
+	now, exists, err := databaseTime(raw)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !exists {
+		return time.Time{}, errors.New("database returned no current time")
+	}
+	return now, nil
+}
+
+const maintenanceAdvisoryLockID int64 = 0x424C4F434B4D4149 // "BLOCKMAI"
+
+// tryMaintenanceLeadership elects one PostgreSQL process for retention and
+// topology cleanup. The lock is session-scoped, so the dedicated connection
+// remains checked out until release. SQLite has one writer and is always the
+// maintenance leader.
+func (d *db) tryMaintenanceLeadership(ctx context.Context) (bool, func() error, error) {
+	if d.dialectErr != nil {
+		return false, nil, d.dialectErr
+	}
+	if d.dialect.kind() != store.DialectPostgres {
+		return true, func() error { return nil }, nil
+	}
+	connection, err := d.Database.DB().Conn(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	var acquired bool
+	if err := connection.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", maintenanceAdvisoryLockID).Scan(&acquired); err != nil {
+		_ = connection.Close()
+		return false, nil, err
+	}
+	if !acquired {
+		_ = connection.Close()
+		return false, nil, nil
+	}
+	var once sync.Once
+	var releaseErr error
+	release := func() error {
+		once.Do(func() {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var unlocked bool
+			unlockErr := connection.QueryRowContext(
+				releaseCtx, "SELECT pg_advisory_unlock($1)", maintenanceAdvisoryLockID,
+			).Scan(&unlocked)
+			if unlockErr == nil && !unlocked {
+				unlockErr = errors.New("postgres maintenance advisory lock was not held")
+			}
+			if unlockErr != nil {
+				// Never return a session with a possibly-held advisory lock to the
+				// pool. ErrBadConn tells database/sql to discard it.
+				_ = connection.Raw(func(any) error { return sqldriver.ErrBadConn })
+			}
+			releaseErr = errors.Join(unlockErr, connection.Close())
+		})
+		return releaseErr
+	}
+	return true, release, nil
 }
 
 func (d *db) tx(ctx context.Context, fn func(context.Context, *sqlx.Tx) error) error {

@@ -52,7 +52,7 @@ func (q *Queue) snoozeDeliveryTx(
 	if delay < 0 {
 		return time.Time{}, fmt.Errorf("%w: snooze delay cannot be negative", ErrInvalidPublish)
 	}
-	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	topicRuntime, runtime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -60,8 +60,12 @@ func (q *Queue) snoozeDeliveryTx(
 		return time.Time{}, err
 	}
 	visibleAt, err := q.db.snoozeDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt, delay)
-	if err == nil && tx == nil {
-		runtime.notify()
+	if err == nil {
+		if tx == nil {
+			runtime.notify()
+		} else {
+			q.markTransactionTopic(tx, topicRuntime.id)
+		}
 	}
 	return visibleAt, err
 }
@@ -116,13 +120,17 @@ func (q *Queue) cancelClaimedDeliveryTx(
 	if err := validateDeliveryIdentity(messageID, receipt); err != nil {
 		return err
 	}
-	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	topicRuntime, runtime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err
 	}
 	err = q.db.cancelClaimedDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt, reason)
-	if err == nil && tx == nil {
-		runtime.notify()
+	if err == nil {
+		if tx == nil {
+			runtime.notify()
+		} else {
+			q.markTransactionTopic(tx, topicRuntime.id)
+		}
 	}
 	return err
 }
@@ -134,13 +142,17 @@ func (q *Queue) cancelDeliveryTx(ctx context.Context, tx *sql.Tx, topic Topic, s
 	if _, err := uuid.Parse(messageID); err != nil {
 		return ErrDeliveryNotFound
 	}
-	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	topicRuntime, runtime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err
 	}
 	_, err = q.db.cancelDeliveryWithTx(ctx, tx, runtime.id, messageID, reason)
-	if err == nil && tx == nil {
-		runtime.notify()
+	if err == nil {
+		if tx == nil {
+			runtime.notify()
+		} else {
+			q.markTransactionTopic(tx, topicRuntime.id)
+		}
 	}
 	return err
 }
@@ -182,6 +194,8 @@ func (q *Queue) cancelMessageTx(ctx context.Context, tx *sql.Tx, topic Topic, me
 	}
 	if tx == nil {
 		runtime.notify()
+	} else {
+		q.markTransactionTopic(tx, runtime.id)
 	}
 	return results, nil
 }
@@ -247,14 +261,18 @@ func (q *Queue) AckDeliveryTx(ctx context.Context, tx *sql.Tx, topic Topic, subs
 	if err := q.requireTransactionAllowed(tx); err != nil {
 		return err
 	}
-	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	topicRuntime, runtime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err
 	}
 	if err := validateDeliveryIdentity(messageID, receipt); err != nil {
 		return err
 	}
-	return q.db.ackDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt)
+	if err := q.db.ackDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt); err != nil {
+		return err
+	}
+	q.markTransactionTopic(tx, topicRuntime.id)
+	return nil
 }
 
 // NackDeliveryTx atomically records a failed lease in a caller-owned
@@ -276,7 +294,7 @@ func (q *Queue) NackDeliveryTx(
 	if retryDelay < 0 {
 		return fmt.Errorf("%w: retry delay cannot be negative", ErrInvalidPublish)
 	}
-	_, runtime, err := q.deliveryTarget(topic, subscriber)
+	topicRuntime, runtime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return err
 	}
@@ -284,6 +302,9 @@ func (q *Queue) NackDeliveryTx(
 		return err
 	}
 	_, err = q.db.nackDeliveryWithTx(ctx, tx, runtime.id, messageID, receipt, retryDelay, errorText)
+	if err == nil {
+		q.markTransactionTopic(tx, topicRuntime.id)
+	}
 	return err
 }
 

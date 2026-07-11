@@ -349,6 +349,76 @@ func TestScheduleLeaseTakeoverFencesStaleOwner(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestScheduleClaimUsesDatabaseTimeWithoutClockOverride(t *testing.T) {
+	driver, cleanup := setupTestDB(t, "schedule_database_clock")
+	defer cleanup()
+	database := newDb(driver)
+	topicID := uuid.New()
+	subscriberID := uuid.New()
+	require.NoError(t, database.createTopic(context.Background(),
+		Topic{ID: topicID, Name: "database-clock"},
+		Subscribers{{
+			ID: subscriberID, TopicID: topicID, Name: "worker",
+			Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"},
+		}},
+	))
+	databaseNow, err := database.persistence.DatabaseNow(context.Background())
+	require.NoError(t, err)
+	schedule := Schedule{
+		ID: uuid.NewString(), TopicID: topicID.String(), Name: "future",
+		CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
+		MisfirePolicy: ScheduleMisfirePolicyFireOnce, OverlapPolicy: ScheduleOverlapPolicySkip,
+		NextRunAt: databaseNow.Add(time.Minute),
+	}
+	require.NoError(t, database.createSchedule(context.Background(), schedule))
+	_, claimed, err := database.claimDueSchedule(context.Background(), "db-clock", time.Time{}, defaultScheduleLease)
+	require.NoError(t, err)
+	require.False(t, claimed, "a fast application clock must not claim a future database schedule")
+	_, claimed, err = database.claimDueSchedule(
+		context.Background(), "test-clock", databaseNow.Add(2*time.Minute), defaultScheduleLease,
+	)
+	require.NoError(t, err)
+	require.True(t, claimed, "an explicit test clock override must remain deterministic")
+}
+
+func TestSchedulerRecordsPermanentFailureAndAdvances(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC().Truncate(time.Minute)}
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "schedule-failure.db"), sqlite.Config{})
+	require.NoError(t, err)
+	queue := New(driver, Options{Clock: clock})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("schedule-failure")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
+		Name: "each-minute", CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
+	})
+	require.NoError(t, err)
+	require.NoError(t, queue.DeleteSubscriber(context.Background(), topic, subscriber.Name))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+
+	clock.Advance(time.Minute)
+	require.Eventually(t, func() bool {
+		history, historyErr := queue.ScheduleRunHistory(context.Background(), topic, schedule.ID, 10, "")
+		return historyErr == nil && len(history.Runs) == 1 && history.Runs[0].Status == ScheduleRunStatusFailed
+	}, 2*time.Second, 5*time.Millisecond)
+	updated, err := queue.GetSchedule(context.Background(), topic, schedule.ID)
+	require.NoError(t, err)
+	require.True(t, updated.NextRunAt.After(clock.Now()))
+
+	replacement := NewSubscriber(topic, "replacement", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateSubscribers(context.Background(), topic, Subscribers{replacement}))
+	clock.Advance(time.Minute)
+	require.Eventually(t, func() bool {
+		var messages int
+		return testDB(driver).Get(&messages, "SELECT COUNT(*) FROM messages WHERE topic_id = ?", topic.ID) == nil && messages == 1
+	}, 2*time.Second, 5*time.Millisecond)
+}
+
 func TestSchedulerRestartFiresAtMostOneMissedOccurrence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scheduler-restart.db")
 	clock := &testClock{now: time.Date(2026, time.July, 10, 10, 0, 0, 0, time.UTC)}
@@ -416,6 +486,89 @@ func TestSubscriberMutationFailureLeavesRuntimeUnchanged(t *testing.T) {
 	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, time.Second)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
+}
+
+func TestPauseDoesNotHoldGlobalRegistryLockDuringDatabaseWrite(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "pause-lock-scope.db"), sqlite.Config{BusyTimeout: 5000})
+	require.NoError(t, err)
+	queue := New(driver, Options{})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("pause-lock-scope")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+
+	lock, err := testDB(driver).Connx(context.Background())
+	require.NoError(t, err)
+	requireSQLiteWriteLock(t, lock)
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			_, _ = lock.ExecContext(context.Background(), "ROLLBACK")
+		}
+		_ = lock.Close()
+	}()
+
+	result := make(chan error, 1)
+	go func() { result <- queue.PauseTopic(context.Background(), topic) }()
+	runtime, exists := queue.getTopicRuntime(topic)
+	require.True(t, exists)
+	require.Eventually(t, func() bool {
+		if runtime.admissionMu.TryRLock() {
+			runtime.admissionMu.RUnlock()
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond, "pause must serialize mutations for its topic")
+	require.True(t, queue.mtx.TryLock(), "database I/O must not hold the global registry mutex")
+	queue.mtx.Unlock()
+
+	_, err = lock.ExecContext(context.Background(), "ROLLBACK")
+	require.NoError(t, err)
+	lockHeld = false
+	require.NoError(t, <-result)
+}
+
+func TestPauseFailureLeavesRuntimeAndDeliveryActive(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	_, err := testDB(driver).Exec(`
+		CREATE TRIGGER reject_topic_pause
+		BEFORE UPDATE OF paused ON topics
+		BEGIN SELECT RAISE(ABORT, 'injected pause failure'); END`)
+	require.NoError(t, err)
+	require.Error(t, queue.PauseTopic(context.Background(), topic))
+	stored, exists := queue.GetTopic(topic.Name)
+	require.True(t, exists)
+	require.False(t, stored.Paused, "failed DB mutation must not change runtime pause state")
+
+	_, err = testDB(driver).Exec("DROP TRIGGER reject_topic_pause")
+	require.NoError(t, err)
+	_, err = queue.Publish(context.Background(), topic, Message{Message: "still-active"})
+	require.NoError(t, err)
+	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+}
+
+func TestLogicalTopicDeletionRejectsAdmissionBeforePhysicalCleanup(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	receipt, err := queue.Publish(context.Background(), topic, Message{Message: "logical-delete"})
+	require.NoError(t, err)
+	require.NoError(t, queue.DeleteTopic(context.Background(), topic))
+	_, err = queue.Publish(context.Background(), topic, Message{Message: "must-reject"})
+	require.ErrorIs(t, err, ErrTopicNotFound)
+	_, exists := queue.GetTopic(topic.Name)
+	require.False(t, exists)
+
+	require.Eventually(t, func() bool {
+		var messages int
+		return testDB(driver).Get(&messages,
+			"SELECT COUNT(*) FROM messages WHERE id = ?", receipt.MessageID) == nil && messages == 0
+	}, 3*time.Second, 10*time.Millisecond, "bounded asynchronous cleanup must eventually reclaim the topic")
 }
 
 func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {

@@ -19,6 +19,11 @@ type Topic struct {
 
 type Topics []Topic
 
+type TopicPage struct {
+	Topics     Topics `json:"topics"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
 type TopicFilter struct {
 	Names       []string
 	WithDeleted bool
@@ -61,10 +66,11 @@ type SubscriberOptions struct {
 // RetryPolicy controls the delay applied after a NACK or expired lease. Empty
 // fields use the documented exponential-backoff defaults.
 type RetryPolicy struct {
-	InitialDelay string  `json:"initial_delay,omitempty"`
-	MaxDelay     string  `json:"max_delay,omitempty"`
-	Multiplier   float64 `json:"multiplier,omitempty"`
-	Jitter       float64 `json:"jitter,omitempty"`
+	InitialDelay  string  `json:"initial_delay,omitempty"`
+	MaxDelay      string  `json:"max_delay,omitempty"`
+	Multiplier    float64 `json:"multiplier,omitempty"`
+	Jitter        float64 `json:"jitter,omitempty"`
+	DisableJitter bool    `json:"disable_jitter,omitempty"`
 }
 
 func (options SubscriberOptions) normalized() SubscriberOptions {
@@ -86,7 +92,9 @@ func (options SubscriberOptions) normalized() SubscriberOptions {
 	if options.RetryPolicy.Multiplier == 0 {
 		options.RetryPolicy.Multiplier = 2
 	}
-	if options.RetryPolicy.Jitter == 0 {
+	if options.RetryPolicy.DisableJitter {
+		options.RetryPolicy.Jitter = 0
+	} else if options.RetryPolicy.Jitter == 0 {
 		options.RetryPolicy.Jitter = 0.2
 	}
 	return options
@@ -129,6 +137,11 @@ type SubscriberStatus struct {
 }
 
 type SubscriberStatuses []SubscriberStatus
+
+type SubscriberStatusPage struct {
+	Subscribers SubscriberStatuses `json:"subscribers"`
+	NextCursor  string             `json:"next_cursor,omitempty"`
+}
 
 type Message struct {
 	Message        string            `json:"message"`

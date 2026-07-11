@@ -5,6 +5,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -99,6 +100,7 @@ type WriterOptions struct {
 	RetryMin           time.Duration
 	RetryMax           time.Duration
 	notify             func(topicID uuid.UUID)
+	persist            func(context.Context, []writeRequest) ([]bool, error)
 }
 
 func DefaultWriterOptions() WriterOptions {
@@ -124,6 +126,8 @@ type writer struct {
 	retryMin      time.Duration
 	retryMax      time.Duration
 	notify        func(uuid.UUID)
+	persist       func(context.Context, []writeRequest) ([]bool, error)
+	metricID      uint64
 
 	maxMessages  int64
 	maxBytes     int64
@@ -131,15 +135,16 @@ type writer struct {
 	pendingBytes atomic.Int64
 	budgetMu     sync.Mutex
 
-	admissionMu sync.RWMutex
-	accepting   atomic.Bool
-	stop        chan struct{}
-	abort       chan struct{} // only for process teardown after a failed shutdown
-	persistCtx  context.Context
-	persistStop context.CancelFunc
-	done        chan struct{}
-	stopOnce    sync.Once
-	abortOnce   sync.Once
+	admissionMu      sync.Mutex
+	admissionSenders sync.WaitGroup
+	accepting        atomic.Bool
+	stop             chan struct{}
+	abort            chan struct{} // only for process teardown after a failed shutdown
+	persistCtx       context.Context
+	persistStop      context.CancelFunc
+	done             chan struct{}
+	stopOnce         sync.Once
+	abortOnce        sync.Once
 
 	healthy   atomic.Bool
 	lastErrMu sync.RWMutex
@@ -183,6 +188,7 @@ func newWriter(ctx context.Context, database *db, config WriterOptions) *writer 
 		retryMin:      config.RetryMin,
 		retryMax:      config.RetryMax,
 		notify:        config.notify,
+		persist:       config.persist,
 		maxMessages:   config.MaxPendingMessages,
 		maxBytes:      config.MaxPendingBytes,
 		stop:          make(chan struct{}),
@@ -190,6 +196,12 @@ func newWriter(ctx context.Context, database *db, config WriterOptions) *writer 
 		persistCtx:    persistCtx,
 		persistStop:   persistStop,
 		done:          make(chan struct{}),
+	}
+	if w.persist == nil {
+		w.persist = database.persistWriteRequests
+	}
+	if !database.disableMetrics {
+		w.metricID = metric.RegisterWriter()
 	}
 	w.accepting.Store(true)
 	w.healthy.Store(true)
@@ -279,24 +291,20 @@ func (w *writer) admitOwned(ctx context.Context, owned []writeRequest, durable b
 		admission.result = make(chan writeOutcome, 1)
 	}
 
-	w.admissionMu.RLock()
-	if !w.accepting.Load() {
-		w.admissionMu.RUnlock()
+	if !w.beginAdmissionSend() {
 		w.release(admission.messages, admission.bytes)
 		return nil, ErrWriterClosed
 	}
+	defer w.admissionSenders.Done()
 	select {
 	case w.queue <- admission:
-		w.admissionMu.RUnlock()
 		if !w.db.disableMetrics {
 			metric.PublishResults.WithLabelValues(metric.PublishResultAdmitted).Add(float64(len(owned)))
 		}
 	case <-ctx.Done():
-		w.admissionMu.RUnlock()
 		w.release(admission.messages, admission.bytes)
 		return nil, ctx.Err()
 	case <-w.stop:
-		w.admissionMu.RUnlock()
 		w.release(admission.messages, admission.bytes)
 		return nil, ErrWriterClosed
 	}
@@ -334,8 +342,8 @@ func (w *writer) reserve(messages, bytes int64) error {
 	w.pendingMsgs.Add(messages)
 	w.pendingBytes.Add(bytes)
 	if !w.db.disableMetrics {
-		metric.PendingMessages.Set(float64(w.pendingMsgs.Load()))
-		metric.PendingBytes.Set(float64(w.pendingBytes.Load()))
+		metric.PendingMessages.Add(float64(messages))
+		metric.PendingBytes.Add(float64(bytes))
 	}
 	return nil
 }
@@ -345,8 +353,8 @@ func (w *writer) release(messages, bytes int64) {
 	w.pendingMsgs.Add(-messages)
 	w.pendingBytes.Add(-bytes)
 	if !w.db.disableMetrics {
-		metric.PendingMessages.Set(float64(w.pendingMsgs.Load()))
-		metric.PendingBytes.Set(float64(w.pendingBytes.Load()))
+		metric.PendingMessages.Add(-float64(messages))
+		metric.PendingBytes.Add(-float64(bytes))
 	}
 	w.budgetMu.Unlock()
 }
@@ -366,11 +374,7 @@ func (w *writer) LastError() error {
 func (w *writer) setHealth(healthy bool, err error) {
 	w.healthy.Store(healthy)
 	if !w.db.disableMetrics {
-		if healthy {
-			metric.WriterHealthy.Set(1)
-		} else {
-			metric.WriterHealthy.Set(0)
-		}
+		metric.SetWriterHealth(w.metricID, healthy)
 	}
 	w.lastErrMu.Lock()
 	w.lastErr = err
@@ -380,19 +384,17 @@ func (w *writer) setHealth(healthy bool, err error) {
 // Barrier waits until every admission accepted before it has committed.
 func (w *writer) Barrier(ctx context.Context) error {
 	barrier := &writeAdmission{barrier: make(chan error, 1)}
-	w.admissionMu.RLock()
-	if !w.accepting.Load() {
-		w.admissionMu.RUnlock()
+	if !w.beginAdmissionSend() {
 		return ErrWriterClosed
 	}
 	select {
 	case w.queue <- barrier:
-		w.admissionMu.RUnlock()
+		w.admissionSenders.Done()
 	case <-ctx.Done():
-		w.admissionMu.RUnlock()
+		w.admissionSenders.Done()
 		return ctx.Err()
 	case <-w.stop:
-		w.admissionMu.RUnlock()
+		w.admissionSenders.Done()
 		return ErrWriterClosed
 	}
 	select {
@@ -401,6 +403,18 @@ func (w *writer) Barrier(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (w *writer) beginAdmissionSend() bool {
+	w.admissionMu.Lock()
+	defer w.admissionMu.Unlock()
+	if !w.accepting.Load() {
+		return false
+	}
+	// Add is serialized with initiateClose. Once accepting becomes false,
+	// writer.run may Wait without racing another Add.
+	w.admissionSenders.Add(1)
+	return true
 }
 
 func (w *writer) initiateClose() {
@@ -441,6 +455,9 @@ func (w *writer) run() {
 	defer func() {
 		w.persistStop()
 		w.failQueuedAdmissions(ErrWriterDrainTimeout)
+		if !w.db.disableMetrics {
+			metric.UnregisterWriter(w.metricID)
+		}
 		close(w.done)
 	}()
 	ticker := time.NewTicker(w.flushInterval)
@@ -509,6 +526,11 @@ func (w *writer) run() {
 				return
 			}
 		case <-w.stop:
+			// A sender registered before stop may observe both a writable queue
+			// and the closed stop channel and choose either select branch. Wait
+			// for every such sender before the final drain so no admission can
+			// arrive after the writer exits.
+			w.admissionSenders.Wait()
 			for {
 				select {
 				case admission := <-w.queue:
@@ -554,9 +576,10 @@ func (w *writer) flush(admissions []*writeAdmission) bool {
 			"admissions", len(admissions),
 			"batch_size", len(requests),
 		)
-		for _, admission := range admissions {
+		for index, admission := range admissions {
 			duplicates, admissionErr, aborted := w.persistWithRetry(admission.requests)
 			if aborted {
+				w.completeAdmissions(admissions[index:], nil, ErrWriterDrainTimeout, started)
 				return false
 			}
 			w.completeAdmissions([]*writeAdmission{admission}, duplicates, admissionErr, started)
@@ -580,7 +603,7 @@ func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool)
 			return nil, ErrWriterDrainTimeout, true
 		default:
 		}
-		duplicates, err := w.db.persistWriteRequests(w.persistCtx, requests)
+		duplicates, err := w.persist(w.persistCtx, requests)
 		if err == nil {
 			w.setHealth(true, nil)
 			return duplicates, nil, false
@@ -589,6 +612,17 @@ func (w *writer) persistWithRetry(requests []writeRequest) ([]bool, error, bool)
 			return nil, ErrWriterDrainTimeout, true
 		}
 		if !isTransientWriteError(err) {
+			if isDomainWriteError(err) {
+				// A definitive application-level response proves the database is
+				// reachable and must not leave stale infrastructure health behind.
+				w.setHealth(true, nil)
+			} else {
+				// Unknown permanent storage failures are fatal for this writer.
+				// Stop new admission so HTTP/embedded callers observe 503/closed
+				// instead of accepting async work that cannot be persisted.
+				w.setHealth(false, err)
+				w.initiateClose()
+			}
 			return nil, err, false
 		}
 
@@ -690,7 +724,7 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, duplicates []b
 			}
 		}
 		if !w.db.disableMetrics {
-			metric.PersistenceLag.Set(time.Since(oldest).Seconds())
+			metric.SetPersistenceLag(w.metricID, time.Since(oldest).Seconds())
 		}
 		if w.notify != nil {
 			for topicID := range uniqueTopics {
@@ -699,7 +733,7 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, duplicates []b
 		}
 	}
 	if !w.db.disableMetrics && w.pendingMsgs.Load() == 0 {
-		metric.PersistenceLag.Set(0)
+		metric.SetPersistenceLag(w.metricID, 0)
 	}
 }
 
@@ -722,6 +756,13 @@ func (w *writer) failQueuedAdmissions(outcomeErr error) {
 	}
 }
 
+func isDomainWriteError(err error) bool {
+	return errors.Is(err, ErrInvalidPublish) ||
+		errors.Is(err, ErrIdempotencyConflict) ||
+		errors.Is(err, ErrNoActiveSubscriber) ||
+		errors.Is(err, ErrTopicNotFound)
+}
+
 func isTransientWriteError(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, ErrIdempotencyConflict) || errors.Is(err, ErrNoActiveSubscriber) ||
@@ -729,6 +770,9 @@ func isTransientWriteError(err error) bool {
 		return false
 	}
 	if errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	var networkError net.Error
@@ -757,6 +801,35 @@ func isTransientWriteError(err error) bool {
 	lower := strings.ToLower(err.Error())
 	for _, fragment := range transientWriteErrorFragments {
 		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAmbiguousCommitError(err error) bool {
+	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		code := postgresError.Code
+		return strings.HasPrefix(code, postgresClassConnectionException) ||
+			strings.HasPrefix(code, postgresClassSystemError) ||
+			code == postgresAdminShutdown || code == postgresCrashShutdown || code == postgresCannotConnectNow
+	}
+	var sqliteError sqlite3.Error
+	if errors.As(err, &sqliteError) {
+		return sqliteError.Code == sqlite3.ErrIoErr || sqliteError.Code == sqlite3.ErrProtocol
+	}
+	lower := strings.ToLower(err.Error())
+	for _, fragment := range transientWriteErrorFragments {
+		if fragment != "database is locked" && fragment != "database table is locked" &&
+			strings.Contains(lower, fragment) {
 			return true
 		}
 	}

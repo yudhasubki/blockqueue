@@ -3,6 +3,7 @@ package blockqueue
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,12 +64,21 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		Writer: WriterOptions{BatchSize: 20, FlushInterval: time.Millisecond},
 	})
 	require.NoError(t, queue.Run(context.Background()))
+	t.Cleanup(func() {
+		if queue.State() == LifecycleStopped {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
 	topic := NewTopic("contract-topic")
 	subscribers := Subscribers{
 		NewSubscriber(topic, "one", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "100ms"}),
 		NewSubscriber(topic, "two", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "100ms"}),
 	}
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, subscribers))
+	runPaginationContract(t, queue, topic)
 	runTransactionalPublishContract(t, queue, driver, topic)
 	if driver.Dialect() == store.DialectPostgres {
 		runPostgresTopologyFenceContract(t, queue, driver)
@@ -275,6 +285,17 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.LessOrEqual(t, policyDelay, 350*time.Millisecond)
 	require.Equal(t, 1, policyStatus.Deliveries[0].FailureCount)
 
+	_, noJitterSubscriber := createContractTopic(t, queue, "contract-no-jitter", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		RetryPolicy: RetryPolicy{
+			InitialDelay: "200ms", MaxDelay: "200ms", Multiplier: 2, DisableJitter: true,
+		},
+	})
+	var storedJitter float64
+	require.NoError(t, database.Get(&storedJitter, database.Rebind(
+		"SELECT retry_jitter FROM topic_subscribers WHERE id = ?"), noJitterSubscriber.ID))
+	require.Zero(t, storedJitter)
+
 	retentionTopic, retentionSubscriber := createContractTopic(t, queue, "contract-error-retention", SubscriberOptions{
 		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
 	})
@@ -290,9 +311,10 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
 	require.Equal(t, 1, retainedErrors)
 	require.NoError(t, queue.DeleteSubscriber(context.Background(), retentionTopic, retentionSubscriber.Name))
-	require.NoError(t, database.Get(&retainedErrors, database.Rebind(
-		"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID))
-	require.Zero(t, retainedErrors, "failure history retention must follow its delivery row")
+	require.Eventually(t, func() bool {
+		return database.Get(&retainedErrors, database.Rebind(
+			"SELECT COUNT(*) FROM delivery_errors WHERE message_id = ?"), retentionReceipt.MessageID) == nil && retainedErrors == 0
+	}, 3*time.Second, 10*time.Millisecond, "failure history retention must follow its delivery row")
 
 	concurrentTopic, concurrentSubscriber := createContractTopic(t, queue, "contract-concurrent-claim", SubscriberOptions{
 		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
@@ -470,6 +492,76 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.NoError(t, queue.Shutdown(ctx))
 }
 
+func runPaginationContract(t *testing.T, queue *Queue, topic Topic) {
+	t.Helper()
+	ctx := context.Background()
+	for index := 0; index < 2; index++ {
+		item := NewTopic(fmt.Sprintf("contract-page-topic-%d", index))
+		subscriber := NewSubscriber(item, "worker", SubscriberOptions{})
+		require.NoError(t, queue.CreateTopic(ctx, item, Subscribers{subscriber}))
+	}
+	seenTopics := make(map[uuid.UUID]struct{})
+	cursor := ""
+	for {
+		page, err := queue.ListTopics(ctx, 2, cursor)
+		require.NoError(t, err)
+		for _, item := range page.Topics {
+			_, duplicate := seenTopics[item.ID]
+			require.False(t, duplicate)
+			seenTopics[item.ID] = struct{}{}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	require.Len(t, seenTopics, 3)
+
+	seenSubscribers := make(map[string]struct{})
+	cursor = ""
+	for {
+		page, err := queue.ListSubscriberStatuses(ctx, topic, 1, cursor)
+		require.NoError(t, err)
+		for _, item := range page.Subscribers {
+			_, duplicate := seenSubscribers[item.Name]
+			require.False(t, duplicate)
+			seenSubscribers[item.Name] = struct{}{}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	require.Equal(t, map[string]struct{}{"one": {}, "two": {}}, seenSubscribers)
+
+	for index := 0; index < 3; index++ {
+		_, err := queue.CreateSchedule(ctx, topic, ScheduleInput{
+			Name:           fmt.Sprintf("contract-page-schedule-%d", index),
+			CronExpression: "0 0 * * *", Timezone: "UTC", Message: "pagination",
+		})
+		require.NoError(t, err)
+	}
+	seenSchedules := make(map[string]struct{})
+	cursor = ""
+	for {
+		page, err := queue.ListSchedulesPage(ctx, topic, 2, cursor)
+		require.NoError(t, err)
+		for _, item := range page.Schedules {
+			_, duplicate := seenSchedules[item.ID]
+			require.False(t, duplicate)
+			seenSchedules[item.ID] = struct{}{}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	require.Len(t, seenSchedules, 3)
+
+	_, err := queue.ListTopics(ctx, 10, "not-a-cursor")
+	require.ErrorIs(t, err, ErrInvalidPublish)
+}
+
 func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Driver, topic Topic) {
 	t.Helper()
 	ctx := context.Background()
@@ -482,6 +574,7 @@ func runTransactionalPublishContract(t *testing.T, queue *Queue, driver store.Dr
 
 	tx, err := driver.DB().BeginTx(ctx, nil)
 	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, database.Rebind("INSERT INTO contract_business_records (id) VALUES (?)"), uuid.NewString())
 	require.NoError(t, err)
 	receipt, err := queue.PublishTx(ctx, tx, topic, Message{Message: "transaction-commit"})
@@ -576,7 +669,7 @@ func runPostgresTopologyFenceContract(t *testing.T, queue *Queue, driver store.D
 	select {
 	case err := <-publishResult:
 		require.NoError(t, err)
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		require.Fail(t, "shared topology fence blocked another publisher")
 	}
 

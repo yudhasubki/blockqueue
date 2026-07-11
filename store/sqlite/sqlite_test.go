@@ -2,12 +2,52 @@ package sqlite
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/yudhasubki/blockqueue/store"
 )
+
+func TestOpenRejectsEmptyPath(t *testing.T) {
+	_, err := Open("  ", Config{})
+	if !errors.Is(err, ErrEmptyPath) {
+		t.Fatalf("Open() error = %v, want ErrEmptyPath", err)
+	}
+}
+
+func TestOpenRejectsNegativeConnectionSettings(t *testing.T) {
+	if _, err := Open(filepath.Join(t.TempDir(), "invalid.db"), Config{BusyTimeout: -1}); err == nil {
+		t.Fatal("expected negative busy timeout to fail")
+	}
+}
+
+func TestOpenEscapesSQLiteURICharactersInPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue?name#fragment.db")
+	driver, err := Open(path, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database was not created at exact path: %v", err)
+	}
+}
+
+func TestMemoryDatabaseUsesSingleConnection(t *testing.T) {
+	driver, err := Open(":memory:", Config{MaxOpenConns: 10, MaxIdleConns: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = driver.Close() })
+	if got := driver.DB().Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections=%d, want 1", got)
+	}
+}
 
 func TestOpenConfiguresEveryConnection(t *testing.T) {
 	driver, err := Open(filepath.Join(t.TempDir(), "queue.db"), Config{})

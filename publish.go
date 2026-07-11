@@ -2,9 +2,10 @@ package blockqueue
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"time"
 
 	"github.com/google/uuid"
@@ -96,6 +97,11 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 		duplicate := duplicates[0]
 		receipt.State = PublishStatePersisted
 		receipt.Duplicate = &duplicate
+		receipts := PublishReceipts{receipt}
+		if err := q.restorePersistedScheduledTimes(ctx, nil, receipts); err != nil {
+			return PublishReceipt{}, err
+		}
+		receipt = receipts[0]
 	}
 	return receipt, nil
 }
@@ -141,7 +147,7 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 		// timestamps at the same precision prevents an immediately committed
 		// message from appearing fractionally in the future to a claim transaction.
 		now := time.Now().UTC().Truncate(time.Millisecond)
-		var seenKeys map[string]Message
+		var seenKeys map[string]string
 		for i, request := range requests {
 			write, scheduledAt, err := buildWriteRequest(runtime.id, request, now)
 			if err != nil {
@@ -149,12 +155,12 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 			}
 			if request.IdempotencyKey != "" {
 				if seenKeys == nil {
-					seenKeys = make(map[string]Message)
+					seenKeys = make(map[string]string)
 				}
-				if previous, ok := seenKeys[request.IdempotencyKey]; ok && !samePublish(previous, request) {
+				if previous, ok := seenKeys[request.IdempotencyKey]; ok && previous != write.IdempotencyHash {
 					return fmt.Errorf("%w: duplicate key %q has different payload", ErrInvalidPublish, request.IdempotencyKey)
 				}
-				seenKeys[request.IdempotencyKey] = request
+				seenKeys[request.IdempotencyKey] = write.IdempotencyHash
 			}
 			batch[i] = write
 			receipts[i] = PublishReceipt{
@@ -182,8 +188,31 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 			receipts[i].State = PublishStatePersisted
 			receipts[i].Duplicate = &duplicate
 		}
+		if err := q.restorePersistedScheduledTimes(ctx, nil, receipts); err != nil {
+			return nil, err
+		}
 	}
 	return receipts, nil
+}
+
+func (q *Queue) restorePersistedScheduledTimes(ctx context.Context, tx *sql.Tx, receipts PublishReceipts) error {
+	ids := make([]string, 0, len(receipts))
+	for _, receipt := range receipts {
+		ids = append(ids, receipt.MessageID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	times, err := q.db.messageScheduledTimes(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	for index := range receipts {
+		if persisted, ok := times[receipts[index].MessageID]; ok {
+			receipts[index].ScheduledAt = persisted
+		}
+	}
+	return nil
 }
 
 func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (writeRequest, time.Time, error) {
@@ -203,6 +232,9 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 		return writeRequest{}, time.Time{}, fmt.Errorf("%w: delay and schedule_at are mutually exclusive", ErrInvalidPublish)
 	}
 	scheduledAt := now
+	scheduleMode := scheduleModeImmediate
+	scheduleValue := ""
+	var scheduleDelay time.Duration
 	if request.Delay != "" {
 		delay, err := time.ParseDuration(request.Delay)
 		if err != nil {
@@ -212,6 +244,9 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 			return writeRequest{}, time.Time{}, fmt.Errorf("%w: delay cannot be negative", ErrInvalidPublish)
 		}
 		scheduledAt = now.Add(delay)
+		scheduleMode = scheduleModeDelay
+		scheduleDelay = delay
+		scheduleValue = delay.String()
 	}
 	if request.ScheduleAt != "" {
 		parsed, err := time.Parse(time.RFC3339, request.ScheduleAt)
@@ -219,6 +254,8 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 			return writeRequest{}, time.Time{}, fmt.Errorf("%w: schedule_at must be RFC3339 with timezone", ErrInvalidPublish)
 		}
 		scheduledAt = parsed.UTC()
+		scheduleMode = scheduleModeAbsolute
+		scheduleValue = scheduledAt.Format(time.RFC3339Nano)
 	}
 	headers := []byte("{}")
 	if request.Headers != nil {
@@ -232,26 +269,41 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 		return writeRequest{}, time.Time{}, fmt.Errorf("%w: headers exceed 16KiB", ErrInvalidPublish)
 	}
 	messageID := newMessageIDAt(now)
+	idempotencyHash := ""
 	if request.IdempotencyKey != "" {
 		messageID = uuid.NewSHA1(topicID, []byte(request.IdempotencyKey)).String()
+		fingerprint, err := json.Marshal(struct {
+			Message       string          `json:"message"`
+			Headers       json.RawMessage `json:"headers"`
+			CorrelationID string          `json:"correlation_id"`
+			Priority      int             `json:"priority"`
+			ScheduleMode  string          `json:"schedule_mode"`
+			ScheduleValue string          `json:"schedule_value"`
+		}{
+			Message: request.Message, Headers: json.RawMessage(headers),
+			CorrelationID: request.CorrelationID, Priority: request.Priority,
+			ScheduleMode: scheduleMode, ScheduleValue: scheduleValue,
+		})
+		if err != nil {
+			return writeRequest{}, time.Time{}, fmt.Errorf("%w: fingerprint message", ErrInvalidPublish)
+		}
+		sum := sha256.Sum256(fingerprint)
+		idempotencyHash = fmt.Sprintf("%x", sum[:])
 	}
 	return writeRequest{
-		TopicID:        topicID,
-		MessageID:      messageID,
-		Message:        request.Message,
-		Headers:        headers,
-		CorrelationID:  request.CorrelationID,
-		IdempotencyKey: request.IdempotencyKey,
-		Priority:       request.Priority,
-		VisibleAt:      scheduledAt,
-		CreatedAt:      now,
+		TopicID:         topicID,
+		MessageID:       messageID,
+		Message:         request.Message,
+		Headers:         headers,
+		CorrelationID:   request.CorrelationID,
+		IdempotencyKey:  request.IdempotencyKey,
+		IdempotencyHash: idempotencyHash,
+		ScheduleMode:    scheduleMode,
+		ScheduleDelay:   scheduleDelay,
+		Priority:        request.Priority,
+		VisibleAt:       scheduledAt,
+		CreatedAt:       now,
 	}, scheduledAt, nil
-}
-
-func samePublish(a, b Message) bool {
-	return a.Message == b.Message && maps.Equal(a.Headers, b.Headers) &&
-		a.CorrelationID == b.CorrelationID && a.IdempotencyKey == b.IdempotencyKey &&
-		a.Priority == b.Priority && a.Delay == b.Delay && a.ScheduleAt == b.ScheduleAt
 }
 
 // newMessageID creates a UUIDv7-compatible, time-ordered identifier. Keeping

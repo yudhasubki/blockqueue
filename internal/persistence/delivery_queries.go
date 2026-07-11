@@ -102,15 +102,45 @@ func cachedRequeueUpdateQuery(d *db, rows int) string {
 		}
 		query.WriteString(`)
 			UPDATE message_deliveries
-			SET failure_count = (SELECT failure_count FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
-			    status = (SELECT next_status FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
-			    visible_at = (SELECT visible_at FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			SET failure_count = failed.failure_count,
+			    status = failed.next_status,
+			    visible_at = failed.visible_at,
 			    receipt_token = NULL, lease_expires_at = NULL,
-			    processed_at = (SELECT processed_at FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id),
+			    processed_at = failed.processed_at,
 			    last_error = ?
-			WHERE status = 'delivered' AND EXISTS (
-			    SELECT 1 FROM failed WHERE failed.message_id = message_deliveries.message_id AND failed.subscriber_id = message_deliveries.subscriber_id
-			)`)
+			FROM failed
+			WHERE message_deliveries.status = 'delivered'
+			  AND failed.message_id = message_deliveries.message_id
+			  AND failed.subscriber_id = message_deliveries.subscriber_id`)
+		return query.String()
+	})
+}
+
+func cachedBatchNackUpdateQuery(d *db, rows int) string {
+	return cachedDeliveryQuery(d, "batch_nack_update", rows, func() string {
+		var query strings.Builder
+		query.WriteString("WITH failed(failed_message_id, receipt_token, failure_count, next_status, visible_at, processed_at, last_error) AS (VALUES ")
+		for index := 0; index < rows; index++ {
+			if index > 0 {
+				query.WriteByte(',')
+			}
+			query.WriteString(d.dialect.deliveryNackRow())
+		}
+		query.WriteString(`)
+			UPDATE message_deliveries
+			SET failure_count = failed.failure_count,
+			    status = failed.next_status,
+			    visible_at = failed.visible_at,
+			    receipt_token = NULL, lease_expires_at = NULL,
+			    processed_at = failed.processed_at,
+			    last_error = failed.last_error
+			FROM failed
+			WHERE message_deliveries.subscriber_id = ?
+			  AND message_deliveries.status = 'delivered'
+			  AND message_deliveries.lease_expires_at > ?
+			  AND failed.failed_message_id = message_deliveries.message_id
+			  AND failed.receipt_token = message_deliveries.receipt_token
+			RETURNING message_id`)
 		return query.String()
 	})
 }
@@ -132,13 +162,30 @@ func cachedAckStateQuery(d *db) string {
 
 func cachedNextDeliveryWakeQuery(d *db) string {
 	return cachedDeliveryQuery(d, "next_delivery_wake", 0, func() string {
-		return `SELECT MIN(wake_at) FROM (
-			SELECT visible_at AS wake_at FROM message_deliveries
-			WHERE subscriber_id = ? AND status = 'pending'
+		return `SELECT ` + d.dialect.currentTimeExpression() + `, MIN(wake_at) FROM (
+			SELECT deliveries.visible_at AS wake_at
+			FROM message_deliveries deliveries
+			JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
+			JOIN topics ON topics.id = subscribers.topic_id
+			WHERE deliveries.subscriber_id = ? AND deliveries.status = 'pending'
+			  AND subscribers.deleted_at IS NULL AND subscribers.paused = ` + boolLiteral(d, false) + `
+			  AND topics.deleted_at IS NULL AND topics.paused = ` + boolLiteral(d, false) + `
 			UNION ALL
-			SELECT lease_expires_at AS wake_at FROM message_deliveries
-			WHERE subscriber_id = ? AND status = 'delivered'
+			SELECT deliveries.lease_expires_at AS wake_at
+			FROM message_deliveries deliveries
+			JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
+			JOIN topics ON topics.id = subscribers.topic_id
+			WHERE deliveries.subscriber_id = ? AND deliveries.status = 'delivered'
+			  AND subscribers.deleted_at IS NULL AND subscribers.paused = ` + boolLiteral(d, false) + `
+			  AND topics.deleted_at IS NULL AND topics.paused = ` + boolLiteral(d, false) + `
 		) wakeups`
+	})
+}
+
+func cachedNextLeaseExpiryQuery(d *db) string {
+	return cachedDeliveryQuery(d, "next_lease_expiry", 0, func() string {
+		return "SELECT " + d.dialect.currentTimeExpression() +
+			", MIN(lease_expires_at) FROM message_deliveries WHERE status = 'delivered'"
 	})
 }
 

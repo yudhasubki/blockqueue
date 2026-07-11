@@ -49,10 +49,11 @@ func (filter TopicFilter) filter(operator string) (string, map[string]any) {
 }
 
 type RetryPolicy struct {
-	InitialDelay string  `json:"initial_delay,omitempty"`
-	MaxDelay     string  `json:"max_delay,omitempty"`
-	Multiplier   float64 `json:"multiplier,omitempty"`
-	Jitter       float64 `json:"jitter,omitempty"`
+	InitialDelay  string  `json:"initial_delay,omitempty"`
+	MaxDelay      string  `json:"max_delay,omitempty"`
+	Multiplier    float64 `json:"multiplier,omitempty"`
+	Jitter        float64 `json:"jitter,omitempty"`
+	DisableJitter bool    `json:"disable_jitter,omitempty"`
 }
 
 type SubscriberOptions struct {
@@ -81,7 +82,9 @@ func (options SubscriberOptions) normalized() SubscriberOptions {
 	if options.RetryPolicy.Multiplier == 0 {
 		options.RetryPolicy.Multiplier = 2
 	}
-	if options.RetryPolicy.Jitter == 0 {
+	if options.RetryPolicy.DisableJitter {
+		options.RetryPolicy.Jitter = 0
+	} else if options.RetryPolicy.Jitter == 0 {
 		options.RetryPolicy.Jitter = 0.2
 	}
 	return options
@@ -215,6 +218,13 @@ type SubscriberQueueStats struct {
 	Delivered int `db:"delivered"`
 }
 
+type SubscriberStatusRow struct {
+	ID        string `db:"id"`
+	Name      string `db:"name"`
+	Pending   int    `db:"pending"`
+	Delivered int    `db:"delivered"`
+}
+
 type Schedule struct {
 	ID             string         `db:"id"`
 	TopicID        string         `db:"topic_id"`
@@ -235,6 +245,7 @@ type Schedule struct {
 	FencingToken   int64          `db:"fencing_token"`
 	CreatedAt      time.Time      `db:"created_at"`
 	UpdatedAt      time.Time      `db:"updated_at"`
+	ClaimedAt      time.Time      `db:"-"`
 }
 
 type ScheduleRun struct {
@@ -296,15 +307,18 @@ type MessageStatus struct {
 }
 
 type WriteRequest struct {
-	TopicID        uuid.UUID
-	MessageID      string
-	Message        string
-	Headers        []byte
-	CorrelationID  string
-	IdempotencyKey string
-	Priority       int
-	VisibleAt      time.Time
-	CreatedAt      time.Time
+	TopicID         uuid.UUID
+	MessageID       string
+	Message         string
+	Headers         []byte
+	CorrelationID   string
+	IdempotencyKey  string
+	IdempotencyHash string
+	ScheduleMode    string
+	ScheduleDelay   time.Duration
+	Priority        int
+	VisibleAt       time.Time
+	CreatedAt       time.Time
 }
 
 type writeRequest = WriteRequest

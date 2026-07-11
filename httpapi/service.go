@@ -9,11 +9,11 @@ import (
 
 // Service is the application port consumed by the HTTP transport.
 type Service interface {
-	GetTopics(context.Context, blockqueue.TopicFilter) (blockqueue.Topics, error)
+	ListTopics(context.Context, int, string) (blockqueue.TopicPage, error)
 	GetTopic(string) (blockqueue.Topic, bool)
 	CreateTopic(context.Context, blockqueue.Topic, blockqueue.Subscribers) error
 	DeleteTopic(context.Context, blockqueue.Topic) error
-	GetSubscribersStatus(context.Context, blockqueue.Topic) (blockqueue.SubscriberStatuses, error)
+	ListSubscriberStatuses(context.Context, blockqueue.Topic, int, string) (blockqueue.SubscriberStatusPage, error)
 	CreateSubscribers(context.Context, blockqueue.Topic, blockqueue.Subscribers) error
 	DeleteSubscriber(context.Context, blockqueue.Topic, string) error
 	PublishAsync(context.Context, blockqueue.Topic, blockqueue.Message) (blockqueue.PublishReceipt, error)
@@ -37,7 +37,7 @@ type Service interface {
 	ResumeTopic(context.Context, blockqueue.Topic) error
 	PauseSubscriber(context.Context, blockqueue.Topic, string) error
 	ResumeSubscriber(context.Context, blockqueue.Topic, string) error
-	ListSchedules(context.Context, blockqueue.Topic) ([]blockqueue.Schedule, error)
+	ListSchedulesPage(context.Context, blockqueue.Topic, int, string) (blockqueue.SchedulePage, error)
 	CreateSchedule(context.Context, blockqueue.Topic, blockqueue.ScheduleInput) (blockqueue.Schedule, error)
 	GetSchedule(context.Context, blockqueue.Topic, string) (blockqueue.Schedule, error)
 	UpdateSchedule(context.Context, blockqueue.Topic, string, int, blockqueue.ScheduleInput) (blockqueue.Schedule, error)

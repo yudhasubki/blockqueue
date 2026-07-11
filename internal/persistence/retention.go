@@ -6,11 +6,20 @@ import (
 	"time"
 )
 
+const (
+	retentionBatchSize  = 1000
+	retentionPassBudget = 2 * time.Second
+)
+
 // pruneProcessedMessages uses processed_at as the retention clock and works in
 // bounded chunks so maintenance cannot monopolize the writer.
 func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration) error {
-	threshold := time.Now().UTC().Add(-retention)
-	deadline := time.Now().Add(2 * time.Second)
+	now, err := d.databaseNow(ctx)
+	if err != nil {
+		return err
+	}
+	threshold := now.Add(-retention)
+	deadline := time.Now().Add(retentionPassBudget)
 	var total int64
 	for time.Now().Before(deadline) {
 		result, err := d.Conn().ExecContext(ctx, d.Conn().Rebind(`
@@ -18,14 +27,14 @@ func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration
 			WHERE (message_id, subscriber_id) IN (
 				SELECT message_id, subscriber_id FROM message_deliveries
 				WHERE status IN ('processed', 'cancelled') AND processed_at < ?
-				ORDER BY processed_at LIMIT 1000
-			)`), threshold)
+				ORDER BY processed_at LIMIT ?
+			)`), threshold, retentionBatchSize)
 		if err != nil {
 			return err
 		}
 		rows, _ := result.RowsAffected()
 		total += rows
-		if rows < 1000 {
+		if rows < retentionBatchSize {
 			break
 		}
 		select {
@@ -36,7 +45,7 @@ func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration
 	}
 	var orphaned int64
 	for time.Now().Before(deadline) {
-		result, err := d.Conn().ExecContext(ctx, `
+		result, err := d.Conn().ExecContext(ctx, d.Conn().Rebind(`
 			DELETE FROM messages
 			WHERE id IN (
 				SELECT candidate.id FROM messages candidate
@@ -44,14 +53,14 @@ func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration
 					SELECT 1 FROM message_deliveries
 					WHERE message_deliveries.message_id = candidate.id
 				)
-				ORDER BY candidate.id LIMIT 1000
-			)`)
+				ORDER BY candidate.id LIMIT ?
+			)`), retentionBatchSize)
 		if err != nil {
 			return err
 		}
 		rows, _ := result.RowsAffected()
 		orphaned += rows
-		if rows < 1000 {
+		if rows < retentionBatchSize {
 			break
 		}
 		select {
@@ -67,8 +76,12 @@ func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration
 }
 
 func (d *db) pruneScheduleRuns(ctx context.Context, retention time.Duration) error {
-	threshold := time.Now().UTC().Add(-retention)
-	deadline := time.Now().Add(2 * time.Second)
+	now, err := d.databaseNow(ctx)
+	if err != nil {
+		return err
+	}
+	threshold := now.Add(-retention)
+	deadline := time.Now().Add(retentionPassBudget)
 	var total int64
 	for time.Now().Before(deadline) {
 		result, err := d.Conn().ExecContext(ctx, d.Conn().Rebind(`
@@ -76,14 +89,14 @@ func (d *db) pruneScheduleRuns(ctx context.Context, retention time.Duration) err
 			WHERE id IN (
 				SELECT id FROM schedule_runs
 				WHERE status <> 'running' AND COALESCE(finished_at, created_at) < ?
-				ORDER BY COALESCE(finished_at, created_at), id LIMIT 1000
-			)`), threshold)
+				ORDER BY COALESCE(finished_at, created_at), id LIMIT ?
+			)`), threshold, retentionBatchSize)
 		if err != nil {
 			return err
 		}
 		rows, _ := result.RowsAffected()
 		total += rows
-		if rows < 1000 {
+		if rows < retentionBatchSize {
 			break
 		}
 		select {
@@ -99,8 +112,12 @@ func (d *db) pruneScheduleRuns(ctx context.Context, retention time.Duration) err
 }
 
 func (d *db) pruneDeadLetters(ctx context.Context, retention time.Duration) error {
-	threshold := time.Now().UTC().Add(-retention)
-	deadline := time.Now().Add(2 * time.Second)
+	now, err := d.databaseNow(ctx)
+	if err != nil {
+		return err
+	}
+	threshold := now.Add(-retention)
+	deadline := time.Now().Add(retentionPassBudget)
 	var total int64
 	for time.Now().Before(deadline) {
 		result, err := d.Conn().ExecContext(ctx, d.Conn().Rebind(`
@@ -108,14 +125,14 @@ func (d *db) pruneDeadLetters(ctx context.Context, retention time.Duration) erro
 			WHERE (message_id, subscriber_id) IN (
 				SELECT message_id, subscriber_id FROM message_deliveries
 				WHERE status = 'dead_letter' AND processed_at < ?
-				ORDER BY processed_at LIMIT 1000
-			)`), threshold)
+				ORDER BY processed_at LIMIT ?
+			)`), threshold, retentionBatchSize)
 		if err != nil {
 			return err
 		}
 		rows, _ := result.RowsAffected()
 		total += rows
-		if rows < 1000 {
+		if rows < retentionBatchSize {
 			break
 		}
 		select {

@@ -10,6 +10,12 @@ const (
 	lifecycleStateNameUnknown  = "unknown"
 )
 
+const (
+	scheduleModeImmediate = "immediate"
+	scheduleModeDelay     = "delay"
+	scheduleModeAbsolute  = "absolute"
+)
+
 // Publish receipt states are stable public API values.
 const (
 	PublishStateAdmitted  = "admitted"

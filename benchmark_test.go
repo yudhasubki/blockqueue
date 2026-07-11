@@ -395,6 +395,54 @@ func BenchmarkBatchAck100(b *testing.B) {
 	})
 }
 
+func BenchmarkBatchNack100(b *testing.B) {
+	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
+		ctx := context.Background()
+		claimedBatches := make([]Deliveries, b.N)
+		for iteration := 0; iteration < b.N; iteration++ {
+			batch := make([]Message, 100)
+			for index := range batch {
+				batch[index].Message = "batch nack benchmark"
+			}
+			if _, err := queue.BatchPublish(ctx, topic, batch); err != nil {
+				b.Fatal(err)
+			}
+			claimed, err := queue.Claim(ctx, topic, "worker", 100, time.Minute)
+			if err != nil || len(claimed) != 100 {
+				b.Fatalf("claim: count=%d err=%v", len(claimed), err)
+			}
+			claimedBatches[iteration] = claimed
+		}
+		b.ReportAllocs()
+		b.SetBytes(100)
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			items := make([]BatchNackItem, len(claimedBatches[iteration]))
+			for index, delivery := range claimedBatches[iteration] {
+				items[index] = BatchNackItem{
+					MessageID: delivery.ID, ReceiptToken: delivery.ReceiptToken,
+					RetryDelay: time.Hour, Error: "batch benchmark failure",
+				}
+			}
+			results := queue.BatchNackDeliveries(ctx, topic, "worker", items)
+			for _, result := range results {
+				if result.Status != DeliveryStatusPending {
+					b.Fatalf("batch nack result: %+v", result)
+				}
+			}
+		}
+		b.StopTimer()
+		var errorsCount int
+		if err := queue.db.Conn().Get(&errorsCount, "SELECT COUNT(*) FROM delivery_errors"); err != nil {
+			b.Fatal(err)
+		}
+		if errorsCount != b.N*100 {
+			b.Fatalf("delivery error mismatch: expected=%d actual=%d", b.N*100, errorsCount)
+		}
+		verifyBenchmarkRows(b, queue, int64(b.N*100))
+	})
+}
+
 func BenchmarkNackFailure(b *testing.B) {
 	forEachBenchmarkBackend(b, func(b *testing.B, queue *Queue, topic Topic) {
 		ctx := context.Background()

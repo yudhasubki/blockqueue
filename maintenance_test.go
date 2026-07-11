@@ -2,12 +2,14 @@ package blockqueue
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
@@ -55,6 +57,20 @@ func TestMaintenanceRetryWaitsForBackoffOrCancellation(t *testing.T) {
 	cancelNow()
 	require.False(t, waitForMaintenanceRetry(cancelled, clock))
 	cancel()
+}
+
+func TestMaintenanceYieldUsesBoundedClockDelay(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC()}
+	done := make(chan bool, 1)
+	go func() { done <- waitForMaintenanceYield(context.Background(), clock) }()
+
+	select {
+	case <-done:
+		t.Fatal("maintenance pass continued before yielding")
+	case <-time.After(10 * time.Millisecond):
+	}
+	clock.Advance(maintenanceYieldInterval)
+	require.True(t, <-done)
 }
 
 func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
@@ -138,4 +154,98 @@ func TestSchedulerClaimFailureDoesNotHotSpin(t *testing.T) {
 	require.EqualValues(t, 1, failures.Load(), "scheduler retried before its backoff elapsed")
 	clock.Advance(time.Second)
 	require.Eventually(t, func() bool { return failures.Load() == 2 }, time.Second, time.Millisecond)
+}
+
+func TestDeliveryReaperYieldsAfterBoundedPass(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC()}
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "reaper-fairness.db"), sqlite.Config{BusyTimeout: 5000})
+	require.NoError(t, err)
+	queue := New(driver, Options{Clock: clock, Writer: WriterOptions{BatchSize: 1, FlushInterval: time.Millisecond}})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("reaper-fairness")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
+		MaxAttempts: 3, VisibilityDuration: "1m",
+	})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+
+	rows := deliveryReaperBatchSize*deliveryReaperPassLimit + 1
+	expired := time.Now().UTC().Add(-time.Minute)
+	_, err = testDB(driver).Exec(`
+		WITH RECURSIVE sequence(value) AS (
+			SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?
+		)
+		INSERT INTO messages (id, topic_id, message, scheduled_at)
+		SELECT printf('reaper-%05d', value), ?, 'payload', ? FROM sequence`, rows, topic.ID, expired)
+	require.NoError(t, err)
+	_, err = testDB(driver).Exec(`
+		WITH RECURSIVE sequence(value) AS (
+			SELECT 1 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?
+		)
+		INSERT INTO message_deliveries
+			(message_id, subscriber_id, status, delivery_count, visible_at, receipt_token,
+			 lease_expires_at, message_created_at)
+		SELECT printf('reaper-%05d', value), ?, 'delivered', 1, ?,
+		       printf('receipt-%05d', value), ?, ? FROM sequence`,
+		rows, subscriber.ID, expired, expired, expired)
+	require.NoError(t, err)
+	queue.signalReaper()
+
+	require.Eventually(t, func() bool {
+		var delivered int
+		return testDB(driver).Get(&delivered,
+			"SELECT COUNT(*) FROM message_deliveries WHERE status = 'delivered'") == nil && delivered == 1
+	}, 15*time.Second, 10*time.Millisecond)
+	_, err = queue.PublishDurable(context.Background(), topic, Message{Message: "writer-still-progresses"})
+	require.NoError(t, err)
+	clock.Advance(maintenanceYieldInterval)
+	require.Eventually(t, func() bool {
+		var delivered int
+		return testDB(driver).Get(&delivered,
+			"SELECT COUNT(*) FROM message_deliveries WHERE status = 'delivered'") == nil && delivered == 0
+	}, 3*time.Second, 10*time.Millisecond)
+}
+
+func TestSchedulerYieldsAfterBoundedPass(t *testing.T) {
+	clock := &testClock{now: time.Now().UTC().Truncate(time.Minute)}
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "scheduler-fairness.db"), sqlite.Config{BusyTimeout: 5000})
+	require.NoError(t, err)
+	queue := New(driver, Options{Clock: clock, Writer: WriterOptions{BatchSize: 1, FlushInterval: time.Millisecond}})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("scheduler-fairness")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = queue.Shutdown(ctx)
+	})
+
+	tx, err := testDB(driver).Beginx()
+	require.NoError(t, err)
+	for index := 0; index < schedulerPassLimit+1; index++ {
+		_, err = tx.Exec(`
+			INSERT INTO schedules (id, topic_id, name, cron_expression, message, next_run_at)
+			VALUES (?, ?, ?, '* * * * *', 'tick', ?)`,
+			uuid.NewString(), topic.ID, fmt.Sprintf("due-%03d", index), clock.Now())
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+	queue.signalScheduler()
+
+	require.Eventually(t, func() bool {
+		var runs int
+		return testDB(driver).Get(&runs, "SELECT COUNT(*) FROM schedule_runs") == nil && runs == schedulerPassLimit
+	}, 5*time.Second, 10*time.Millisecond)
+	_, err = queue.PublishDurable(context.Background(), topic, Message{Message: "writer-still-progresses"})
+	require.NoError(t, err)
+	clock.Advance(maintenanceYieldInterval)
+	require.Eventually(t, func() bool {
+		var runs int
+		return testDB(driver).Get(&runs, "SELECT COUNT(*) FROM schedule_runs") == nil && runs == schedulerPassLimit+1
+	}, 3*time.Second, 10*time.Millisecond)
 }

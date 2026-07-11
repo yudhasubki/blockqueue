@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,9 +73,9 @@ func (h *HTTP) Run(ctx context.Context, args []string) error {
 	writerConfig.MaxPendingBytes = cfg.Writer.MaxPendingBytes
 	if cfg.Writer.FlushInterval != "" {
 		duration, err := time.ParseDuration(cfg.Writer.FlushInterval)
-		if err != nil {
+		if err != nil || duration <= 0 {
 			_ = driver.Close()
-			return fmt.Errorf("parse writer flush_interval: %w", err)
+			return errors.New("writer.flush_interval must be a positive duration")
 		}
 		writerConfig.FlushInterval = duration
 	}
@@ -109,6 +111,10 @@ func (h *HTTP) Run(ctx context.Context, args []string) error {
 			return ctx
 		},
 	}
+	if !loopbackHost(cfg.Http.Host) {
+		slog.Warn("HTTP API is exposed on a non-loopback address and has no built-in authentication; use a trusted network or authenticating reverse proxy",
+			"host", cfg.Http.Host)
+	}
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -141,6 +147,15 @@ func (h *HTTP) Run(ctx context.Context, args []string) error {
 	return errors.Join(runtimeErr, httpErr, queueErr)
 }
 
+func loopbackHost(host string) bool {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func optionalConfigDuration(name, value string) (time.Duration, error) {
 	if value == "" {
 		return 0, nil
@@ -153,7 +168,7 @@ func optionalConfigDuration(name, value string) (time.Duration, error) {
 }
 
 func (h *HTTP) Usage() {
-	fmt.Printf(`
+	fmt.Print(`
 The HTTP command lists all protocol needed in the configuration file.
 
 Usage:

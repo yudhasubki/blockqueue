@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -16,12 +17,18 @@ import (
 func openConfiguredDriver(config Config) (store.Driver, error) {
 	switch strings.ToLower(strings.TrimSpace(config.Http.Driver)) {
 	case storageDriverTurso:
+		if strings.TrimSpace(config.Turso.URL) == "" {
+			return nil, errors.New("turso.url is required")
+		}
 		driver, err := turso.Open(config.Turso.URL)
 		if err != nil {
 			return nil, fmt.Errorf("open turso: %w", err)
 		}
 		return driver, nil
 	case storageDriverPGSQL, storageDriverPostgres, storageDriverPostgreSQL:
+		if strings.TrimSpace(config.PgSQL.Host) == "" || strings.TrimSpace(config.PgSQL.Username) == "" || strings.TrimSpace(config.PgSQL.Name) == "" {
+			return nil, errors.New("pgsql.host, pgsql.username, and pgsql.name are required")
+		}
 		driver, err := postgres.Open(postgres.Config{
 			Host:         config.PgSQL.Host,
 			Username:     config.PgSQL.Username,
@@ -39,6 +46,9 @@ func openConfiguredDriver(config Config) (store.Driver, error) {
 		}
 		return driver, nil
 	case storageDriverSQLite, "":
+		if strings.TrimSpace(config.SQLite.DatabaseName) == "" {
+			return nil, errors.New("sqlite.db_name is required")
+		}
 		driver, err := sqlite.Open(config.SQLite.DatabaseName, sqlite.Config{
 			BusyTimeout:  config.SQLite.BusyTimeout,
 			MaxOpenConns: config.SQLite.MaxOpenConns,
@@ -62,8 +72,8 @@ func configuredCheckpointInterval(config Config) (time.Duration, error) {
 		return 0, nil
 	}
 	interval, err := time.ParseDuration(config.SQLite.CheckpointInterval)
-	if err != nil {
-		return 0, fmt.Errorf("parse sqlite checkpoint_interval: %w", err)
+	if err != nil || interval < 30*time.Second {
+		return 0, fmt.Errorf("sqlite.checkpoint_interval must be at least 30s")
 	}
 	return interval, nil
 }

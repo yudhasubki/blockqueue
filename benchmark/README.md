@@ -8,7 +8,7 @@ must be reported separately.
 
 ```bash
 go test -run '^$' \
-  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkNackFailure' \
+  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkBatchNack100|BenchmarkNackFailure' \
   -benchmem -count=5 .
 ```
 
@@ -20,7 +20,7 @@ name ends in `_bench`:
 ```bash
 BLOCKQUEUE_BENCH_POSTGRES_URL='postgres://postgres:postgres@127.0.0.1:5432/blockqueue_bench?sslmode=disable' \
   go test -run '^$' \
-  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkNackFailure' \
+  -bench 'BenchmarkPublishAsync|BenchmarkPublishDurable|BenchmarkBatchPublishDurable100|BenchmarkClaim100|BenchmarkClaimAndAck|BenchmarkBatchAck100|BenchmarkBatchNack100|BenchmarkNackFailure' \
   -benchmem -benchtime=10x -count=5 .
 ```
 
@@ -32,10 +32,10 @@ Use a fixed `-benchtime=Nx` for PostgreSQL multi-case runs: adaptive calibration
 can admit a very large async backlog, whose required post-timing durable drain
 then dominates total suite time.
 
-The release comparison includes publish, claim, set-based batch ACK, and the
-NACK failure path (including `delivery_errors`). Compare each case to the same
-backend and durability baseline; the median of five fresh trials may regress by
-at most 5%.
+The release comparison includes publish, claim, set-based batch ACK/NACK, and
+the single-NACK failure path (including `delivery_errors`). Compare each case
+to the same backend and durability baseline; the median of five fresh trials
+may regress by at most 5%.
 
 v0.2 hardening seed baseline (Apple M1, strict durability, `-benchtime=10x`,
 five fresh isolated trials):
@@ -44,13 +44,15 @@ five fresh isolated trials):
 |---|---:|---:|---|
 | Claim100 | 2.528 ms | 8.071 ms | one 100-message claim |
 | BatchAck100 | 2.979 ms | 11.103 ms | one 100-message transaction |
+| BatchNack100 | 4.791 ms | 4.679 ms | one 100-message transaction plus error history |
 | NackFailure | 0.186 ms | 0.779 ms | one NACK plus error-history insert |
 
 Every trial verified exact canonical-message and delivery counts; NACK trials
-also verified one `delivery_errors` row per operation. These numbers establish
-the first comparable baseline for the new paths, so the 5% regression gate
-applies to subsequent revisions rather than being inferred against a different
-pre-v0.2 workload.
+also verified one `delivery_errors` row per operation. `BatchNack100` was added
+after the seed run and its value is the first five-trial baseline for that path.
+These numbers establish the first comparable baseline for the new paths, so the
+5% regression gate applies to subsequent revisions rather than being inferred
+against a different pre-v0.2 workload.
 
 Caller-owned SQLite transactions intentionally hold its single writer lock.
 The diagnostic benchmark measures how directly that hold time appears in a
@@ -83,13 +85,14 @@ Compare the five-trial median and tail spread with `BenchmarkClaim100` from the
 same machine. The median regression gate is 5%; retain every raw trial because
 local PostgreSQL tail variance can be wider than the median.
 
-The 2026-07-11 Apple M1 validation used paired trials after normalizing fixture
-WAL and statistics. SQLite measured 5.85 ms/op without history and 5.95 ms/op
-with 1,000,000 runs (`+1.7%`). PostgreSQL measured 52.51 ms/op without history
-and 52.94 ms/op with 1,000,000 runs (`+0.8%`). PostgreSQL absolute latency
-changed after repeatedly creating and dropping multi-million-row schemas, but
-the paired history/no-history comparison remained within the 5% gate; never
-compare a warmed pre-fixture trial against a post-fixture trial.
+The 2026-07-11 Apple M1 validation used Go 1.25.12 and five paired 100-iteration
+trials after normalizing fixture WAL and statistics. SQLite measured 6.25 ms/op
+without history and 5.79 ms/op with 1,000,000 runs (`-7.4%`). PostgreSQL
+measured 55.70 ms/op without history and 52.50 ms/op with 1,000,000 runs
+(`-5.7%`). Historical growth therefore caused no regression. PostgreSQL
+absolute latency changes after repeatedly creating and dropping multi-million-
+row schemas, so never compare a warmed pre-fixture trial against a post-fixture
+trial.
 
 The same audit recorded fixed-count before/after hot-path medians. SQLite
 `Claim100` improved from 6.28 to 6.02 ms (`-4.1%`), single claim+ACK from 0.62

@@ -70,6 +70,35 @@ func (q *Queue) GetTopics(ctx context.Context, filter TopicFilter) (Topics, erro
 	return q.getTopics(ctx, filter)
 }
 
+func (q *Queue) ListTopics(ctx context.Context, limit int, cursor string) (TopicPage, error) {
+	if err := q.requireRunning(); err != nil {
+		return TopicPage{}, err
+	}
+	limit = normalizedResourcePageLimit(limit)
+	var afterName, afterID string
+	if cursor != "" {
+		var err error
+		afterName, afterID, err = decodeResourceCursor(cursor)
+		if err != nil {
+			return TopicPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+		if _, err := uuid.Parse(afterID); err != nil {
+			return TopicPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+	}
+	rows, err := q.db.listTopics(ctx, limit+1, afterName, afterID)
+	if err != nil {
+		return TopicPage{}, err
+	}
+	page := TopicPage{Topics: rows}
+	if len(rows) > limit {
+		last := rows[limit-1]
+		page.Topics = rows[:limit]
+		page.NextCursor = encodeResourceCursor(last.Name, last.ID.String())
+	}
+	return page, nil
+}
+
 func (q *Queue) GetTopic(topicName string) (Topic, bool) {
 	topic, exists := q.registry.Load().byName[topicName]
 	if !exists {
@@ -92,6 +121,51 @@ func (q *Queue) DeleteTopic(ctx context.Context, topic Topic) error {
 
 func (q *Queue) GetSubscribersStatus(ctx context.Context, topic Topic) (SubscriberStatuses, error) {
 	return q.getSubscribersStatus(ctx, topic)
+}
+
+func (q *Queue) ListSubscriberStatuses(ctx context.Context, topic Topic, limit int, cursor string) (SubscriberStatusPage, error) {
+	runtime, exists := q.getTopicRuntime(topic)
+	if !exists {
+		return SubscriberStatusPage{}, ErrTopicNotFound
+	}
+	limit = normalizedResourcePageLimit(limit)
+	var afterName, afterID string
+	if cursor != "" {
+		var err error
+		afterName, afterID, err = decodeResourceCursor(cursor)
+		if err != nil {
+			return SubscriberStatusPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+		if _, err := uuid.Parse(afterID); err != nil {
+			return SubscriberStatusPage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+	}
+	rows, err := q.db.listSubscriberStatuses(ctx, runtime.id, limit+1, afterName, afterID)
+	if err != nil {
+		return SubscriberStatusPage{}, err
+	}
+	page := SubscriberStatusPage{Subscribers: make(SubscriberStatuses, 0, min(limit, len(rows)))}
+	for index, row := range rows {
+		if index == limit {
+			break
+		}
+		page.Subscribers = append(page.Subscribers, SubscriberStatus{
+			TopicID: runtime.id, Name: row.Name,
+			UnpublishedMessage: row.Pending, UnackedMessage: row.Delivered,
+		})
+	}
+	if len(rows) > limit {
+		last := rows[limit-1]
+		page.NextCursor = encodeResourceCursor(last.Name, last.ID)
+	}
+	return page, nil
+}
+
+func normalizedResourcePageLimit(limit int) int {
+	if limit <= 0 {
+		return 100
+	}
+	return min(limit, maximumResourcePageSize)
 }
 
 func (q *Queue) CreateSubscribers(ctx context.Context, topic Topic, subscribers Subscribers) error {
@@ -145,6 +219,7 @@ func (q *Queue) deleteTopic(ctx context.Context, topic Topic) error {
 		subscriber.deleted.Store(true)
 	}
 	q.removeTopicLocked(runtime)
+	q.signalPruner()
 	return nil
 }
 
@@ -198,6 +273,7 @@ func (q *Queue) deleteSubscriber(ctx context.Context, topic Topic, subscriberNam
 	}
 	runtime.removeSubscriber(subscriber)
 	q.topologyVersion.Add(1)
+	q.signalPruner()
 	return nil
 }
 

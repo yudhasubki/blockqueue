@@ -3,7 +3,10 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -16,6 +19,8 @@ const (
 	synchronousStrict   = "full"
 	synchronousBalanced = "normal"
 )
+
+var ErrEmptyPath = errors.New("sqlite database path is required")
 
 func init() {
 	sql.Register(driverName, &sqlite3.SQLiteDriver{ConnectHook: func(conn *sqlite3.SQLiteConn) error {
@@ -37,6 +42,14 @@ type Config struct {
 }
 
 func Open(path string, config Config) (*Driver, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, ErrEmptyPath
+	}
+	if config.BusyTimeout < 0 || config.MaxOpenConns < 0 || config.MaxIdleConns < 0 ||
+		config.ConnMaxIdleTime < 0 || config.MmapSize < 0 {
+		return nil, errors.New("sqlite connection settings cannot be negative")
+	}
 	cacheSize := config.CacheSize
 	if cacheSize == 0 {
 		cacheSize = -64000
@@ -58,16 +71,28 @@ func Open(path string, config Config) (*Driver, error) {
 		return nil, fmt.Errorf("unsupported sqlite durability mode %q", config.Durability)
 	}
 
-	db, err := sqlx.Connect(driverName, fmt.Sprintf(
-		"file:%s?_synchronous=%s&_journal_mode=wal&_cache_size=%d&_mmap_size=%d&_temp_store=memory&_foreign_keys=on&_busy_timeout=%d&_txlock=immediate&_auto_vacuum=2",
-		path, synchronous, cacheSize, mmapSize, busyTimeout,
-	))
+	escapedPath := (&url.URL{Path: path}).EscapedPath()
+	parameters := url.Values{
+		"_synchronous":  []string{synchronous},
+		"_journal_mode": []string{"wal"},
+		"_cache_size":   []string{fmt.Sprint(cacheSize)},
+		"_mmap_size":    []string{fmt.Sprint(mmapSize)},
+		"_temp_store":   []string{"memory"},
+		"_foreign_keys": []string{"on"},
+		"_busy_timeout": []string{fmt.Sprint(busyTimeout)},
+		"_txlock":       []string{"immediate"},
+		"_auto_vacuum":  []string{"2"},
+	}
+	db, err := sqlx.Connect(driverName, "file:"+escapedPath+"?"+parameters.Encode())
 	if err != nil {
 		return nil, err
 	}
 	maxOpen := config.MaxOpenConns
 	if maxOpen <= 0 {
 		maxOpen = 10
+	}
+	if path == ":memory:" {
+		maxOpen = 1
 	}
 	maxIdle := config.MaxIdleConns
 	if maxIdle <= 0 || maxIdle > maxOpen {

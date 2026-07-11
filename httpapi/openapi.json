@@ -14,6 +14,14 @@
 		"/topics": {
 			"get": {
 				"operationId": "listTopics",
+				"parameters": [
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
+					}
+				],
 				"responses": {
 					"200": {
 						"description": "Topics"
@@ -170,6 +178,12 @@
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
 					}
 				],
 				"responses": {
@@ -492,6 +506,12 @@
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
+					},
+					{
+						"$ref": "#/components/parameters/Limit"
+					},
+					{
+						"$ref": "#/components/parameters/Cursor"
 					}
 				],
 				"responses": {
@@ -626,6 +646,25 @@
 	},
 	"components": {
 		"parameters": {
+			"Limit": {
+				"name": "limit",
+				"in": "query",
+				"required": false,
+				"schema": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 1000,
+					"default": 100
+				}
+			},
+			"Cursor": {
+				"name": "cursor",
+				"in": "query",
+				"required": false,
+				"schema": {
+					"type": "string"
+				}
+			},
 			"TopicName": {
 				"name": "topicName",
 				"in": "path",

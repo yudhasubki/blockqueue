@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/internal/textlimit"
 )
 
 const (
@@ -55,6 +56,20 @@ func (d *db) listSchedules(ctx context.Context, topicID uuid.UUID) ([]Schedule, 
 	items := make([]Schedule, 0)
 	err := d.Conn().SelectContext(ctx, &items, d.Conn().Rebind(
 		"SELECT "+scheduleColumns+" FROM schedules WHERE topic_id = ? ORDER BY created_at, id"), topicID)
+	return items, err
+}
+
+func (d *db) listSchedulesPage(ctx context.Context, topicID uuid.UUID, limit int, afterName, afterID string) ([]Schedule, error) {
+	query := "SELECT " + scheduleColumns + " FROM schedules WHERE topic_id = ?"
+	args := []any{topicID}
+	if afterID != "" {
+		query += " AND (name > ? OR (name = ? AND id > ?))"
+		args = append(args, afterName, afterName, afterID)
+	}
+	query += " ORDER BY name, id LIMIT ?"
+	args = append(args, limit)
+	items := make([]Schedule, 0, limit)
+	err := d.Conn().SelectContext(ctx, &items, d.Conn().Rebind(query), args...)
 	return items, err
 }
 
@@ -137,26 +152,70 @@ func (d *db) listScheduleRuns(ctx context.Context, scheduleID string, limit int,
 	return runs, err
 }
 
-func (d *db) nextScheduleDue(ctx context.Context, now time.Time) (time.Time, bool, error) {
-	var next any
-	err := d.Conn().QueryRowxContext(ctx, d.Conn().Rebind(`
-		SELECT MIN(CASE
-			WHEN owner_id IS NOT NULL AND lease_expires_at > ? THEN lease_expires_at
-			ELSE next_run_at
-		END)
-		FROM schedules WHERE paused = `+boolLiteral(d, false)), now).Scan(&next)
-	if err != nil {
-		return time.Time{}, false, err
+func (d *db) nextScheduleDue(ctx context.Context, now time.Time) (time.Time, time.Time, bool, error) {
+	observedAt := now
+	selectPrefix := "SELECT MIN(next_at) FROM ("
+	if observedAt.IsZero() {
+		selectPrefix = "SELECT " + d.dialect.currentTimeExpression() + ", MIN(next_at) FROM ("
 	}
-	return databaseTime(next)
+	query := selectPrefix + `
+			SELECT MIN(next_run_at) AS next_at FROM schedules
+			WHERE paused = ` + boolLiteral(d, false) + ` AND owner_id IS NULL
+			  AND EXISTS (
+				SELECT 1 FROM topics
+				WHERE topics.id = schedules.topic_id AND topics.deleted_at IS NULL
+			  )
+			UNION ALL
+			SELECT MIN(lease_expires_at) AS next_at FROM schedules
+			WHERE paused = ` + boolLiteral(d, false) + ` AND owner_id IS NOT NULL
+			  AND EXISTS (
+				SELECT 1 FROM topics
+				WHERE topics.id = schedules.topic_id AND topics.deleted_at IS NULL
+			  )
+		) due_schedules`
+	statement, err := d.statements.get(ctx, d.Conn(), query)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	var next any
+	if observedAt.IsZero() {
+		var rawNow any
+		if err := statement.QueryRowxContext(ctx).Scan(&rawNow, &next); err != nil {
+			return time.Time{}, time.Time{}, false, err
+		}
+		var exists bool
+		var err error
+		observedAt, exists, err = databaseTime(rawNow)
+		if err != nil {
+			return time.Time{}, time.Time{}, false, err
+		}
+		if !exists {
+			return time.Time{}, time.Time{}, false, errors.New("database returned no current time")
+		}
+	} else if err := statement.QueryRowxContext(ctx).Scan(&next); err != nil {
+		return time.Time{}, time.Time{}, false, err
+	}
+	nextAt, exists, err := databaseTime(next)
+	return nextAt, observedAt, exists, err
 }
 
 func (d *db) claimDueSchedule(ctx context.Context, owner string, now time.Time, lease time.Duration) (Schedule, bool, error) {
 	var schedule Schedule
 	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		if now.IsZero() {
+			var err error
+			now, err = d.nowTx(ctx, tx)
+			if err != nil {
+				return err
+			}
+		}
 		query := `SELECT ` + scheduleColumns + ` FROM schedules
 			WHERE paused = ` + boolLiteral(d, false) + ` AND next_run_at <= ?
 			  AND (owner_id IS NULL OR lease_expires_at <= ?)
+			  AND EXISTS (
+				SELECT 1 FROM topics
+				WHERE topics.id = schedules.topic_id AND topics.deleted_at IS NULL
+			  )
 			ORDER BY next_run_at, id LIMIT 1`
 		query += d.dialect.lockClause("", true)
 		if err := tx.GetContext(ctx, &schedule, tx.Rebind(query), now, now); err != nil {
@@ -176,6 +235,7 @@ func (d *db) claimDueSchedule(ctx context.Context, owner string, now time.Time, 
 		schedule.OwnerID = sql.NullString{String: owner, Valid: true}
 		schedule.LeaseExpiresAt = sql.NullTime{Time: now.Add(lease), Valid: true}
 		schedule.FencingToken++
+		schedule.ClaimedAt = now
 		return nil
 	})
 	if errors.Is(err, sql.ErrNoRows) {
@@ -237,7 +297,7 @@ func (d *db) persistScheduleOccurrence(
 				  AND (runs.message_id IS NULL OR EXISTS (
 					SELECT 1 FROM message_deliveries deliveries
 					WHERE deliveries.message_id = runs.message_id
-					  AND deliveries.status NOT IN ('processed', 'dead_letter')
+					  AND deliveries.status NOT IN ('processed', 'dead_letter', 'cancelled')
 				  ))`), schedule.ID, scheduledFor); err != nil {
 				return err
 			}
@@ -350,6 +410,60 @@ func (d *db) persistScheduleOccurrence(
 			return err
 		}
 		return d.advanceClaimedScheduleTx(ctx, tx, schedule, nextRunAt, advance, owner, claimed.FencingToken)
+	})
+	return resultRun, err
+}
+
+func (d *db) failScheduleOccurrence(
+	ctx context.Context,
+	claimed Schedule,
+	scheduledFor, nextRunAt time.Time,
+	advance bool,
+	owner, failure string,
+) (ScheduleRun, error) {
+	failure = textlimit.UTF8(failure, MaxDeliveryTextBytes)
+	var resultRun ScheduleRun
+	err := d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
+		query := "SELECT " + scheduleColumns + " FROM schedules WHERE id = ?"
+		query += d.dialect.lockClause("", false)
+		var schedule Schedule
+		if err := tx.GetContext(ctx, &schedule, tx.Rebind(query), claimed.ID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrScheduleNotFound
+			}
+			return err
+		}
+		if advance && (schedule.OwnerID.String != owner || schedule.FencingToken != claimed.FencingToken) {
+			return ErrScheduleLeaseLost
+		}
+		resultRun = ScheduleRun{
+			ID: uuid.NewString(), ScheduleID: schedule.ID,
+			ScheduledFor: scheduledFor, Status: ScheduleRunStatusFailed,
+			Error: sql.NullString{String: failure, Valid: failure != ""},
+		}
+		insert, err := tx.ExecContext(ctx, tx.Rebind(`
+			INSERT INTO schedule_runs
+				(id, schedule_id, scheduled_for, status, finished_at, error)
+			VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+			ON CONFLICT (schedule_id, scheduled_for) DO NOTHING`),
+			resultRun.ID, schedule.ID, scheduledFor, ScheduleRunStatusFailed, nullString(failure))
+		if err != nil {
+			return err
+		}
+		inserted, _ := insert.RowsAffected()
+		if inserted == 0 {
+			if err := tx.GetContext(ctx, &resultRun, tx.Rebind(
+				"SELECT "+scheduleRunColumns+" FROM schedule_runs WHERE schedule_id = ? AND scheduled_for = ?"),
+				schedule.ID, scheduledFor); err != nil {
+				return err
+			}
+		}
+		if err := d.notifyTx(ctx, tx, EventScheduler); err != nil {
+			return err
+		}
+		return d.advanceClaimedScheduleTx(
+			ctx, tx, schedule, nextRunAt, advance, owner, claimed.FencingToken,
+		)
 	})
 	return resultRun, err
 }

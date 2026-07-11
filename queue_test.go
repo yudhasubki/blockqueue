@@ -103,6 +103,45 @@ func TestIdempotencyComparesCorrelationAndExplicitSchedule(t *testing.T) {
 	require.ErrorIs(t, err, ErrIdempotencyConflict)
 }
 
+func TestIdempotencyRetryPreservesRelativeDelay(t *testing.T) {
+	queue, _, topic := setupQueue(t)
+	request := Message{Message: "delayed", IdempotencyKey: "delay-key", Delay: "5m"}
+	first, err := queue.PublishDurable(context.Background(), topic, request)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	request.Delay = "300s"
+	duplicate, err := queue.PublishDurable(context.Background(), topic, request)
+	require.NoError(t, err)
+	require.Equal(t, first.MessageID, duplicate.MessageID)
+	require.True(t, *duplicate.Duplicate)
+	require.Equal(t, first.ScheduledAt, duplicate.ScheduledAt,
+		"an idempotent retry must report the original persisted schedule")
+
+	request.Delay = "10m"
+	_, err = queue.PublishDurable(context.Background(), topic, request)
+	require.ErrorIs(t, err, ErrIdempotencyConflict)
+
+	receipts, err := queue.BatchPublishDurable(context.Background(), topic, []Message{
+		{Message: "same batch", IdempotencyKey: "normalized-batch-delay", Delay: "1m"},
+		{Message: "same batch", IdempotencyKey: "normalized-batch-delay", Delay: "60s"},
+	})
+	require.NoError(t, err)
+	require.Len(t, receipts, 2)
+	require.Equal(t, receipts[0].MessageID, receipts[1].MessageID)
+	require.False(t, *receipts[0].Duplicate)
+	require.True(t, *receipts[1].Duplicate)
+	require.Equal(t, receipts[0].ScheduledAt, receipts[1].ScheduledAt)
+}
+
+func TestClaimWaitTreatsPollDeadlineAsEmptyResult(t *testing.T) {
+	queue, _, topic := setupQueue(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	deliveries, err := queue.ClaimWait(ctx, topic, "worker", 1, time.Second)
+	require.NoError(t, err)
+	require.Empty(t, deliveries)
+}
+
 func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	logs := make(chan slog.Record, 8)
 	previousLogger := slog.Default()
@@ -327,6 +366,35 @@ func TestSchedulerRunNowAndOverlap(t *testing.T) {
 	history, err := queue.ScheduleRunHistory(context.Background(), topic, schedule.ID, 10, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, history.Runs)
+}
+
+func TestSchedulerOverlapTreatsCancelledDeliveryAsTerminal(t *testing.T) {
+	queue, driver, topic := setupQueue(t)
+	schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
+		Name: "cancel-recovery", CronExpression: "* * * * *", Timezone: "UTC", Message: "scheduled",
+	})
+	require.NoError(t, err)
+	first, err := queue.RunScheduleNow(context.Background(), topic, schedule.ID, false)
+	require.NoError(t, err)
+	require.Equal(t, ScheduleRunStatusRunning, first.Status)
+
+	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, time.Second)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.NoError(t, queue.CancelClaimedDelivery(
+		context.Background(), topic, "worker", claimed[0].ID, claimed[0].ReceiptToken, "permanent",
+	))
+
+	// Simulate recovery observing a stale running marker after every delivery
+	// already reached a terminal state. Overlap protection is authoritative on
+	// delivery state and must not block the next occurrence.
+	_, err = testDB(driver).Exec(
+		"UPDATE schedule_runs SET status = 'running', finished_at = NULL WHERE id = ?", first.ID,
+	)
+	require.NoError(t, err)
+	second, err := queue.RunScheduleNow(context.Background(), topic, schedule.ID, false)
+	require.NoError(t, err)
+	require.Equal(t, ScheduleRunStatusRunning, second.Status)
 }
 
 func TestLifecycleAndWeightedBudget(t *testing.T) {

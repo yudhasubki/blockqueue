@@ -19,6 +19,7 @@ import (
 const (
 	defaultScheduleLease    = 30 * time.Second
 	defaultScheduleTimezone = "UTC"
+	schedulerPassLimit      = 100
 )
 
 var (
@@ -138,6 +139,36 @@ func (q *Queue) ListSchedules(ctx context.Context, topic Topic) ([]Schedule, err
 	return q.db.listSchedules(ctx, runtime.id)
 }
 
+func (q *Queue) ListSchedulesPage(ctx context.Context, topic Topic, limit int, cursor string) (SchedulePage, error) {
+	runtime, ok := q.getTopicRuntime(topic)
+	if !ok {
+		return SchedulePage{}, ErrTopicNotFound
+	}
+	limit = normalizedResourcePageLimit(limit)
+	var afterName, afterID string
+	if cursor != "" {
+		var err error
+		afterName, afterID, err = decodeResourceCursor(cursor)
+		if err != nil {
+			return SchedulePage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+		if _, err := uuid.Parse(afterID); err != nil {
+			return SchedulePage{}, fmt.Errorf("%w: invalid cursor", ErrInvalidPublish)
+		}
+	}
+	rows, err := q.db.listSchedulesPage(ctx, runtime.id, limit+1, afterName, afterID)
+	if err != nil {
+		return SchedulePage{}, err
+	}
+	page := SchedulePage{Schedules: rows}
+	if len(rows) > limit {
+		last := rows[limit-1]
+		page.Schedules = rows[:limit]
+		page.NextCursor = encodeResourceCursor(last.Name, last.ID)
+	}
+	return page, nil
+}
+
 func (q *Queue) UpdateSchedule(ctx context.Context, topic Topic, scheduleID string, expectedVersion int, input ScheduleInput) (Schedule, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -199,7 +230,16 @@ func (q *Queue) RunScheduleNow(ctx context.Context, topic Topic, scheduleID stri
 	if err != nil {
 		return ScheduleRun{}, err
 	}
-	return q.processScheduleOccurrence(ctx, schedule, q.clock().Now(), force, false)
+	scheduledFor := q.clock().Now()
+	run, err := q.processScheduleOccurrence(ctx, schedule, scheduledFor, force, false)
+	if err != nil && permanentScheduleOccurrenceError(err) {
+		failed, recordErr := q.recordScheduleFailure(ctx, schedule, scheduledFor, false, err)
+		if recordErr != nil {
+			return ScheduleRun{}, errors.Join(err, recordErr)
+		}
+		return failed, err
+	}
+	return run, err
 }
 
 func (q *Queue) ScheduleRunHistory(ctx context.Context, topic Topic, scheduleID string, limit int, cursor string) (ScheduleRunPage, error) {
@@ -237,24 +277,35 @@ func (q *Queue) ScheduleRunHistory(ctx context.Context, topic Topic, scheduleID 
 func (q *Queue) startScheduler() {
 	clock := q.clock()
 	for {
-		next, exists, err := q.db.nextScheduleDue(q.serverCtx, clock.Now())
+		nowHint := time.Time{}
+		if q.options.Clock != nil {
+			nowHint = clock.Now()
+		}
+		next, observedAt, exists, err := q.db.nextScheduleDue(q.serverCtx, nowHint)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			q.schedulerHealthy.Store(false)
+			q.setSchedulerHealthy(false)
 			slog.Error("scheduler next-run query failed", "error", err)
 			if !waitForMaintenanceRetry(q.serverCtx, clock) {
 				return
 			}
 			continue
 		}
-		q.schedulerHealthy.Store(true)
+		q.setSchedulerHealthy(true)
+		if !q.options.DisableMetrics {
+			lag := 0.0
+			if exists && observedAt.After(next) {
+				lag = observedAt.Sub(next).Seconds()
+			}
+			metric.SetSchedulerDueLag(q.runtimeMetricID, lag)
+		}
 		// The database is authoritative. The one-second ceiling is the
 		// multi-process fallback when LISTEN/NOTIFY is unavailable or lost.
 		wait := time.Second
 		if exists {
-			wait = next.Sub(clock.Now())
+			wait = next.Sub(observedAt)
 			if wait < 0 {
 				wait = 0
 			}
@@ -269,14 +320,21 @@ func (q *Queue) startScheduler() {
 			continue
 		case <-clock.After(wait):
 		}
+		started := time.Now()
 		claimFailed := false
-		for {
-			schedule, claimed, err := q.db.claimDueSchedule(q.serverCtx, q.schedulerOwner, clock.Now(), defaultScheduleLease)
+		yielded := false
+		var claimedCount int64
+		for claim := 0; claim < schedulerPassLimit; claim++ {
+			claimNow := time.Time{}
+			if q.options.Clock != nil {
+				claimNow = clock.Now()
+			}
+			schedule, claimed, err := q.db.claimDueSchedule(q.serverCtx, q.schedulerOwner, claimNow, defaultScheduleLease)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				q.schedulerHealthy.Store(false)
+				q.setSchedulerHealthy(false)
 				slog.Error("scheduler claim failed", "error", err)
 				claimFailed = true
 				break
@@ -284,6 +342,7 @@ func (q *Queue) startScheduler() {
 			if !claimed {
 				break
 			}
+			claimedCount++
 			if !q.options.DisableMetrics {
 				metric.SchedulerOperations.WithLabelValues(
 					metric.SchedulerOperationClaimed, metric.OutcomeSuccess,
@@ -293,12 +352,25 @@ func (q *Queue) startScheduler() {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
+				handled := false
+				if permanentScheduleOccurrenceError(err) {
+					_, recordErr := q.recordScheduleFailure(
+						q.serverCtx, schedule, schedule.NextRunAt, true, err,
+					)
+					if recordErr == nil {
+						handled = true
+					} else {
+						err = errors.Join(err, recordErr)
+					}
+				}
 				if !q.options.DisableMetrics {
 					metric.SchedulerOperations.WithLabelValues(
 						metric.SchedulerOperationPublished, metric.OutcomeFailed,
 					).Inc()
 				}
-				q.schedulerHealthy.Store(false)
+				if !handled {
+					q.setSchedulerHealthy(false)
+				}
 				slog.Error("scheduler publish failed", "schedule_id", schedule.ID, "error", err)
 			} else {
 				if !q.options.DisableMetrics {
@@ -307,15 +379,57 @@ func (q *Queue) startScheduler() {
 					).Inc()
 				}
 			}
+			yielded = claim+1 == schedulerPassLimit
 		}
+		q.observeMaintenancePass(metric.MaintenanceOperationScheduler, started, claimedCount, claimFailed, yielded)
 		if claimFailed && !waitForMaintenanceRetry(q.serverCtx, clock) {
+			return
+		}
+		if yielded && !waitForMaintenanceYield(q.serverCtx, clock) {
 			return
 		}
 	}
 }
 
+func permanentScheduleOccurrenceError(err error) bool {
+	return errors.Is(err, ErrNoActiveSubscriber) ||
+		errors.Is(err, ErrIdempotencyConflict) ||
+		errors.Is(err, ErrInvalidPublish)
+}
+
+func (q *Queue) recordScheduleFailure(
+	ctx context.Context,
+	schedule Schedule,
+	scheduledFor time.Time,
+	advance bool,
+	failure error,
+) (ScheduleRun, error) {
+	next := time.Time{}
+	if advance {
+		parsed, err := parseCron(schedule.CronExpression, schedule.Timezone)
+		if err != nil {
+			return ScheduleRun{}, err
+		}
+		now := q.clock().Now()
+		if q.options.Clock == nil && !schedule.claimedAt.IsZero() {
+			now = schedule.claimedAt
+		}
+		next = parsed.Next(now)
+	}
+	run, err := q.db.failScheduleOccurrence(
+		ctx, schedule, scheduledFor, next, advance, q.schedulerOwner, failure.Error(),
+	)
+	if err == nil {
+		q.signalScheduler()
+	}
+	return run, err
+}
+
 func (q *Queue) processScheduleOccurrence(ctx context.Context, schedule Schedule, scheduledFor time.Time, force, advance bool) (ScheduleRun, error) {
 	now := q.clock().Now()
+	if q.options.Clock == nil && !schedule.claimedAt.IsZero() {
+		now = schedule.claimedAt
+	}
 	next := time.Time{}
 	if advance {
 		parsed, err := parseCron(schedule.CronExpression, schedule.Timezone)

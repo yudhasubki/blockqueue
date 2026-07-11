@@ -2,10 +2,16 @@ package blockqueue
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/yudhasubki/blockqueue/pkg/metric"
+)
+
+const (
+	maintenanceYieldInterval = 10 * time.Millisecond
+	topologyCleanupBudget    = 2 * time.Second
 )
 
 // startCheckpointer runs adaptive WAL checkpoints for SQLite. PostgreSQL owns
@@ -61,6 +67,32 @@ func waitForMaintenanceRetry(ctx context.Context, clock Clock) bool {
 	}
 }
 
+func waitForMaintenanceYield(ctx context.Context, clock Clock) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-clock.After(maintenanceYieldInterval):
+		return true
+	}
+}
+
+func (q *Queue) observeMaintenancePass(operation string, started time.Time, rows int64, failed, yielded bool) {
+	if q.options.DisableMetrics {
+		return
+	}
+	if rows > 0 {
+		metric.MaintenanceRows.WithLabelValues(operation).Add(float64(rows))
+	}
+	outcome := metric.OutcomeSuccess
+	if failed {
+		outcome = metric.OutcomeFailed
+	} else if yielded {
+		outcome = metric.OutcomeYielded
+	}
+	metric.MaintenancePasses.WithLabelValues(operation, outcome).Inc()
+	metric.MaintenanceDuration.WithLabelValues(operation).Observe(time.Since(started).Seconds())
+}
+
 func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode) {
 	started := time.Now()
 	result, err := q.db.checkpointSQLite(ctx, mode)
@@ -101,26 +133,78 @@ func (q *Queue) startPruner() {
 		select {
 		case <-q.serverCtx.Done():
 			return
+		case <-q.prunerSignal:
+			q.runPrunerCycle(false, retention, scheduleRunRetention)
 		case <-ticker.C:
-			if err := q.db.pruneDeletedSubscriberDeliveries(q.serverCtx, 2*time.Second); err != nil {
-				slog.Error("error pruning deleted subscriber deliveries", "error", err)
-			}
-			if q.options.DeadLetterRetention > 0 {
-				if err := q.db.pruneDeadLetters(q.serverCtx, q.options.DeadLetterRetention); err != nil {
-					slog.Error("error pruning dead letters", "error", err)
-				}
-			}
-			if err := q.db.pruneProcessedMessages(q.serverCtx, retention); err != nil {
-				slog.Error("error pruning messages", "error", err)
-			}
-			if err := q.db.pruneScheduleRuns(q.serverCtx, scheduleRunRetention); err != nil {
-				slog.Error("error pruning schedule runs", "error", err)
-			}
-			if q.db.supportsSQLiteMaintenance() {
-				if err := q.db.incrementalVacuum(q.serverCtx); err != nil {
-					slog.Error("error running incremental vacuum", "error", err)
-				}
-			}
+			q.runPrunerCycle(true, retention, scheduleRunRetention)
+		}
+	}
+}
+
+func (q *Queue) runPrunerCycle(includeRetention bool, retention, scheduleRunRetention time.Duration) {
+	leader, release, err := q.db.tryMaintenanceLeadership(q.serverCtx)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			slog.Error("error acquiring maintenance leadership", "error", err)
+		}
+		return
+	}
+	if !leader {
+		if q.serverCtx.Err() == nil {
+			time.AfterFunc(time.Second, q.signalPruner)
+		}
+		return
+	}
+	defer func() {
+		if err := release(); err != nil {
+			slog.Error("error releasing maintenance leadership", "error", err)
+		}
+	}()
+
+	q.pruneDeletedTopology()
+	if !includeRetention || q.serverCtx.Err() != nil {
+		return
+	}
+	if q.options.DeadLetterRetention > 0 {
+		if err := q.db.pruneDeadLetters(q.serverCtx, q.options.DeadLetterRetention); err != nil {
+			slog.Error("error pruning dead letters", "error", err)
+		}
+	}
+	if err := q.db.pruneProcessedMessages(q.serverCtx, retention); err != nil {
+		slog.Error("error pruning messages", "error", err)
+	}
+	if err := q.db.pruneScheduleRuns(q.serverCtx, scheduleRunRetention); err != nil {
+		slog.Error("error pruning schedule runs", "error", err)
+	}
+	if q.db.supportsSQLiteMaintenance() {
+		if err := q.db.incrementalVacuum(q.serverCtx); err != nil {
+			slog.Error("error running incremental vacuum", "error", err)
+		}
+	}
+}
+
+func (q *Queue) signalPruner() {
+	select {
+	case q.prunerSignal <- struct{}{}:
+	default:
+	}
+}
+
+func (q *Queue) pruneDeletedTopology() {
+	started := time.Now()
+	rows, yielded, more, err := q.db.pruneDeletedTopology(q.serverCtx, topologyCleanupBudget)
+	q.observeMaintenancePass(
+		metric.MaintenanceOperationTopology, started, rows, err != nil, yielded,
+	)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("error pruning deleted topology", "error", err)
+	}
+	if q.serverCtx.Err() == nil {
+		switch {
+		case err != nil:
+			time.AfterFunc(time.Second, q.signalPruner)
+		case more:
+			time.AfterFunc(maintenanceYieldInterval, q.signalPruner)
 		}
 	}
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
 
 func TestPublishTxCommitAndRollback(t *testing.T) {
@@ -172,6 +174,51 @@ func TestShutdownDrainsRegisteredTransaction(t *testing.T) {
 
 	close(release)
 	require.NoError(t, <-transactionResult)
+	require.NoError(t, <-shutdownResult)
+	require.Equal(t, LifecycleStopped, queue.State())
+}
+
+func TestShutdownDoesNotDeadlockTransactionBehindPendingWriter(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "shutdown-transaction-fence.db"), sqlite.Config{BusyTimeout: 5000})
+	require.NoError(t, err)
+	queue := New(driver, Options{Writer: WriterOptions{
+		BatchSize: 1, FlushInterval: time.Millisecond,
+		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+	}})
+	require.NoError(t, queue.Run(context.Background()))
+	topic := NewTopic("shutdown-transaction-fence")
+	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
+	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
+
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	txResult := make(chan error, 1)
+	go func() {
+		txResult <- queue.WithTx(context.Background(), nil, func(tx *sql.Tx) error {
+			close(started)
+			<-finish
+			_, publishErr := queue.PublishTx(context.Background(), tx, topic, Message{Message: "transactional"})
+			return publishErr
+		})
+	}()
+	<-started
+
+	_, err = queue.PublishAsync(context.Background(), topic, Message{Message: "queued-writer"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		pending, _ := queue.writer.Pending()
+		return pending == 1 && len(queue.writer.queue) == 0
+	}, time.Second, time.Millisecond, "writer must consume the admission and wait behind the caller transaction")
+
+	shutdownResult := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		shutdownResult <- queue.Shutdown(ctx)
+	}()
+	require.Eventually(t, func() bool { return queue.State() == LifecycleStopping }, time.Second, time.Millisecond)
+	close(finish)
+	require.NoError(t, <-txResult)
 	require.NoError(t, <-shutdownResult)
 	require.Equal(t, LifecycleStopped, queue.State())
 }

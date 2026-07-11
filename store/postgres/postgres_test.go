@@ -54,3 +54,23 @@ func TestBalancedDurabilityMustBeExplicit(t *testing.T) {
 		t.Fatal("invalid durability mode was accepted")
 	}
 }
+
+func TestConnectionURLRejectsInvalidSSLMode(t *testing.T) {
+	if _, err := buildConnectionURL(Config{SSLMode: "trust-me"}); err == nil {
+		t.Fatal("expected invalid SSL mode to fail")
+	}
+}
+
+func TestConnectionURLSupportsIPv6Host(t *testing.T) {
+	connectionURL, err := buildConnectionURL(Config{Host: "::1", Port: 5432, Name: "queue"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(connectionURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Hostname() != "::1" || parsed.Port() != "5432" {
+		t.Fatalf("host=%q port=%q", parsed.Hostname(), parsed.Port())
+	}
+}

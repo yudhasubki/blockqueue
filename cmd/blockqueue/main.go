@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -90,7 +91,10 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		return config, err
 	}
 
-	if config.Http.Shutdown.Seconds() == 0 {
+	if config.Http.Shutdown < 0 {
+		return config, errors.New("http.shutdown cannot be negative")
+	}
+	if config.Http.Shutdown == 0 {
 		config.Http.Shutdown = 30 * time.Second
 	}
 	if config.Http.Host == "" {
@@ -99,14 +103,33 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 	if config.Http.Port == "" {
 		config.Http.Port = defaultHTTPPort
 	}
-	if config.Http.ReadHeaderTimeout <= 0 {
+	if config.Http.ReadHeaderTimeout < 0 || config.Http.IdleTimeout < 0 || config.Http.WriteTimeout < 0 {
+		return config, errors.New("HTTP timeouts cannot be negative")
+	}
+	if config.Http.ReadHeaderTimeout == 0 {
 		config.Http.ReadHeaderTimeout = 5 * time.Second
 	}
-	if config.Http.IdleTimeout <= 0 {
+	if config.Http.IdleTimeout == 0 {
 		config.Http.IdleTimeout = 2 * time.Minute
 	}
-	if config.Http.WriteTimeout <= 0 {
+	if config.Http.WriteTimeout == 0 {
 		config.Http.WriteTimeout = 65 * time.Second
+	}
+	if config.Http.WriteTimeout < 65*time.Second {
+		return config, errors.New("http.write_timeout must be at least 65s to cover maximum long-poll requests")
+	}
+	port, portErr := strconv.Atoi(config.Http.Port)
+	if portErr != nil || port < 1 || port > 65535 {
+		return config, fmt.Errorf("http.port must be an integer between 1 and 65535")
+	}
+	if config.Writer.BatchSize < 0 || config.Writer.MaxPendingMessages < 0 || config.Writer.MaxPendingBytes < 0 {
+		return config, errors.New("writer limits cannot be negative")
+	}
+	if config.SQLite.BusyTimeout < 0 || config.SQLite.MaxOpenConns < 0 || config.SQLite.MaxIdleConns < 0 || config.SQLite.MmapSize < 0 {
+		return config, errors.New("sqlite connection settings cannot be negative")
+	}
+	if config.PgSQL.Port < 0 || config.PgSQL.Port > 65535 || config.PgSQL.MaxOpenConns < 0 || config.PgSQL.MaxIdleConns < 0 {
+		return config, errors.New("postgres connection settings are invalid")
 	}
 
 	logOutput := os.Stdout

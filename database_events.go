@@ -19,14 +19,38 @@ func (q *Queue) startDatabaseEvents() {
 	if !q.db.dialect.usesDatabaseEvents() {
 		return
 	}
+	q.setListenerHealthy(false)
 	var events <-chan string
-	if source, ok := q.db.Database.(store.NotificationSource); ok {
-		channel, err := source.Listen(q.serverCtx, databaseEventChannel)
-		if err != nil {
-			slog.Warn("postgres notifications unavailable; using reconciliation polling", "error", err)
-		} else {
-			events = channel
+	source, supportsNotifications := q.db.Database.(store.NotificationSource)
+	if !supportsNotifications {
+		q.setListenerHealthy(true)
+		slog.Debug("postgres driver does not provide notifications; using reconciliation polling")
+	}
+	var retry <-chan time.Time
+	retryTimer := time.NewTimer(time.Hour)
+	if !retryTimer.Stop() {
+		<-retryTimer.C
+	}
+	defer retryTimer.Stop()
+	backoff := time.Second
+	if supportsNotifications {
+		retryTimer.Reset(0)
+		retry = retryTimer.C
+	}
+	scheduleReconnect := func() {
+		if !supportsNotifications || q.serverCtx.Err() != nil {
+			retry = nil
+			return
 		}
+		if !retryTimer.Stop() {
+			select {
+			case <-retryTimer.C:
+			default:
+			}
+		}
+		retryTimer.Reset(backoff)
+		retry = retryTimer.C
+		backoff = min(backoff*2, 30*time.Second)
 	}
 	reconcile := time.NewTicker(5 * time.Second)
 	defer reconcile.Stop()
@@ -34,13 +58,31 @@ func (q *Queue) startDatabaseEvents() {
 		select {
 		case <-q.serverCtx.Done():
 			return
+		case <-retry:
+			channel, err := source.Listen(q.serverCtx, databaseEventChannel)
+			if err != nil {
+				q.setListenerHealthy(false)
+				slog.Warn("postgres notifications unavailable; retrying while reconciliation polling remains active",
+					"error", err, "retry_in", backoff)
+				scheduleReconnect()
+				continue
+			}
+			events = channel
+			retry = nil
+			backoff = time.Second
+			q.setListenerHealthy(true)
 		case <-reconcile.C:
+			if health, ok := q.db.Database.(store.NotificationHealthSource); ok {
+				q.setListenerHealthy(health.NotificationHealthy())
+			}
 			if err := q.reloadRuntime(q.serverCtx); err != nil && !errors.Is(err, context.Canceled) {
 				slog.Warn("topology reconciliation failed", "error", err)
 			}
 		case event, ok := <-events:
 			if !ok {
 				events = nil
+				q.setListenerHealthy(false)
+				scheduleReconnect()
 				continue
 			}
 			switch {
@@ -48,6 +90,7 @@ func (q *Queue) startDatabaseEvents() {
 				if err := q.reloadRuntime(q.serverCtx); err != nil && !errors.Is(err, context.Canceled) {
 					slog.Warn("topology notification reload failed", "error", err)
 				}
+				q.signalPruner()
 			case event == databaseEventScheduler:
 				q.signalScheduler()
 			case strings.HasPrefix(event, databaseEventDeliveryPrefix):

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/pkg/metric"
+	"github.com/yudhasubki/blockqueue/store"
 )
 
 // Run validates durable state and builds the complete runtime snapshot before
@@ -68,6 +70,12 @@ func (q *Queue) Run(ctx context.Context) error {
 	// Shutdown is coordinated explicitly so cancellation of the serving context
 	// cannot make the writer abandon an admitted batch.
 	q.writer = newWriter(context.Background(), q.db, writerOptions)
+	if !q.options.DisableMetrics {
+		q.runtimeMetricID = metric.RegisterRuntime()
+	}
+	if _, ok := q.db.Database.(store.NotificationSource); ok {
+		q.setListenerHealthy(false)
+	}
 	for _, runtime := range runtimes {
 		q.storeTopic(runtime)
 	}
@@ -159,12 +167,18 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	q.state.Store(uint32(LifecycleStopping))
 	q.runMu.Unlock()
 
+	// Fence admission only long enough to close the writer input. Waiting for
+	// persistence while holding admissionMu would deadlock a registered WithTx
+	// callback that is allowed to finish a *Tx operation during shutdown.
 	q.admissionMu.Lock()
+	if q.writer != nil {
+		q.writer.initiateClose()
+	}
+	q.admissionMu.Unlock()
 	var flushErr error
 	if q.writer != nil {
 		flushErr = q.writer.CloseContext(ctx)
 	}
-	q.admissionMu.Unlock()
 	if flushErr != nil {
 		q.writer.abortWrites()
 	}
@@ -201,6 +215,10 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	}
 
 	q.state.Store(uint32(LifecycleStopped))
+	if q.runtimeMetricID != 0 {
+		metric.UnregisterRuntime(q.runtimeMetricID)
+		q.runtimeMetricID = 0
+	}
 	var closeErr error
 	if closeDB {
 		closeErr = q.db.close()
@@ -218,7 +236,7 @@ func (q *Queue) WriterHealthy() bool {
 
 func (q *Queue) Ready(ctx context.Context) bool {
 	if q.State() != LifecycleRunning || q.writer == nil || !q.writer.Healthy() ||
-		!q.schedulerHealthy.Load() || !q.deliveryHealthy.Load() {
+		!q.schedulerHealthy.Load() || !q.deliveryHealthy.Load() || !q.listenerHealthy.Load() {
 		return false
 	}
 	if err := q.db.Conn().PingContext(ctx); err != nil {

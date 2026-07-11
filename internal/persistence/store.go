@@ -37,9 +37,19 @@ func (store *Store) SupportsSQLiteMaintenance() bool {
 	return store.database.supportsSQLiteMaintenance()
 }
 func (store *Store) StatementCacheLen() int { return store.database.statements.len() }
+func (store *Store) DatabaseNow(ctx context.Context) (time.Time, error) {
+	return store.database.databaseNow(ctx)
+}
+func (store *Store) TryMaintenanceLeadership(ctx context.Context) (bool, func() error, error) {
+	return store.database.tryMaintenanceLeadership(ctx)
+}
 
 func (store *Store) GetTopics(ctx context.Context, filter TopicFilter) (Topics, error) {
 	return store.database.getTopics(ctx, filter)
+}
+
+func (store *Store) ListTopics(ctx context.Context, limit int, afterName, afterID string) (Topics, error) {
+	return store.database.listTopics(ctx, limit, afterName, afterID)
 }
 
 func (store *Store) GetSubscribers(ctx context.Context, filter SubscriberFilter) (Subscribers, error) {
@@ -74,8 +84,12 @@ func (store *Store) TopicSubscriberQueueStats(ctx context.Context, topicID uuid.
 	return store.database.getTopicSubscriberQueueStats(ctx, topicID)
 }
 
-func (store *Store) PruneDeletedSubscriberDeliveries(ctx context.Context, budget time.Duration) error {
-	return store.database.pruneDeletedSubscriberDeliveries(ctx, budget)
+func (store *Store) ListSubscriberStatuses(ctx context.Context, topicID uuid.UUID, limit int, afterName, afterID string) ([]SubscriberStatusRow, error) {
+	return store.database.listSubscriberStatuses(ctx, topicID, limit, afterName, afterID)
+}
+
+func (store *Store) PruneDeletedTopology(ctx context.Context, budget time.Duration) (int64, bool, bool, error) {
+	return store.database.pruneDeletedTopology(ctx, budget)
 }
 
 func (store *Store) PruneProcessedMessages(ctx context.Context, retention time.Duration) error {
@@ -106,6 +120,10 @@ func (store *Store) PersistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, 
 	return store.database.persistWriteRequestsWithTx(ctx, tx, requests)
 }
 
+func (store *Store) MessageScheduledTimes(ctx context.Context, tx *sql.Tx, messageIDs []string) (map[string]time.Time, error) {
+	return store.database.messageScheduledTimes(ctx, tx, messageIDs)
+}
+
 func (store *Store) ClaimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration) ([]DeliveryRow, error) {
 	return store.database.claimDeliveries(ctx, subscriberID, limit, lease)
 }
@@ -114,7 +132,7 @@ func (store *Store) ReapExpiredDeliveries(ctx context.Context, limit int) (int64
 	return store.database.reapExpiredDeliveries(ctx, limit)
 }
 
-func (store *Store) NextLeaseExpiry(ctx context.Context) (time.Time, bool, error) {
+func (store *Store) NextLeaseExpiry(ctx context.Context) (time.Time, time.Time, bool, error) {
 	return store.database.nextLeaseExpiry(ctx)
 }
 
@@ -146,7 +164,7 @@ func (store *Store) ExtendDeliveryLease(ctx context.Context, subscriberID uuid.U
 	return store.database.extendDeliveryLease(ctx, subscriberID, messageID, receipt, extension)
 }
 
-func (store *Store) NextDeliveryWake(ctx context.Context, subscriberID uuid.UUID) (time.Time, bool, error) {
+func (store *Store) NextDeliveryWake(ctx context.Context, subscriberID uuid.UUID) (time.Time, time.Time, bool, error) {
 	return store.database.nextDeliveryWake(ctx, subscriberID)
 }
 
@@ -156,6 +174,10 @@ func (store *Store) ListDeliveries(ctx context.Context, subscriberID uuid.UUID, 
 
 func (store *Store) ReplayDeadLetter(ctx context.Context, subscriberID uuid.UUID, messageID string) (bool, error) {
 	return store.database.replayDeadLetter(ctx, subscriberID, messageID)
+}
+
+func (store *Store) BatchReplayDeadLetters(ctx context.Context, subscriberID uuid.UUID, messageIDs []string) ([]bool, error) {
+	return store.database.batchReplayDeadLetters(ctx, subscriberID, messageIDs)
 }
 
 func (store *Store) SnoozeDeliveryWithTx(ctx context.Context, tx *sql.Tx, subscriberID uuid.UUID, messageID, receipt string, delay time.Duration) (time.Time, error) {
@@ -198,6 +220,10 @@ func (store *Store) ListSchedules(ctx context.Context, topicID uuid.UUID) ([]Sch
 	return store.database.listSchedules(ctx, topicID)
 }
 
+func (store *Store) ListSchedulesPage(ctx context.Context, topicID uuid.UUID, limit int, afterName, afterID string) ([]Schedule, error) {
+	return store.database.listSchedulesPage(ctx, topicID, limit, afterName, afterID)
+}
+
 func (store *Store) UpdateSchedule(ctx context.Context, topicID uuid.UUID, scheduleID string, expectedVersion int, schedule Schedule) error {
 	return store.database.updateSchedule(ctx, topicID, scheduleID, expectedVersion, schedule)
 }
@@ -214,7 +240,7 @@ func (store *Store) ListScheduleRuns(ctx context.Context, scheduleID string, lim
 	return store.database.listScheduleRuns(ctx, scheduleID, limit, before, beforeID)
 }
 
-func (store *Store) NextScheduleDue(ctx context.Context, now time.Time) (time.Time, bool, error) {
+func (store *Store) NextScheduleDue(ctx context.Context, now time.Time) (time.Time, time.Time, bool, error) {
 	return store.database.nextScheduleDue(ctx, now)
 }
 
@@ -224,4 +250,8 @@ func (store *Store) ClaimDueSchedule(ctx context.Context, owner string, now time
 
 func (store *Store) PersistScheduleOccurrence(ctx context.Context, claimed Schedule, scheduledFor, nextRunAt time.Time, force, advance bool, owner string) (ScheduleRun, error) {
 	return store.database.persistScheduleOccurrence(ctx, claimed, scheduledFor, nextRunAt, force, advance, owner)
+}
+
+func (store *Store) FailScheduleOccurrence(ctx context.Context, claimed Schedule, scheduledFor, nextRunAt time.Time, advance bool, owner, failure string) (ScheduleRun, error) {
+	return store.database.failScheduleOccurrence(ctx, claimed, scheduledFor, nextRunAt, advance, owner, failure)
 }

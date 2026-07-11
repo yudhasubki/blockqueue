@@ -2,6 +2,7 @@ package turso_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +10,13 @@ import (
 	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/store/turso"
 )
+
+func TestOpenRejectsEmptyURL(t *testing.T) {
+	_, err := turso.Open("  ")
+	if !errors.Is(err, turso.ErrEmptyURL) {
+		t.Fatalf("Open() error=%v, want ErrEmptyURL", err)
+	}
+}
 
 func TestExperimentalLocalSmoke(t *testing.T) {
 	driver, err := turso.Open("file://" + filepath.Join(t.TempDir(), "turso-smoke.db"))

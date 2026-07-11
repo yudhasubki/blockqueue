@@ -88,7 +88,7 @@ func TestConcurrentSQLiteMigrationsAreSerialized(t *testing.T) {
 
 	var applied int
 	require.NoError(t, testDB(drivers[0]).Get(&applied, "SELECT COUNT(*) FROM schema_migrations"))
-	require.Equal(t, 1, applied)
+	require.Equal(t, 2, applied)
 }
 
 func TestConcurrentPostgresMigrationsAreSerialized(t *testing.T) {
@@ -121,5 +121,5 @@ func TestConcurrentPostgresMigrationsAreSerialized(t *testing.T) {
 
 	var applied int
 	require.NoError(t, testDB(schema.Driver).Get(&applied, "SELECT COUNT(*) FROM schema_migrations"))
-	require.Equal(t, 1, applied)
+	require.Equal(t, 2, applied)
 }

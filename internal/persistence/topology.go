@@ -12,11 +12,12 @@ import (
 )
 
 const (
+	topologyCleanupBatchSize = 1000
+	topologyCleanupYield     = 10 * time.Millisecond
+
 	softDeleteTopicQuery            = "UPDATE topics SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL"
 	softDeleteTopicSubscribersQuery = "UPDATE topic_subscribers SET deleted_at = CURRENT_TIMESTAMP " +
 		"WHERE topic_id = ? AND deleted_at IS NULL"
-	deleteTopicSchedulesQuery = "DELETE FROM schedules WHERE topic_id = ?"
-	deleteTopicMessagesQuery  = "DELETE FROM messages WHERE topic_id = ?"
 	softDeleteSubscriberQuery = "UPDATE topic_subscribers SET deleted_at = CURRENT_TIMESTAMP " +
 		"WHERE topic_id = ? AND id = ? AND name = ? AND deleted_at IS NULL"
 )
@@ -38,6 +39,20 @@ func (d *db) getTopics(ctx context.Context, filter TopicFilter) (Topics, error) 
 	}
 	err = d.Conn().SelectContext(ctx, &topics, d.Conn().Rebind(query), args...)
 	return topics, err
+}
+
+func (d *db) listTopics(ctx context.Context, limit int, afterName, afterID string) (Topics, error) {
+	query := "SELECT id, name, paused, created_at, deleted_at FROM topics WHERE deleted_at IS NULL"
+	args := make([]any, 0, 4)
+	if afterID != "" {
+		query += " AND (name > ? OR (name = ? AND id > ?))"
+		args = append(args, afterName, afterName, afterID)
+	}
+	query += " ORDER BY name, id LIMIT ?"
+	args = append(args, limit)
+	items := make(Topics, 0, limit)
+	err := d.Conn().SelectContext(ctx, &items, d.Conn().Rebind(query), args...)
+	return items, err
 }
 
 func (d *db) getSubscribers(ctx context.Context, filter SubscriberFilter) (Subscribers, error) {
@@ -172,8 +187,9 @@ func (d *db) setSubscriberPaused(ctx context.Context, subscriberID uuid.UUID, pa
 	return nil
 }
 
-// deleteSubscriber removes canonical delivery state while retaining the
-// soft-deleted subscriber metadata for restart consistency.
+// deleteSubscriber commits only the logical deletion. Physical delivery and
+// metadata cleanup is performed in bounded maintenance transactions so a
+// large subscriber cannot monopolize SQLite's single writer.
 func (d *db) deleteSubscriber(ctx context.Context, topicID, subscriberID uuid.UUID, subscriberName string) error {
 	return d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		if err := d.lockTopicTx(ctx, tx, topicID); err != nil {
@@ -187,68 +203,134 @@ func (d *db) deleteSubscriber(ctx context.Context, topicID, subscriberID uuid.UU
 		if rows == 0 {
 			return ErrSubscriberNotFound
 		}
-		if err := d.deleteSubscriberDeliveriesTx(ctx, tx, subscriberID, 2*time.Second); err != nil {
-			return fmt.Errorf("delete subscriber deliveries: %w", err)
-		}
 		return d.notifyTx(ctx, tx, EventTopology)
 	})
 }
 
-func (d *db) deleteSubscriberDeliveriesTx(
-	ctx context.Context,
-	tx *sqlx.Tx,
-	subscriberID uuid.UUID,
-	budget time.Duration,
-) error {
-	deadline := time.Now().Add(budget)
-	for time.Now().Before(deadline) {
-		result, err := tx.ExecContext(ctx, tx.Rebind(`
-			DELETE FROM message_deliveries
-			WHERE (message_id, subscriber_id) IN (
-				SELECT message_id, subscriber_id FROM message_deliveries
-				WHERE subscriber_id = ? LIMIT 1000
-			)`), subscriberID)
-		if err != nil {
-			return err
-		}
-		rows, _ := result.RowsAffected()
-		if rows < 1000 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
+// pruneDeletedTopology physically removes logically deleted queue topology in
+// dependency order. Every statement is independently committed and bounded;
+// the shared deadline prevents one maintenance cycle from monopolizing the
+// writer when a deleted topic owns millions of rows.
+func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (int64, bool, bool, error) {
+	if budget <= 0 {
+		return 0, false, false, nil
 	}
-	return nil
-}
-
-func (d *db) pruneDeletedSubscriberDeliveries(ctx context.Context, budget time.Duration) error {
 	deadline := time.Now().Add(budget)
-	for time.Now().Before(deadline) {
-		result, err := d.Conn().ExecContext(ctx, `
-			DELETE FROM message_deliveries
+	type cleanupPhase struct {
+		query string
+		args  []any
+	}
+	limitArgs := func() []any { return []any{topologyCleanupBatchSize} }
+	phases := []cleanupPhase{
+		{query: `DELETE FROM message_deliveries
 			WHERE (message_id, subscriber_id) IN (
 				SELECT deliveries.message_id, deliveries.subscriber_id
 				FROM message_deliveries deliveries
 				JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
-				WHERE subscribers.deleted_at IS NOT NULL LIMIT 1000
-			)`)
-		if err != nil {
-			return err
+				WHERE subscribers.deleted_at IS NOT NULL
+				LIMIT ?
+			)`, args: limitArgs()},
+		{query: `UPDATE schedule_runs
+			SET status = ?, finished_at = CURRENT_TIMESTAMP
+			WHERE id IN (
+				SELECT runs.id FROM schedule_runs runs
+				WHERE runs.status = ? AND runs.message_id IS NOT NULL
+				  AND NOT EXISTS (
+					SELECT 1 FROM message_deliveries deliveries
+					JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
+					WHERE deliveries.message_id = runs.message_id
+					  AND subscribers.deleted_at IS NULL
+					  AND deliveries.status NOT IN (?, ?, ?)
+				  )
+				LIMIT ?
+			)`, args: []any{
+			ScheduleRunStatusCompleted, ScheduleRunStatusRunning,
+			DeliveryStatusProcessed, DeliveryStatusDeadLetter, DeliveryStatusCancelled,
+			topologyCleanupBatchSize,
+		}},
+		{query: `DELETE FROM schedule_runs
+			WHERE id IN (
+				SELECT runs.id FROM schedule_runs runs
+				JOIN schedules ON schedules.id = runs.schedule_id
+				JOIN topics ON topics.id = schedules.topic_id
+				WHERE topics.deleted_at IS NOT NULL
+				LIMIT ?
+			)`, args: limitArgs()},
+		{query: `DELETE FROM schedules
+			WHERE id IN (
+				SELECT schedules.id FROM schedules
+				JOIN topics ON topics.id = schedules.topic_id
+				WHERE topics.deleted_at IS NOT NULL
+				  AND NOT EXISTS (
+					SELECT 1 FROM schedule_runs
+					WHERE schedule_runs.schedule_id = schedules.id
+				  )
+				LIMIT ?
+			)`, args: limitArgs()},
+		{query: `DELETE FROM messages
+			WHERE id IN (
+				SELECT messages.id FROM messages
+				JOIN topics ON topics.id = messages.topic_id
+				WHERE topics.deleted_at IS NOT NULL
+				  AND NOT EXISTS (
+					SELECT 1 FROM message_deliveries
+					WHERE message_deliveries.message_id = messages.id
+				  )
+				LIMIT ?
+			)`, args: limitArgs()},
+		{query: `DELETE FROM topic_subscribers
+			WHERE id IN (
+				SELECT subscribers.id FROM topic_subscribers subscribers
+				WHERE subscribers.deleted_at IS NOT NULL
+				  AND NOT EXISTS (
+					SELECT 1 FROM message_deliveries
+					WHERE message_deliveries.subscriber_id = subscribers.id
+				  )
+				LIMIT ?
+			)`, args: limitArgs()},
+		{query: `DELETE FROM topics
+			WHERE id IN (
+				SELECT topics.id FROM topics
+				WHERE topics.deleted_at IS NOT NULL
+				  AND NOT EXISTS (SELECT 1 FROM topic_subscribers WHERE topic_subscribers.topic_id = topics.id)
+				  AND NOT EXISTS (SELECT 1 FROM schedules WHERE schedules.topic_id = topics.id)
+				  AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.topic_id = topics.id)
+				LIMIT ?
+			)`, args: limitArgs()},
+	}
+
+	var total int64
+	yielded := false
+	for _, phase := range phases {
+		for {
+			if !time.Now().Before(deadline) {
+				return total, yielded, true, nil
+			}
+			result, err := d.Conn().ExecContext(ctx, d.Conn().Rebind(phase.query), phase.args...)
+			if err != nil {
+				return total, yielded, true, err
+			}
+			rows, _ := result.RowsAffected()
+			total += rows
+			if rows < topologyCleanupBatchSize {
+				break
+			}
+			yielded = true
+			timer := time.NewTimer(topologyCleanupYield)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return total, yielded, true, ctx.Err()
+			case <-timer.C:
+			}
 		}
-		rows, _ := result.RowsAffected()
-		if rows < 1000 {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return total, yielded, true, err
 		}
 	}
-	return nil
+	return total, yielded, false, nil
 }
 
 func (d *db) getTopicSubscriberQueueStats(ctx context.Context, topicID uuid.UUID) (map[uuid.UUID]SubscriberQueueStats, error) {
@@ -276,7 +358,37 @@ func (d *db) getTopicSubscriberQueueStats(ctx context.Context, topicID uuid.UUID
 	return result, nil
 }
 
-// deleteTopic removes all queue data owned by a topic in one transaction.
+func (d *db) listSubscriberStatuses(
+	ctx context.Context,
+	topicID uuid.UUID,
+	limit int,
+	afterName, afterID string,
+) ([]SubscriberStatusRow, error) {
+	query := `WITH selected AS (
+		SELECT id, name FROM topic_subscribers
+		WHERE topic_id = ? AND deleted_at IS NULL`
+	args := []any{topicID}
+	if afterID != "" {
+		query += " AND (name > ? OR (name = ? AND id > ?))"
+		args = append(args, afterName, afterName, afterID)
+	}
+	query += ` ORDER BY name, id LIMIT ?
+	)
+	SELECT selected.id, selected.name,
+		COALESCE(SUM(CASE WHEN deliveries.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending,
+		COALESCE(SUM(CASE WHEN deliveries.status = 'delivered' THEN 1 ELSE 0 END), 0) AS delivered
+	FROM selected
+	LEFT JOIN message_deliveries deliveries ON deliveries.subscriber_id = selected.id
+	GROUP BY selected.id, selected.name
+	ORDER BY selected.name, selected.id`
+	args = append(args, limit)
+	rows := make([]SubscriberStatusRow, 0, limit)
+	err := d.Conn().SelectContext(ctx, &rows, d.Conn().Rebind(query), args...)
+	return rows, err
+}
+
+// deleteTopic commits only logical deletion. Physical rows remain inaccessible
+// and are removed later by pruneDeletedTopology in bounded transactions.
 func (d *db) deleteTopic(ctx context.Context, topicID uuid.UUID) error {
 	return d.tx(ctx, func(ctx context.Context, tx *sqlx.Tx) error {
 		if err := d.lockTopicTx(ctx, tx, topicID); err != nil {
@@ -288,8 +400,6 @@ func (d *db) deleteTopic(ctx context.Context, topicID uuid.UUID) error {
 		}{
 			{"soft-delete topic", softDeleteTopicQuery},
 			{"soft-delete subscribers", softDeleteTopicSubscribersQuery},
-			{"delete schedules", deleteTopicSchedulesQuery},
-			{"delete canonical messages", deleteTopicMessagesQuery},
 		}
 		for _, statement := range statements {
 			if _, err := tx.ExecContext(ctx, tx.Rebind(statement.query), topicID); err != nil {

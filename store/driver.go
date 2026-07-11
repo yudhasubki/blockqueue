@@ -36,6 +36,13 @@ type NotificationSource interface {
 	Listen(context.Context, string) (<-chan string, error)
 }
 
+// NotificationHealthSource optionally exposes the state of the driver's
+// dedicated listener connection. It is operational health only; polling keeps
+// queue correctness independent from this signal.
+type NotificationHealthSource interface {
+	NotificationHealthy() bool
+}
+
 // SQLiteMaintenanceSource marks a local SQLite driver that supports WAL
 // checkpoint and incremental-vacuum pragmas. Remote SQLite-compatible drivers
 // such as Turso intentionally do not implement this capability.

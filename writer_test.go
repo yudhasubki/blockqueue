@@ -419,3 +419,130 @@ func TestWriter_ConcurrentClosePreservesAcceptedMessages(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, accepted.Load(), stored)
 }
+
+func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
+	permanent := errors.New("injected permanent admission failure")
+	blocked := make(chan struct{})
+	var blockedOnce sync.Once
+	persist := func(ctx context.Context, requests []writeRequest) ([]bool, error) {
+		if len(requests) > 1 || requests[0].Message == "permanent" {
+			return nil, permanent
+		}
+		blockedOnce.Do(func() { close(blocked) })
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+		BatchSize: 2, FlushInterval: time.Hour,
+		RetryMin: time.Millisecond, RetryMax: time.Millisecond,
+		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
+		persist: persist,
+	})
+	now := time.Now().UTC()
+	first, err := wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "permanent", CreatedAt: now, VisibleAt: now,
+	}, true)
+	require.NoError(t, err)
+	second, err := wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "blocked", CreatedAt: now, VisibleAt: now,
+	}, true)
+	require.NoError(t, err)
+	<-blocked
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, wb.CloseContext(closeCtx), ErrWriterDrainTimeout)
+	_, err = wb.waitAdmission(context.Background(), first)
+	require.ErrorIs(t, err, permanent)
+	_, err = wb.waitAdmission(context.Background(), second)
+	require.ErrorIs(t, err, ErrWriterDrainTimeout)
+	messages, bytes := wb.Pending()
+	require.Zero(t, messages)
+	require.Zero(t, bytes)
+}
+
+func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
+	storageFailure := errors.New("injected permanent storage corruption")
+	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+		BatchSize: 1, FlushInterval: time.Millisecond,
+		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
+		persist: func(context.Context, []writeRequest) ([]bool, error) {
+			return nil, storageFailure
+		},
+	})
+	now := time.Now().UTC()
+	admission, err := wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "fatal", CreatedAt: now, VisibleAt: now,
+	}, true)
+	require.NoError(t, err)
+	_, err = wb.waitAdmission(context.Background(), admission)
+	require.ErrorIs(t, err, storageFailure)
+	require.Eventually(t, func() bool { return !wb.Healthy() && !wb.accepting.Load() }, time.Second, time.Millisecond)
+	_, err = wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "rejected", CreatedAt: now, VisibleAt: now,
+	}, true)
+	require.ErrorIs(t, err, ErrWriterClosed)
+	require.NoError(t, wb.CloseContext(context.Background()))
+}
+
+func TestDomainWriteFailureDoesNotPoisonWriterHealth(t *testing.T) {
+	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+		BatchSize: 1, FlushInterval: time.Millisecond,
+		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
+		persist: func(context.Context, []writeRequest) ([]bool, error) {
+			return nil, ErrNoActiveSubscriber
+		},
+	})
+	now := time.Now().UTC()
+	admission, err := wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "domain failure", CreatedAt: now, VisibleAt: now,
+	}, true)
+	require.NoError(t, err)
+	_, err = wb.waitAdmission(context.Background(), admission)
+	require.ErrorIs(t, err, ErrNoActiveSubscriber)
+	require.True(t, wb.Healthy())
+	require.True(t, wb.accepting.Load())
+	require.NoError(t, wb.CloseContext(context.Background()))
+}
+
+func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
+	persistStarted := make(chan struct{})
+	var startedOnce sync.Once
+	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+		BatchSize: 1, FlushInterval: time.Hour,
+		MaxPendingMessages: 1, MaxPendingBytes: 1 << 20,
+		RetryMin: time.Millisecond, RetryMax: time.Millisecond,
+		persist: func(ctx context.Context, _ []writeRequest) ([]bool, error) {
+			startedOnce.Do(func() { close(persistStarted) })
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	now := time.Now().UTC()
+	_, err := wb.admitOne(context.Background(), writeRequest{
+		MessageID: uuid.NewString(), Message: "blocked persistence", CreatedAt: now, VisibleAt: now,
+	}, false)
+	require.NoError(t, err)
+	<-persistStarted
+
+	firstBarrier := make(chan error, 1)
+	go func() { firstBarrier <- wb.Barrier(context.Background()) }()
+	require.Eventually(t, func() bool { return len(wb.queue) == 1 }, time.Second, time.Millisecond)
+	secondBarrier := make(chan error, 1)
+	go func() { secondBarrier <- wb.Barrier(context.Background()) }()
+	time.Sleep(5 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err = wb.CloseContext(ctx)
+	require.ErrorIs(t, err, ErrWriterDrainTimeout)
+	require.Less(t, time.Since(started), 250*time.Millisecond,
+		"initiateClose must not wait behind a sender blocked on the queue")
+	require.ErrorIs(t, <-secondBarrier, ErrWriterClosed)
+	require.ErrorIs(t, <-firstBarrier, ErrWriterDrainTimeout)
+	require.Eventually(t, func() bool {
+		messages, bytes := wb.Pending()
+		return messages == 0 && bytes == 0
+	}, time.Second, time.Millisecond)
+}

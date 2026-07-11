@@ -15,6 +15,7 @@ type sqlDialect interface {
 	kind() store.Dialect
 	migrationDirectory() string
 	boolLiteral(bool) string
+	currentTimeExpression() string
 	currentTimeQuery() string
 	lockClause(target string, skipLocked bool) string
 	topologyReadLockClause(target string) string
@@ -22,6 +23,7 @@ type sqlDialect interface {
 	deliveryBatchRow() string
 	deliveryIdentityRow() string
 	deliveryFailureRow() string
+	deliveryNackRow() string
 	messageChunkSize() int
 	claimChunkSize(int) int
 	usesDatabaseEvents() bool
@@ -38,14 +40,18 @@ func (sqliteDialect) boolLiteral(value bool) string {
 	}
 	return "0"
 }
-func (sqliteDialect) currentTimeQuery() string                       { return "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" }
+func (sqliteDialect) currentTimeExpression() string { return "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')" }
+func (dialect sqliteDialect) currentTimeQuery() string {
+	return "SELECT " + dialect.currentTimeExpression()
+}
 func (sqliteDialect) lockClause(string, bool) string                 { return "" }
 func (sqliteDialect) topologyReadLockClause(string) string           { return "" }
 func (sqliteDialect) timestampBind() string                          { return "?" }
 func (sqliteDialect) deliveryBatchRow() string                       { return "(?, ?, ?, ?)" }
 func (sqliteDialect) deliveryIdentityRow() string                    { return "(?, ?)" }
 func (sqliteDialect) deliveryFailureRow() string                     { return "(?, ?, ?, ?, ?, ?)" }
-func (sqliteDialect) messageChunkSize() int                          { return 100 }
+func (sqliteDialect) deliveryNackRow() string                        { return "(?, ?, ?, ?, ?, ?, ?)" }
+func (sqliteDialect) messageChunkSize() int                          { return 99 }
 func (sqliteDialect) claimChunkSize(requested int) int               { return min(requested, 400) }
 func (sqliteDialect) usesDatabaseEvents() bool                       { return false }
 func (sqliteDialect) lockMigrations(context.Context, *sqlx.Tx) error { return nil }
@@ -60,8 +66,11 @@ func (postgresDialect) boolLiteral(value bool) string {
 	}
 	return "FALSE"
 }
-func (postgresDialect) currentTimeQuery() string { return "SELECT clock_timestamp()" }
-func (postgresDialect) timestampBind() string    { return "CAST(? AS TIMESTAMPTZ)" }
+func (postgresDialect) currentTimeExpression() string { return "clock_timestamp()" }
+func (dialect postgresDialect) currentTimeQuery() string {
+	return "SELECT " + dialect.currentTimeExpression()
+}
+func (postgresDialect) timestampBind() string { return "CAST(? AS TIMESTAMPTZ)" }
 func (postgresDialect) deliveryBatchRow() string {
 	return "(CAST(? AS UUID), CAST(? AS TIMESTAMPTZ), CAST(? AS INTEGER), CAST(? AS TIMESTAMPTZ))"
 }
@@ -70,6 +79,9 @@ func (postgresDialect) deliveryIdentityRow() string {
 }
 func (postgresDialect) deliveryFailureRow() string {
 	return "(CAST(? AS UUID), CAST(? AS UUID), CAST(? AS INTEGER), CAST(? AS VARCHAR), CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ))"
+}
+func (postgresDialect) deliveryNackRow() string {
+	return "(CAST(? AS UUID), CAST(? AS UUID), CAST(? AS INTEGER), CAST(? AS VARCHAR), CAST(? AS TIMESTAMPTZ), CAST(? AS TIMESTAMPTZ), CAST(? AS VARCHAR))"
 }
 func (postgresDialect) messageChunkSize() int            { return 1000 }
 func (postgresDialect) claimChunkSize(requested int) int { return requested }

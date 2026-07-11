@@ -55,6 +55,37 @@ func TestReadConfigFileRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestReadConfigFileRejectsUnsafeTimeoutsAndInvalidPort(t *testing.T) {
+	for name, contents := range map[string]string{
+		"negative shutdown":   "http:\n  shutdown: -1s\n",
+		"short write timeout": "http:\n  write_timeout: 30s\n",
+		"invalid port":        "http:\n  port: nope\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadConfigFile(path); err == nil {
+				t.Fatal("expected invalid configuration to fail")
+			}
+		})
+	}
+}
+
+func TestLoopbackHost(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "::1", "[::1]"} {
+		if !loopbackHost(host) {
+			t.Fatalf("%q should be loopback", host)
+		}
+	}
+	for _, host := range []string{"0.0.0.0", "::", "queue.internal"} {
+		if loopbackHost(host) {
+			t.Fatalf("%q should not be loopback", host)
+		}
+	}
+}
+
 func TestConfiguredCheckpointIntervalIsSQLiteOnly(t *testing.T) {
 	config := Config{Http: HTTPConfig{Driver: "sqlite"}, SQLite: SQLiteConfig{CheckpointInterval: "45s"}}
 	interval, err := configuredCheckpointInterval(config)
@@ -69,6 +100,20 @@ func TestConfiguredCheckpointIntervalIsSQLiteOnly(t *testing.T) {
 	interval, err = configuredCheckpointInterval(config)
 	if err != nil || interval != 0 {
 		t.Fatalf("postgres interval = %s, err = %v", interval, err)
+	}
+}
+
+func TestOpenConfiguredDriverRequiresBackendFields(t *testing.T) {
+	for name, config := range map[string]Config{
+		"sqlite":   {Http: HTTPConfig{Driver: storageDriverSQLite}},
+		"postgres": {Http: HTTPConfig{Driver: storageDriverPostgres}},
+		"turso":    {Http: HTTPConfig{Driver: storageDriverTurso}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := openConfiguredDriver(config); err == nil {
+				t.Fatal("expected missing backend fields to fail")
+			}
+		})
 	}
 }
 

@@ -27,6 +27,7 @@ const (
 	maxDeliveryClaimSize    = 1000
 	maxDeliveryPageSize     = 1000
 	deliveryReaperBatchSize = 1000
+	deliveryReaperPassLimit = 8
 )
 
 // MaxDeliveryTextBytes is the maximum persisted size of a NACK error or
@@ -115,24 +116,31 @@ func (q *Queue) ClaimWait(ctx context.Context, topic Topic, subscriber string, l
 		if topicRuntime.paused.Load() || subscriberRuntime.paused.Load() {
 			return nil, ErrResourcePaused
 		}
-		next, exists, err := q.db.nextDeliveryWake(ctx, subscriberRuntime.id)
+		next, observedAt, exists, err := q.db.nextDeliveryWake(ctx, subscriberRuntime.id)
 		if err != nil {
+			if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+				return Deliveries{}, nil
+			}
 			return nil, err
 		}
-		if exists && !next.After(time.Now()) {
+		if exists && !next.After(observedAt) {
 			messages, claimErr := q.Claim(ctx, topic, subscriber, limit, lease)
+			if claimErr != nil && ctx.Err() != nil &&
+				(errors.Is(claimErr, context.Canceled) || errors.Is(claimErr, context.DeadlineExceeded)) {
+				return Deliveries{}, nil
+			}
 			if claimErr != nil || len(messages) > 0 {
 				return messages, claimErr
 			}
 			// Another PostgreSQL worker may hold the due row under SKIP LOCKED.
 			// Avoid a tight read/write loop while that short transaction finishes.
-			next = time.Now().Add(10 * time.Millisecond)
+			next = observedAt.Add(10 * time.Millisecond)
 		}
 		// Notifications are hints; a bounded poll keeps PostgreSQL multi-process
 		// publishers correct even if a notification is missed.
 		wait := time.Second
 		if exists {
-			wait = time.Until(next)
+			wait = next.Sub(observedAt)
 			if wait > time.Second {
 				wait = time.Second
 			}
@@ -291,26 +299,26 @@ func (q *Queue) signalReaper() {
 func (q *Queue) startDeliveryReaper() {
 	clock := q.clock()
 	for {
-		next, exists, err := q.db.nextLeaseExpiry(q.serverCtx)
+		next, observedAt, exists, err := q.db.nextLeaseExpiry(q.serverCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
 			}
-			q.deliveryHealthy.Store(false)
+			q.setDeliveryHealthy(false)
 			if !waitForMaintenanceRetry(q.serverCtx, clock) {
 				return
 			}
 			continue
 		}
-		q.deliveryHealthy.Store(true)
+		q.setDeliveryHealthy(true)
 		wait := time.Second
 		if exists {
-			wait = time.Until(next)
+			wait = next.Sub(observedAt)
 			if wait < 0 {
 				wait = 0
 			}
 			// The timer is only a hint. A one-second reconciliation ceiling
-			// keeps cross-node clock skew from delaying lease expiry.
+			// provides reconciliation if a signal is missed.
 			if wait > time.Second {
 				wait = time.Second
 			}
@@ -333,30 +341,39 @@ func (q *Queue) startDeliveryReaper() {
 		case <-timer.C:
 		}
 
+		started := time.Now()
 		reapedAny := false
 		reapFailed := false
-		for {
+		yielded := false
+		var reaped int64
+		for batch := 0; batch < deliveryReaperPassLimit; batch++ {
 			count, err := q.db.reapExpiredDeliveries(q.serverCtx, deliveryReaperBatchSize)
 			if err != nil {
 				if errors.Is(err, context.Canceled) {
 					return
 				}
-				q.deliveryHealthy.Store(false)
+				q.setDeliveryHealthy(false)
 				slog.Error("delivery reaper failed", "error", err)
 				reapFailed = true
 				break
 			}
+			reaped += count
 			reapedAny = reapedAny || count > 0
 			if count < deliveryReaperBatchSize {
 				break
 			}
+			yielded = batch+1 == deliveryReaperPassLimit
 		}
+		q.observeMaintenancePass(metric.MaintenanceOperationDeliveryReaper, started, reaped, reapFailed, yielded)
 		if reapedAny {
 			for _, topic := range q.registry.Load().byID {
 				topic.notify()
 			}
 		}
 		if reapFailed && !waitForMaintenanceRetry(q.serverCtx, clock) {
+			return
+		}
+		if yielded && !waitForMaintenanceYield(q.serverCtx, clock) {
 			return
 		}
 	}
@@ -464,16 +481,12 @@ func (q *Queue) ResumeTopic(ctx context.Context, topic Topic) error {
 }
 
 func (q *Queue) setTopicPaused(ctx context.Context, topic Topic, paused bool) error {
-	if err := q.beginControlOperation(); err != nil {
+	mutation, err := q.beginTopicMutation(topic)
+	if err != nil {
 		return err
 	}
-	defer q.controlOps.Done()
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-	topicRuntime, ok := q.getTopicRuntime(topic)
-	if !ok {
-		return ErrTopicNotFound
-	}
+	defer mutation.close()
+	topicRuntime := mutation.runtime
 	if err := q.db.setTopicPaused(ctx, topicRuntime.id, paused); err != nil {
 		return err
 	}
@@ -494,15 +507,14 @@ func (q *Queue) ResumeSubscriber(ctx context.Context, topic Topic, subscriber st
 }
 
 func (q *Queue) setSubscriberPaused(ctx context.Context, topic Topic, subscriber string, paused bool) error {
-	if err := q.beginControlOperation(); err != nil {
-		return err
-	}
-	defer q.controlOps.Done()
-	q.mtx.Lock()
-	defer q.mtx.Unlock()
-	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
+	mutation, err := q.beginTopicMutation(topic)
 	if err != nil {
 		return err
+	}
+	defer mutation.close()
+	subscriberRuntime, ok := mutation.runtime.subscriberByName(subscriber)
+	if !ok || subscriberRuntime.deleted.Load() {
+		return ErrSubscriberNotFound
 	}
 	if err := q.db.setSubscriberPaused(ctx, subscriberRuntime.id, paused); err != nil {
 		return err
@@ -555,27 +567,37 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 
 func (q *Queue) ReplayDeadLetters(ctx context.Context, topic Topic, subscriber string, messageIDs []string) []DeliveryResult {
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
-	results := make([]DeliveryResult, 0, len(messageIDs))
-	for _, messageID := range messageIDs {
-		result := DeliveryResult{MessageID: messageID, Status: DeliveryStatusPending}
+	results := make([]DeliveryResult, len(messageIDs))
+	validIDs := make([]string, 0, len(messageIDs))
+	validIndexes := make([]int, 0, len(messageIDs))
+	for index, messageID := range messageIDs {
+		results[index] = DeliveryResult{MessageID: messageID, Status: DeliveryStatusPending}
 		if err != nil {
-			result.Status = DeliveryResultStatusFailed
-			result.Error = publicDeliveryError(err)
-		} else if _, parseErr := uuid.Parse(messageID); parseErr != nil {
-			result.Status = DeliveryResultStatusFailed
-			result.Error = ErrDeliveryNotFound.Error()
-		} else {
-			updated, replayErr := q.db.replayDeadLetter(ctx, subscriberRuntime.id, messageID)
-			if replayErr != nil || !updated {
-				result.Status = DeliveryResultStatusFailed
-				if replayErr != nil {
-					result.Error = "replay failed"
-				} else {
-					result.Error = ErrDeliveryNotFound.Error()
-				}
+			results[index].Status = DeliveryResultStatusFailed
+			results[index].Error = publicDeliveryError(err)
+			continue
+		}
+		if _, parseErr := uuid.Parse(messageID); parseErr != nil {
+			results[index].Status = DeliveryResultStatusFailed
+			results[index].Error = ErrDeliveryNotFound.Error()
+			continue
+		}
+		validIDs = append(validIDs, messageID)
+		validIndexes = append(validIndexes, index)
+	}
+	if subscriberRuntime != nil && len(validIDs) > 0 {
+		updated, replayErr := q.db.batchReplayDeadLetters(ctx, subscriberRuntime.id, validIDs)
+		for validIndex, resultIndex := range validIndexes {
+			if replayErr == nil && updated[validIndex] {
+				continue
+			}
+			results[resultIndex].Status = DeliveryResultStatusFailed
+			if replayErr != nil {
+				results[resultIndex].Error = "replay failed"
+			} else {
+				results[resultIndex].Error = ErrDeliveryNotFound.Error()
 			}
 		}
-		results = append(results, result)
 	}
 	if subscriberRuntime != nil {
 		subscriberRuntime.notify()

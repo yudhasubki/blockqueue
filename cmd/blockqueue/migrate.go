@@ -44,7 +44,7 @@ func (m *Migrate) Run(ctx context.Context, args []string) error {
 }
 
 func (m *Migrate) Usage() {
-	fmt.Printf(`
+	fmt.Print(`
 The migrate command to migrate to the database.
 
 Usage:

@@ -8,6 +8,13 @@ const (
 	OutcomeDeadLetter = "dead_letter"
 	OutcomeBusy       = "busy"
 	OutcomeRetry      = "retry"
+	OutcomeYielded    = "yielded"
+)
+
+const (
+	MaintenanceOperationDeliveryReaper = "delivery_reaper"
+	MaintenanceOperationScheduler      = "scheduler"
+	MaintenanceOperationTopology       = "topology_cleanup"
 )
 
 const (

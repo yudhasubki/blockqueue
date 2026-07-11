@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/yudhasubki/blockqueue"><img src="https://pkg.go.dev/badge/github.com/yudhasubki/blockqueue.svg" alt="Go Reference"></a>
-  <img src="https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.23+">
+  <img src="https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
 </p>
 
@@ -176,6 +176,11 @@ wait for the transaction. `Shutdown` drains transactions created by `WithTx`;
 callers that begin a raw transaction themselves must coordinate its lifetime
 with shutdown.
 
+`WithTx` never retries the callback. If the connection is lost while committing,
+it returns `*TransactionCommitUnknownError`: both the business writes and queue
+changes may already be committed, so reconcile by business/idempotency key
+instead of repeating non-idempotent application logic.
+
 The runnable [transactional example](example/transactional) shows both commits
 against one SQLite database, including receipt-fenced consumer completion.
 
@@ -331,7 +336,9 @@ should use the documented [transactional outbox relay](docs/http-outbox.md).
 Async single-message publish returns a `Location` header for the canonical
 message status resource. Embedders can install `AuthMiddleware`, a typed
 `PrincipalResolver`, or both; the standalone binary remains loopback-only by
-default.
+default and warns when configured on a non-loopback address. Topic, subscriber,
+schedule, active-delivery, DLQ, failure-history, and schedule-run lists use
+bounded cursor pagination (`limit` plus opaque `cursor`).
 
 ## Delivery contract
 
@@ -349,13 +356,20 @@ default.
   commit. `PublishAsync` guarantees bounded process-local admission, not crash
   durability.
 - The database is authoritative. PostgreSQL notifications and in-memory wakeups
-  reduce latency but are never required for correctness.
+  reduce latency but are never required for correctness. Immediate/delayed
+  publish timestamps, lease timers, scheduler timers, and retention cutoffs use
+  database time, avoiding application clock-skew errors in multi-node setups.
+- `DeleteTopic` and `DeleteSubscriber` commit logical deletion before returning.
+  Their data becomes inaccessible immediately and physical rows are reclaimed
+  asynchronously in bounded maintenance chunks; callers must not use raw row
+  disappearance as the completion signal.
 - Built-in authentication and exactly-once execution are outside the project
   scope. Protect the HTTP server with a private network or reverse proxy.
 
 v0.2 is the durable embedded/HTTP fan-out core. The typed Go worker runtime is
-being developed on `main`; multi-node maintenance leader election remains a
-roadmap item rather than hidden behavior in the release.
+being developed on `main`. PostgreSQL nodes elect one advisory-lock leader for
+retention and topology cleanup; claims, lease reaping, and scheduler ownership
+remain distributed and receipt/lease fenced.
 
 ## Storage and durability
 
@@ -376,6 +390,13 @@ transaction.
 Processed deliveries are retained for seven days and schedule-run history for
 30 days by default. Dead letters are retained indefinitely unless
 `Options.DeadLetterRetention` is set explicitly.
+
+Core Prometheus collectors cover persistence outcomes and lag, pending message
+and byte budgets, flush behavior, delivery operations, checkpoints, scheduler
+lag and health, lease-reaper health, PostgreSQL notification-listener health,
+and bounded maintenance passes. Supply `Options.MetricRegisterer` to isolate
+collectors in an application-owned registry, or set `Options.DisableMetrics`
+for a fully no-op metrics path.
 
 ## Development
 
@@ -401,7 +422,7 @@ BLOCKQUEUE_TEST_POSTGRES_URL='postgres://postgres:postgres@127.0.0.1:5432/blockq
 ```
 
 CI runs the complete suite and race detector against both storage backends,
-plus vet and a guarded PostgreSQL benchmark smoke. Benchmark scenarios and
+plus lint, staticcheck, vet, govulncheck, and guarded PostgreSQL benchmark smoke. Benchmark scenarios and
 exact persisted-row checks are documented in
 [benchmark/README.md](benchmark/README.md).
 
@@ -412,8 +433,8 @@ For component boundaries and lock ownership, see
 
 - v0.2.x: optional in-process event subscription, tracing hooks, and focused
   test helpers without changing the schema.
-- v0.3 (in development): typed Go workers and PostgreSQL maintenance leader
-  election.
+- v0.3 (in development): stabilize the typed Go worker API, tracing hooks, and
+  multi-worker operational tooling.
 - v0.4: versioned workflow/DAG orchestration as a separate layer over the queue.
 
 ## License

@@ -54,12 +54,15 @@ type Queue struct {
 	transactions     sync.WaitGroup
 	controlOps       sync.WaitGroup
 	transactionMu    sync.RWMutex
-	activeTx         map[*sql.Tx]struct{}
+	activeTx         map[*sql.Tx]*activeTransaction
 	schedulerSignal  chan struct{}
 	reaperSignal     chan struct{}
+	prunerSignal     chan struct{}
 	schedulerOwner   string
 	schedulerHealthy atomic.Bool
 	deliveryHealthy  atomic.Bool
+	listenerHealthy  atomic.Bool
+	runtimeMetricID  uint64
 	options          Options
 }
 
@@ -97,12 +100,14 @@ func New(driver store.Driver, opt Options) *Queue {
 		cancel:          cancel,
 		schedulerSignal: make(chan struct{}, 1),
 		reaperSignal:    make(chan struct{}, 1),
+		prunerSignal:    make(chan struct{}, 1),
 		schedulerOwner:  uuid.NewString(),
-		activeTx:        make(map[*sql.Tx]struct{}),
+		activeTx:        make(map[*sql.Tx]*activeTransaction),
 	}
 	queue.db.setMetricsDisabled(opt.DisableMetrics)
 	queue.schedulerHealthy.Store(true)
 	queue.deliveryHealthy.Store(true)
+	queue.listenerHealthy.Store(true)
 	queue.registry.Store(&topicRegistry{
 		byName: make(map[string]*topicRuntime),
 		byID:   make(map[uuid.UUID]*topicRuntime),
@@ -110,4 +115,25 @@ func New(driver store.Driver, opt Options) *Queue {
 	queue.state.Store(uint32(LifecycleNew))
 
 	return queue
+}
+
+func (q *Queue) setSchedulerHealthy(healthy bool) {
+	q.schedulerHealthy.Store(healthy)
+	if !q.options.DisableMetrics {
+		metric.SetSchedulerHealth(q.runtimeMetricID, healthy)
+	}
+}
+
+func (q *Queue) setDeliveryHealthy(healthy bool) {
+	q.deliveryHealthy.Store(healthy)
+	if !q.options.DisableMetrics {
+		metric.SetDeliveryReaperHealth(q.runtimeMetricID, healthy)
+	}
+}
+
+func (q *Queue) setListenerHealthy(healthy bool) {
+	q.listenerHealthy.Store(healthy)
+	if !q.options.DisableMetrics {
+		metric.SetDatabaseListenerHealth(q.runtimeMetricID, healthy)
+	}
 }

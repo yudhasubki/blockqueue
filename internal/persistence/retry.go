@@ -7,7 +7,10 @@ import (
 	"time"
 )
 
-const leaseExpiredError = "delivery lease expired"
+const (
+	leaseExpiredError = "delivery lease expired"
+	defaultNackError  = "delivery negatively acknowledged"
+)
 
 func retryDelayFor(options subscriberOptions, failureCount int, messageID string) time.Duration {
 	if failureCount < 1 {

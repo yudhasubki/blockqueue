@@ -6,11 +6,37 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ErrInvalidTransaction reports a missing or otherwise unusable caller
 // transaction.
 var ErrInvalidTransaction = errors.New("invalid blockqueue transaction")
+
+// ErrTransactionCommitUnknown means Commit returned a connection-level error
+// for a caller-owned transaction. The database may have committed the
+// application writes and queue changes; callers must reconcile and must not
+// blindly repeat non-idempotent business operations.
+var ErrTransactionCommitUnknown = errors.New("transaction commit outcome unknown")
+
+type TransactionCommitUnknownError struct {
+	Cause error
+}
+
+func (err *TransactionCommitUnknownError) Error() string {
+	return fmt.Sprintf("transaction commit outcome unknown: %v", err.Cause)
+}
+
+func (err *TransactionCommitUnknownError) Unwrap() error { return err.Cause }
+
+func (err *TransactionCommitUnknownError) Is(target error) bool {
+	return target == ErrTransactionCommitUnknown || errors.Is(err.Cause, target)
+}
+
+type activeTransaction struct {
+	topics map[uuid.UUID]struct{}
+}
 
 // WithTx runs fn in a transaction owned by the queue. It is the preferred way
 // to atomically change application tables and publish or complete deliveries:
@@ -22,27 +48,29 @@ func (q *Queue) WithTx(ctx context.Context, options *sql.TxOptions, fn func(*sql
 	if fn == nil {
 		return fmt.Errorf("%w: callback is required", ErrInvalidTransaction)
 	}
-	q.admissionMu.RLock()
-	if err := q.requireRunning(); err != nil {
-		q.admissionMu.RUnlock()
+	if err := q.reserveTransactionStart(); err != nil {
 		return err
 	}
 	tx, err := q.db.Database.DB().BeginTx(ctx, options)
 	if err != nil {
-		q.admissionMu.RUnlock()
+		q.transactions.Done()
 		return err
 	}
 	q.registerTransaction(tx)
-	q.admissionMu.RUnlock()
 	defer q.unregisterTransaction(tx)
 	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
+		if isAmbiguousCommitError(err) {
+			return &TransactionCommitUnknownError{Cause: err}
+		}
 		return err
 	}
-	q.notifyAllTopics()
+	for _, topicID := range q.transactionTopics(tx) {
+		q.notify(topicID)
+	}
 	return nil
 }
 
@@ -88,17 +116,17 @@ func (q *Queue) BatchPublishTx(ctx context.Context, tx *sql.Tx, topic Topic, req
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	writes := make([]writeRequest, len(requests))
 	receipts := make(PublishReceipts, len(requests))
-	seenKeys := make(map[string]Message)
+	seenKeys := make(map[string]string)
 	for index, request := range requests {
 		write, scheduledAt, err := buildWriteRequest(runtime.id, request, now)
 		if err != nil {
 			return nil, err
 		}
 		if request.IdempotencyKey != "" {
-			if previous, ok := seenKeys[request.IdempotencyKey]; ok && !samePublish(previous, request) {
+			if previous, ok := seenKeys[request.IdempotencyKey]; ok && previous != write.IdempotencyHash {
 				return nil, fmt.Errorf("%w: duplicate key %q has different payload", ErrInvalidPublish, request.IdempotencyKey)
 			}
-			seenKeys[request.IdempotencyKey] = request
+			seenKeys[request.IdempotencyKey] = write.IdempotencyHash
 		}
 		writes[index] = write
 		receipts[index] = PublishReceipt{
@@ -114,6 +142,10 @@ func (q *Queue) BatchPublishTx(ctx context.Context, tx *sql.Tx, topic Topic, req
 		duplicate := duplicates[index]
 		receipts[index].Duplicate = &duplicate
 	}
+	if err := q.restorePersistedScheduledTimes(ctx, tx, receipts); err != nil {
+		return nil, err
+	}
+	q.markTransactionTopic(tx, runtime.id)
 	return receipts, nil
 }
 
@@ -145,9 +177,34 @@ func (q *Queue) requireTransactionAllowed(tx *sql.Tx) error {
 
 func (q *Queue) registerTransaction(tx *sql.Tx) {
 	q.transactionMu.Lock()
-	q.activeTx[tx] = struct{}{}
-	q.transactions.Add(1)
+	q.activeTx[tx] = &activeTransaction{topics: make(map[uuid.UUID]struct{})}
 	q.transactionMu.Unlock()
+}
+
+func (q *Queue) markTransactionTopic(tx *sql.Tx, topicID uuid.UUID) {
+	if tx == nil {
+		return
+	}
+	q.transactionMu.Lock()
+	if active := q.activeTx[tx]; active != nil {
+		active.topics[topicID] = struct{}{}
+	}
+	q.transactionMu.Unlock()
+}
+
+func (q *Queue) transactionTopics(tx *sql.Tx) []uuid.UUID {
+	q.transactionMu.RLock()
+	active := q.activeTx[tx]
+	if active == nil {
+		q.transactionMu.RUnlock()
+		return nil
+	}
+	topics := make([]uuid.UUID, 0, len(active.topics))
+	for topicID := range active.topics {
+		topics = append(topics, topicID)
+	}
+	q.transactionMu.RUnlock()
+	return topics
 }
 
 func (q *Queue) unregisterTransaction(tx *sql.Tx) {
@@ -157,8 +214,15 @@ func (q *Queue) unregisterTransaction(tx *sql.Tx) {
 	q.transactions.Done()
 }
 
-func (q *Queue) notifyAllTopics() {
-	for _, topic := range q.registry.Load().byID {
-		topic.notify()
+func (q *Queue) reserveTransactionStart() error {
+	q.admissionMu.RLock()
+	defer q.admissionMu.RUnlock()
+	if err := q.requireRunning(); err != nil {
+		return err
 	}
+	// Add happens behind the same lifecycle fence acquired by Shutdown before
+	// Wait, satisfying sync.WaitGroup's Add-before-Wait requirement without
+	// holding a mutex across a potentially blocking BeginTx call.
+	q.transactions.Add(1)
+	return nil
 }

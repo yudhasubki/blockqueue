@@ -19,6 +19,44 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 	return d.persistWriteRequestsWithTx(ctx, nil, requests)
 }
 
+func (d *db) messageScheduledTimes(
+	ctx context.Context,
+	external *sql.Tx,
+	messageIDs []string,
+) (map[string]time.Time, error) {
+	result := make(map[string]time.Time, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return result, nil
+	}
+	type row struct {
+		ID          string    `db:"id"`
+		ScheduledAt time.Time `db:"scheduled_at"`
+	}
+	for start := 0; start < len(messageIDs); start += deliveryIdentityLookupChunk {
+		end := min(start+deliveryIdentityLookupChunk, len(messageIDs))
+		query, args, err := sqlx.In(
+			"SELECT id, scheduled_at FROM messages WHERE id IN (?)", messageIDs[start:end],
+		)
+		if err != nil {
+			return nil, err
+		}
+		rows := make([]row, 0, end-start)
+		query = d.Conn().Rebind(query)
+		if external == nil {
+			err = d.Conn().SelectContext(ctx, &rows, query, args...)
+		} else {
+			err = (&sqlx.Tx{Tx: external, Mapper: d.Conn().Mapper}).SelectContext(ctx, &rows, query, args...)
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range rows {
+			result[item.ID] = item.ScheduledAt
+		}
+	}
+	return result, nil
+}
+
 // persistWriteRequestsWithTx uses a caller-owned transaction when supplied.
 // The caller retains commit/rollback ownership; a nil transaction preserves
 // the normal writer-owned transaction boundary.
@@ -27,16 +65,12 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 		return []bool{}, nil
 	}
 	normalized := append([]writeRequest(nil), requests...)
-	now := time.Now().UTC()
 	for i := range normalized {
 		if len(normalized[i].Headers) == 0 {
 			normalized[i].Headers = []byte("{}")
 		}
 		if !json.Valid(normalized[i].Headers) {
 			return nil, fmt.Errorf("%w: invalid headers JSON", ErrInvalidPublish)
-		}
-		if normalized[i].CreatedAt.IsZero() {
-			normalized[i].CreatedAt = now
 		}
 	}
 	messageChunk := d.dialect.messageChunkSize()
@@ -109,15 +143,50 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			}
 		}
 
+		databaseNow, err := d.nowTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		for index := range normalized {
+			request := &normalized[index]
+			switch request.ScheduleMode {
+			case scheduleModeImmediate:
+				request.CreatedAt = databaseNow
+				request.VisibleAt = databaseNow
+			case scheduleModeDelay:
+				if request.ScheduleDelay < 0 {
+					return fmt.Errorf("%w: delay cannot be negative", ErrInvalidPublish)
+				}
+				request.CreatedAt = databaseNow
+				request.VisibleAt = databaseNow.Add(request.ScheduleDelay)
+			case scheduleModeAbsolute:
+				if request.VisibleAt.IsZero() {
+					return fmt.Errorf("%w: absolute schedule is required", ErrInvalidPublish)
+				}
+				request.CreatedAt = databaseNow
+			case "":
+				// Internal compatibility for callers that already provide absolute
+				// storage timestamps. Public publish paths always set a mode.
+				if request.CreatedAt.IsZero() {
+					request.CreatedAt = databaseNow
+				}
+				if request.VisibleAt.IsZero() {
+					request.VisibleAt = request.CreatedAt
+				}
+			default:
+				return fmt.Errorf("%w: unsupported schedule mode %q", ErrInvalidPublish, request.ScheduleMode)
+			}
+		}
+
 		insertedIDs := make(map[string]struct{}, len(normalized))
 		for start := 0; start < len(normalized); start += messageChunk {
 			end := min(start+messageChunk, len(normalized))
 			chunk := normalized[start:end]
-			args := make([]any, 0, len(chunk)*9)
+			args := make([]any, 0, len(chunk)*10)
 			for _, request := range chunk {
 				args = append(args,
 					request.MessageID, request.TopicID, request.Message, string(request.Headers),
-					nullString(request.CorrelationID), nullString(request.IdempotencyKey),
+					nullString(request.CorrelationID), nullString(request.IdempotencyKey), nullString(request.IdempotencyHash),
 					request.Priority, request.VisibleAt, request.CreatedAt,
 				)
 			}
@@ -147,35 +216,45 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 			}
 			duplicates[i] = true
 			var existing struct {
-				ID             string         `db:"id"`
-				TopicID        string         `db:"topic_id"`
-				Message        string         `db:"message"`
-				Headers        string         `db:"headers"`
-				CorrelationID  sql.NullString `db:"correlation_id"`
-				IdempotencyKey sql.NullString `db:"idempotency_key"`
-				Priority       int            `db:"priority"`
-				ScheduledAt    time.Time      `db:"scheduled_at"`
-				CreatedAt      time.Time      `db:"created_at"`
+				ID              string         `db:"id"`
+				TopicID         string         `db:"topic_id"`
+				Message         string         `db:"message"`
+				Headers         string         `db:"headers"`
+				CorrelationID   sql.NullString `db:"correlation_id"`
+				IdempotencyKey  sql.NullString `db:"idempotency_key"`
+				IdempotencyHash sql.NullString `db:"idempotency_hash"`
+				Priority        int            `db:"priority"`
+				ScheduledAt     time.Time      `db:"scheduled_at"`
+				CreatedAt       time.Time      `db:"created_at"`
 			}
 			query := `SELECT id, topic_id, message, headers, correlation_id,
-				idempotency_key, priority, scheduled_at, created_at FROM messages WHERE id = ?`
+				idempotency_key, idempotency_hash, priority, scheduled_at, created_at FROM messages WHERE id = ?`
 			args := []any{request.MessageID}
 			if request.IdempotencyKey != "" {
 				query = `SELECT id, topic_id, message, headers, correlation_id,
-					idempotency_key, priority, scheduled_at, created_at FROM messages
+					idempotency_key, idempotency_hash, priority, scheduled_at, created_at FROM messages
 					WHERE topic_id = ? AND idempotency_key = ?`
 				args = []any{request.TopicID, request.IdempotencyKey}
 			}
 			if err := tx.GetContext(ctx, &existing, d.Conn().Rebind(query), args...); err != nil {
 				return err
 			}
-			existingScheduled := !existing.ScheduledAt.Equal(existing.CreatedAt)
-			requestedScheduled := !request.VisibleAt.Equal(request.CreatedAt)
 			if existing.TopicID != request.TopicID.String() || existing.Message != request.Message ||
 				!equalJSON(existing.Headers, string(request.Headers)) || existing.CorrelationID.String != request.CorrelationID ||
-				existing.IdempotencyKey.String != request.IdempotencyKey || existing.Priority != request.Priority ||
-				existingScheduled != requestedScheduled ||
-				(requestedScheduled && !existing.ScheduledAt.Equal(request.VisibleAt)) {
+				existing.IdempotencyKey.String != request.IdempotencyKey || existing.Priority != request.Priority {
+				return ErrIdempotencyConflict
+			}
+			if existing.IdempotencyHash.Valid {
+				if existing.IdempotencyHash.String != request.IdempotencyHash {
+					return ErrIdempotencyConflict
+				}
+				continue
+			}
+			// Compatibility for rows created before idempotency fingerprints.
+			// Relative delays cannot be reconstructed, so a matching legacy
+			// payload keeps its original schedule. Absolute schedules remain
+			// exactly comparable.
+			if request.ScheduleMode == scheduleModeAbsolute && !existing.ScheduledAt.Equal(request.VisibleAt) {
 				return ErrIdempotencyConflict
 			}
 		}
@@ -229,13 +308,13 @@ func cachedMessageInsertQuery(d *db, rows int) string {
 	}
 	var query strings.Builder
 	query.WriteString(`INSERT INTO messages
-		(id, topic_id, message, headers, correlation_id, idempotency_key, priority, scheduled_at, created_at)
+		(id, topic_id, message, headers, correlation_id, idempotency_key, idempotency_hash, priority, scheduled_at, created_at)
 		VALUES `)
 	for i := 0; i < rows; i++ {
 		if i > 0 {
 			query.WriteByte(',')
 		}
-		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		query.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	}
 	// Stable message IDs fence an ambiguous COMMIT. If the connection is lost
 	// after the server commits, retry observes the existing canonical row and

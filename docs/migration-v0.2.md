@@ -25,6 +25,8 @@ v1 and v2 engines, handlers, or schemas. The current HTTP API is mounted only at
   `delivery_count` and `failure_count`. Max attempts now means maximum failures,
   so a successful claim does not itself consume the dead-letter budget.
 - The old dual/unversioned HTTP routes are removed. Use `/v1/topics/...`.
+- Topic and subscriber deletion is logically complete when the call returns;
+  physical queue rows are reclaimed asynchronously in bounded chunks.
 
 ## Database migration
 
@@ -67,6 +69,10 @@ value. Use an `idempotency_key` when a client may retry after an ambiguous
 timeout. Keys are scoped by topic and deterministically produce the same
 message ID while the canonical message is retained.
 
+Immediate and relative-delay schedules are calculated from database time in
+the persistence transaction. This keeps PostgreSQL nodes with imperfect local
+clocks from making new deliveries appear prematurely or far in the future.
+
 `delay` and `schedule_at` are mutually exclusive. `schedule_at` must be RFC3339
 with a timezone; priority ranges from -1000 to 1000.
 
@@ -88,6 +94,9 @@ behind an open caller transaction. PostgreSQL publishers share a topology fence
 with one another, while subscriber/topic deletion waits for those publishers to
 commit. HTTP cannot join a transaction in another process; use the outbox
 pattern when application data and BlockQueue are in different databases.
+`WithTx` does not retry the callback. Treat `ErrTransactionCommitUnknown` as a
+reconciliation case: the application change and queue message may both already
+exist even though the client lost the commit response.
 
 ## Consumer migration
 
@@ -126,6 +135,8 @@ POST /v1/topics/orders/messages/{message_id}/cancel
 
 The HTTP contract is served at `/openapi.json`. Error bodies now use RFC 9457
 `application/problem+json` and include a stable machine-readable `code`.
+Control-plane list endpoints are cursor-paginated; follow `next_cursor` instead
+of assuming an unbounded array response.
 
 ## Safe rollout
 

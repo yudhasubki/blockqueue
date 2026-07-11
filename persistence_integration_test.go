@@ -53,7 +53,7 @@ func TestDeliveryHotPathStatementsReuseSingleConnectionSafely(t *testing.T) {
 		require.NoError(t, queue.AckDelivery(
 			ctx, topic, subscriber.Name, claimed[0].ID, claimed[0].ReceiptToken,
 		))
-		_, _, wakeErr := queue.db.nextDeliveryWake(ctx, subscriber.ID)
+		_, _, _, wakeErr := queue.db.nextDeliveryWake(ctx, subscriber.ID)
 		require.NoError(t, wakeErr)
 	}
 

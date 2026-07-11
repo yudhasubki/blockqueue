@@ -48,6 +48,9 @@ func (d *db) Conn() *sqlx.DB                  { return d.persistence.Conn() }
 func (d *db) close() error                    { return d.persistence.Close() }
 func (d *db) supportsSQLiteMaintenance() bool { return d.persistence.SupportsSQLiteMaintenance() }
 func (d *db) statementCacheLen() int          { return d.persistence.StatementCacheLen() }
+func (d *db) tryMaintenanceLeadership(ctx context.Context) (bool, func() error, error) {
+	return d.persistence.TryMaintenanceLeadership(ctx)
+}
 func (d *db) setMetricsDisabled(disabled bool) {
 	d.disableMetrics = disabled
 }
@@ -73,6 +76,13 @@ type SubscriberQueueStats struct {
 	Delivered int `db:"delivered"`
 }
 
+type subscriberStatusRow struct {
+	ID        string
+	Name      string
+	Pending   int
+	Delivered int
+}
+
 func toPersistenceTopic(topic Topic) persistence.Topic {
 	return persistence.Topic{
 		ID: topic.ID, Name: topic.Name, Paused: topic.Paused,
@@ -94,6 +104,7 @@ func toPersistenceSubscriberOptions(options SubscriberOptions) persistence.Subsc
 		RetryPolicy: persistence.RetryPolicy{
 			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
 			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
 }
@@ -105,6 +116,7 @@ func fromPersistenceSubscriberOptions(options persistence.SubscriberOptions) Sub
 		RetryPolicy: RetryPolicy{
 			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
 			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
 }
@@ -137,6 +149,18 @@ func (d *db) getTopics(ctx context.Context, filter TopicFilter) (Topics, error) 
 	rows, err := d.persistence.GetTopics(ctx, persistence.TopicFilter{
 		Names: filter.Names, WithDeleted: filter.WithDeleted,
 	})
+	if err != nil {
+		return nil, err
+	}
+	result := make(Topics, len(rows))
+	for index, row := range rows {
+		result[index] = fromPersistenceTopic(row)
+	}
+	return result, nil
+}
+
+func (d *db) listTopics(ctx context.Context, limit int, afterName, afterID string) (Topics, error) {
+	rows, err := d.persistence.ListTopics(ctx, limit, afterName, afterID)
 	if err != nil {
 		return nil, err
 	}
@@ -197,8 +221,22 @@ func (d *db) getTopicSubscriberQueueStats(ctx context.Context, topicID uuid.UUID
 	return result, nil
 }
 
-func (d *db) pruneDeletedSubscriberDeliveries(ctx context.Context, budget time.Duration) error {
-	return d.persistence.PruneDeletedSubscriberDeliveries(ctx, budget)
+func (d *db) listSubscriberStatuses(ctx context.Context, topicID uuid.UUID, limit int, afterName, afterID string) ([]subscriberStatusRow, error) {
+	rows, err := d.persistence.ListSubscriberStatuses(ctx, topicID, limit, afterName, afterID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]subscriberStatusRow, len(rows))
+	for index, row := range rows {
+		result[index] = subscriberStatusRow{
+			ID: row.ID, Name: row.Name, Pending: row.Pending, Delivered: row.Delivered,
+		}
+	}
+	return result, nil
+}
+
+func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (int64, bool, bool, error) {
+	return d.persistence.PruneDeletedTopology(ctx, budget)
 }
 func (d *db) pruneProcessedMessages(ctx context.Context, retention time.Duration) error {
 	return d.persistence.PruneProcessedMessages(ctx, retention)
@@ -216,6 +254,9 @@ func (d *db) persistWriteRequests(ctx context.Context, requests []writeRequest) 
 func (d *db) persistWriteRequestsWithTx(ctx context.Context, tx *sql.Tx, requests []writeRequest) ([]bool, error) {
 	return d.persistence.PersistWriteRequestsWithTx(ctx, tx, requests)
 }
+func (d *db) messageScheduledTimes(ctx context.Context, tx *sql.Tx, messageIDs []string) (map[string]time.Time, error) {
+	return d.persistence.MessageScheduledTimes(ctx, tx, messageIDs)
+}
 
 func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit int, lease time.Duration) ([]deliveryRow, error) {
 	return d.persistence.ClaimDeliveries(ctx, subscriberID, limit, lease)
@@ -223,7 +264,7 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 func (d *db) reapExpiredDeliveries(ctx context.Context, limit int) (int64, error) {
 	return d.persistence.ReapExpiredDeliveries(ctx, limit)
 }
-func (d *db) nextLeaseExpiry(ctx context.Context) (time.Time, bool, error) {
+func (d *db) nextLeaseExpiry(ctx context.Context) (time.Time, time.Time, bool, error) {
 	return d.persistence.NextLeaseExpiry(ctx)
 }
 func (d *db) ackDelivery(ctx context.Context, subscriberID uuid.UUID, messageID, receipt string) error {
@@ -258,14 +299,14 @@ func (d *db) batchNackDeliveries(ctx context.Context, subscriberID uuid.UUID, re
 func (d *db) extendDeliveryLease(ctx context.Context, subscriberID uuid.UUID, messageID, receipt string, extension time.Duration) (time.Time, error) {
 	return d.persistence.ExtendDeliveryLease(ctx, subscriberID, messageID, receipt, extension)
 }
-func (d *db) nextDeliveryWake(ctx context.Context, subscriberID uuid.UUID) (time.Time, bool, error) {
+func (d *db) nextDeliveryWake(ctx context.Context, subscriberID uuid.UUID) (time.Time, time.Time, bool, error) {
 	return d.persistence.NextDeliveryWake(ctx, subscriberID)
 }
 func (d *db) listDeliveries(ctx context.Context, subscriberID uuid.UUID, deadLetter bool, limit int, cursor string) ([]deliveryRow, error) {
 	return d.persistence.ListDeliveries(ctx, subscriberID, deadLetter, limit, cursor)
 }
-func (d *db) replayDeadLetter(ctx context.Context, subscriberID uuid.UUID, messageID string) (bool, error) {
-	return d.persistence.ReplayDeadLetter(ctx, subscriberID, messageID)
+func (d *db) batchReplayDeadLetters(ctx context.Context, subscriberID uuid.UUID, messageIDs []string) ([]bool, error) {
+	return d.persistence.BatchReplayDeadLetters(ctx, subscriberID, messageIDs)
 }
 
 func (d *db) snoozeDeliveryWithTx(ctx context.Context, tx *sql.Tx, subscriberID uuid.UUID, messageID, receipt string, delay time.Duration) (time.Time, error) {
@@ -326,6 +367,7 @@ func toPersistenceSchedule(schedule Schedule) persistence.Schedule {
 		Paused: schedule.Paused, Version: schedule.Version, NextRunAt: schedule.NextRunAt,
 		OwnerID: schedule.OwnerID, LeaseExpiresAt: schedule.LeaseExpiresAt,
 		FencingToken: schedule.FencingToken, CreatedAt: schedule.CreatedAt, UpdatedAt: schedule.UpdatedAt,
+		ClaimedAt: schedule.claimedAt,
 	}
 }
 
@@ -338,6 +380,7 @@ func fromPersistenceSchedule(schedule persistence.Schedule) Schedule {
 		Paused: schedule.Paused, Version: schedule.Version, NextRunAt: schedule.NextRunAt,
 		OwnerID: schedule.OwnerID, LeaseExpiresAt: schedule.LeaseExpiresAt,
 		FencingToken: schedule.FencingToken, CreatedAt: schedule.CreatedAt, UpdatedAt: schedule.UpdatedAt,
+		claimedAt: schedule.ClaimedAt,
 	}
 }
 
@@ -370,6 +413,18 @@ func (d *db) listSchedules(ctx context.Context, topicID uuid.UUID) ([]Schedule, 
 	}
 	return result, nil
 }
+
+func (d *db) listSchedulesPage(ctx context.Context, topicID uuid.UUID, limit int, afterName, afterID string) ([]Schedule, error) {
+	rows, err := d.persistence.ListSchedulesPage(ctx, topicID, limit, afterName, afterID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Schedule, len(rows))
+	for index, row := range rows {
+		result[index] = fromPersistenceSchedule(row)
+	}
+	return result, nil
+}
 func (d *db) updateSchedule(ctx context.Context, topicID uuid.UUID, scheduleID string, expectedVersion int, schedule Schedule) error {
 	return d.persistence.UpdateSchedule(ctx, topicID, scheduleID, expectedVersion, toPersistenceSchedule(schedule))
 }
@@ -390,7 +445,7 @@ func (d *db) listScheduleRuns(ctx context.Context, scheduleID string, limit int,
 	}
 	return result, nil
 }
-func (d *db) nextScheduleDue(ctx context.Context, now time.Time) (time.Time, bool, error) {
+func (d *db) nextScheduleDue(ctx context.Context, now time.Time) (time.Time, time.Time, bool, error) {
 	return d.persistence.NextScheduleDue(ctx, now)
 }
 func (d *db) claimDueSchedule(ctx context.Context, owner string, now time.Time, lease time.Duration) (Schedule, bool, error) {
@@ -400,6 +455,13 @@ func (d *db) claimDueSchedule(ctx context.Context, owner string, now time.Time, 
 func (d *db) persistScheduleOccurrence(ctx context.Context, claimed Schedule, scheduledFor, nextRunAt time.Time, force, advance bool, owner string) (ScheduleRun, error) {
 	row, err := d.persistence.PersistScheduleOccurrence(
 		ctx, toPersistenceSchedule(claimed), scheduledFor, nextRunAt, force, advance, owner,
+	)
+	return fromPersistenceScheduleRun(row), err
+}
+
+func (d *db) failScheduleOccurrence(ctx context.Context, claimed Schedule, scheduledFor, nextRunAt time.Time, advance bool, owner, failure string) (ScheduleRun, error) {
+	row, err := d.persistence.FailScheduleOccurrence(
+		ctx, toPersistenceSchedule(claimed), scheduledFor, nextRunAt, advance, owner, failure,
 	)
 	return fromPersistenceScheduleRun(row), err
 }

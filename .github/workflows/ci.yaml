@@ -83,8 +83,11 @@ jobs:
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./...
 
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.5.0 ./...
+
       - name: PostgreSQL benchmark smoke
-        run: go test -run '^$' -bench 'Benchmark(PublishDurable|Claim100|BatchAck100|NackFailure)/postgres$' -benchtime=1x -count=1 .
+        run: go test -run '^$' -bench 'Benchmark(PublishDurable|Claim100|BatchAck100|BatchNack100|NackFailure)/postgres$' -benchtime=1x -count=1 .
 
       # - name: Validate benchmark assets
       #   run: |

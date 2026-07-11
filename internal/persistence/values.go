@@ -5,6 +5,17 @@ const (
 	migrationBackendSQLite         = "sqlite"
 	migrationBackendPostgres       = "pgsql"
 	postgresUniqueViolationCode    = "23505"
+	deliveryFailureUpdateChunk     = 100 // 601 binds, below SQLite's conservative 999 limit.
+	deliveryErrorInsertChunk       = 150 // 900 binds.
+	deliveryAckUpdateChunk         = 300 // 603 binds.
+	deliveryNackUpdateChunk        = 100 // 702 binds.
+	deliveryIdentityLookupChunk    = 500
+)
+
+const (
+	scheduleModeImmediate = "immediate"
+	scheduleModeDelay     = "delay"
+	scheduleModeAbsolute  = "absolute"
 )
 
 // Delivery states are persisted values protected by schema constraints. Keep

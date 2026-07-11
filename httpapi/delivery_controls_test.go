@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,6 +54,47 @@ func TestAsyncPublishReturnsResolvableLocation(t *testing.T) {
 			t.Fatalf("Location did not become resolvable: status=%d body=%s", status.Code, status.Body.String())
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestHTTPResourceListsUseCursorPagination(t *testing.T) {
+	queue, handler := setupHTTPQueue(t)
+	for _, name := range []string{"billing", "shipping"} {
+		topic := blockqueue.NewTopic(name)
+		subscriber := blockqueue.NewSubscriber(topic, "worker", blockqueue.SubscriberOptions{})
+		if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first := httptest.NewRecorder()
+	handler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/v1/topics?limit=1", nil))
+	if first.Code != http.StatusOK {
+		t.Fatalf("first page status=%d body=%s", first.Code, first.Body.String())
+	}
+	var firstPage struct {
+		Data blockqueue.TopicPage `json:"data"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstPage.Data.Topics) != 1 || firstPage.Data.NextCursor == "" {
+		t.Fatalf("unexpected first page: %+v", firstPage.Data)
+	}
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, httptest.NewRequest(
+		http.MethodGet, "/v1/topics?limit=1&cursor="+url.QueryEscape(firstPage.Data.NextCursor), nil,
+	))
+	var secondPage struct {
+		Data blockqueue.TopicPage `json:"data"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondPage); err != nil {
+		t.Fatal(err)
+	}
+	if second.Code != http.StatusOK || len(secondPage.Data.Topics) != 1 ||
+		secondPage.Data.Topics[0].ID == firstPage.Data.Topics[0].ID {
+		t.Fatalf("unexpected second page status=%d page=%+v", second.Code, secondPage.Data)
 	}
 }
 

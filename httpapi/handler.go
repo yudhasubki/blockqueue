@@ -94,7 +94,9 @@ func (h *Handler) Attach(root chi.Router) {
 }
 
 func (h *Handler) getTopics(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.GetTopics(r.Context(), blockqueue.TopicFilter{})
+	result, err := h.service.ListTopics(
+		r.Context(), queryLimit(r, 100), r.URL.Query().Get(queryParamCursor),
+	)
 	h.respond(w, http.StatusOK, result, err)
 }
 
@@ -124,7 +126,9 @@ func (h *Handler) deleteTopic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getSubscribers(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.GetSubscribersStatus(r.Context(), topicFrom(r.Context()))
+	result, err := h.service.ListSubscriberStatuses(
+		r.Context(), topicFrom(r.Context()), queryLimit(r, 100), r.URL.Query().Get(queryParamCursor),
+	)
 	h.respond(w, http.StatusOK, result, err)
 }
 
@@ -432,7 +436,9 @@ func (h *Handler) setSubscriberPause(w http.ResponseWriter, r *http.Request, pau
 }
 
 func (h *Handler) listSchedules(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.ListSchedules(r.Context(), topicFrom(r.Context()))
+	result, err := h.service.ListSchedulesPage(
+		r.Context(), topicFrom(r.Context()), queryLimit(r, 100), r.URL.Query().Get(queryParamCursor),
+	)
 	h.respond(w, http.StatusOK, result, err)
 }
 

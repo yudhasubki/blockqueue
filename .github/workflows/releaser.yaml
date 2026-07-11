@@ -3,48 +3,79 @@ name: Release
 on:
   push:
     tags:
-      - '*'
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-linux-binary:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: blockqueue
+          POSTGRES_PASSWORD: blockqueue
+          POSTGRES_DB: blockqueue_release_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U blockqueue -d blockqueue_release_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      BLOCKQUEUE_TEST_POSTGRES_URL: postgres://blockqueue:blockqueue@127.0.0.1:5432/blockqueue_release_test?sslmode=disable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v4
         with:
-          go-version: '1.21.3'
-          check-latest: true
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
           cache: true
-      - name: Install cross-compilers for linux/arm64
+      - name: Install Linux cross-compilers
         run: |
           sudo apt-get update
-          sudo apt-get -y install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf gcc-arm-linux-gnueabi
-      - name: Release
-        uses: goreleaser/goreleaser-action@v5
+          sudo apt-get -y install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Release Linux archives
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
-          version: latest
+          version: v2.17.0
           args: release --config .goreleaser-linux.yaml --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   release-darwin-binary:
+    needs: release-linux-binary
     runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Set up Go
-        uses: actions/setup-go@v4
         with:
-          go-version: '1.21.3'
-          check-latest: true
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
           cache: true
-      - name: Release
-        uses: goreleaser/goreleaser-action@v5
+      - name: Test
+        run: go test -count=1 ./...
+      - name: Release macOS archives
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
-          version: latest
+          version: v2.17.0
           args: release --config .goreleaser-darwin.yaml --clean
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

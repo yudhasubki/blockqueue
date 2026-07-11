@@ -90,6 +90,8 @@ contains only immutable routing snapshots and bounded admitted writes.
 No listener or scheduler callback executes SQL while holding a runtime registry
 mutex. PostgreSQL `LISTEN/NOTIFY` wakes local workers but is only a hint; bounded
 database reconciliation handles dropped notifications and multi-process use.
+The listener reconnects after both startup and runtime failures, and readiness
+exposes its health separately from the authoritative polling fallback.
 
 ## Publish durability
 
@@ -101,6 +103,10 @@ valid admissions.
 
 Durable wait cancellation is an ambiguous outcome, not a rollback request. The
 writer keeps ownership and returns `CommitUnknownError` with stable IDs.
+Persistence assigns immediate/delayed `created_at` and `visible_at` from the
+database clock inside the write transaction. Durable receipts read back the
+committed schedule, while async admitted receipts remain an admission-time
+estimate until their status resource becomes persisted.
 
 ## Caller-owned transactions
 
@@ -120,6 +126,9 @@ that cost explicit. Transactions created by `WithTx` are registered as in-flight
 work and drained during shutdown without holding the admission mutex across the
 callback. Raw caller transactions cannot be observed after a `*Tx` call returns,
 so their owner must finish them before shutting the queue down.
+`WithTx` never retries application code. A connection-level commit failure is
+returned as `TransactionCommitUnknownError`; callers reconcile the business
+operation and stable queue idempotency key rather than assuming rollback.
 
 ## Delivery state machine
 
@@ -154,15 +163,27 @@ state equivalent to processed or dead-lettered for overlap completion.
 
 Hot delivery paths never perform a global schedule-run sweep. Terminal ACK,
 DLQ, and cancellation transitions update only related runs; the reaper handles
-bounded reconciliation. Retention and subscriber cleanup are chunked, and the
-schema indexes delivery errors, retry leases, DLQ pages, subscriber deletion,
-and schedule-run ownership. Batch ACK executes as a set-based update in one
-transaction.
+bounded reconciliation. A reaper pass handles at most eight 1,000-row chunks,
+and a scheduler pass handles at most 100 due occurrences; a saturated pass
+yields before reconciliation continues so SQLite's single writer remains
+available to publish, claim, and completion traffic.
 
-PostgreSQL background jobs are fenced and safe on multiple nodes, but v0.2 does
-not elect a single maintenance leader. Multiple nodes can therefore perform
-redundant bounded reaper/pruner scans; leader election is planned for v0.3
-rather than being implied by the current contract.
+Topic and subscriber deletion is logically atomic: once the API returns, the
+resource is absent from the database's active topology and runtime registry.
+Physical rows are then removed in dependency order by independently committed
+1,000-row chunks under one maintenance deadline. A topic row is never removed
+until its deliveries, runs, schedules, messages, and subscribers are gone, so
+foreign-key cascades cannot turn cleanup back into an unbounded writer
+transaction. The schema indexes delivery errors, retry leases, DLQ pages,
+subscriber deletion, schedule-run ownership, and cursor-based control-plane
+pages. Batch ACK, batch NACK, and bulk DLQ replay execute as set-based updates
+in one transaction while retaining per-item outcomes.
+
+PostgreSQL elects one session-advisory-lock leader for retention and physical
+topology cleanup, preventing N nodes from repeating the same large scans. The
+lease reaper and scheduler remain distributed: their row leases, receipt tokens,
+`SKIP LOCKED`, and fencing tokens provide ownership without a single-node
+availability dependency.
 
 The optional server binary uses the standard `net/http` server with explicit
 header, idle, and long-poll-compatible write timeouts. It binds to
