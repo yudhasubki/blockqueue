@@ -106,7 +106,10 @@ func TestIdempotencyComparesCorrelationAndExplicitSchedule(t *testing.T) {
 func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	logs := make(chan slog.Record, 8)
 	previousLogger := slog.Default()
-	slog.SetDefault(slog.New(testLogHandler{records: logs}))
+	slog.SetDefault(slog.New(testLogHandler{
+		message: "writer permanently rejected admission",
+		records: logs,
+	}))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 	driver, cleanup := setupTestDB(t, "admission_isolation_"+time.Now().Format("150405.000000000"))
 	defer cleanup()
@@ -153,11 +156,20 @@ func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	require.Zero(t, bytes)
 }
 
-type testLogHandler struct{ records chan<- slog.Record }
+type testLogHandler struct {
+	message string
+	records chan<- slog.Record
+}
 
 func (handler testLogHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (handler testLogHandler) Handle(_ context.Context, record slog.Record) error {
-	handler.records <- record.Clone()
+	if record.Message != handler.message {
+		return nil
+	}
+	select {
+	case handler.records <- record.Clone():
+	default:
+	}
 	return nil
 }
 func (handler testLogHandler) WithAttrs([]slog.Attr) slog.Handler { return handler }
@@ -207,13 +219,15 @@ func TestNackDelayAndLeaseExtension(t *testing.T) {
 	queue, _, topic := setupQueue(t)
 	_, err := queue.PublishDurable(context.Background(), topic, Message{Message: "retry"})
 	require.NoError(t, err)
-	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, 50*time.Millisecond)
+	claimed, err := queue.Claim(context.Background(), topic, "worker", 1, time.Minute)
 	require.NoError(t, err)
 	require.Len(t, claimed, 1)
+	require.NotNil(t, claimed[0].LeaseExpiresAt)
+	originalExpiry := *claimed[0].LeaseExpiresAt
 
 	expires, err := queue.ExtendLease(context.Background(), topic, "worker", claimed[0].ID, claimed[0].ReceiptToken, time.Second)
 	require.NoError(t, err)
-	require.True(t, expires.After(time.Now().Add(800*time.Millisecond)))
+	require.WithinDuration(t, originalExpiry.Add(time.Second), expires, time.Millisecond)
 	require.NoError(t, queue.NackDelivery(context.Background(), topic, "worker", claimed[0].ID, claimed[0].ReceiptToken, 80*time.Millisecond, "temporary"))
 
 	immediate, err := queue.Claim(context.Background(), topic, "worker", 1, time.Second)
