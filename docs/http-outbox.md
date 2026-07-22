@@ -1,9 +1,49 @@
-# Transactional outbox for HTTP publishers
+# Transactional outbox for HTTP
 
-An HTTP request cannot participate in the transaction that changes application
-data in another process or database. When an application must commit business
-state and eventually publish a BlockQueue message without a loss window, store
-an outbox row in the same local transaction as the business change.
+An HTTP request cannot join the database transaction of another process. Do
+not update business data, commit, and then hope a separate HTTP publish works.
+Store an outbox row beside the business update and let a relay publish it.
+
+> `application_outbox` belongs to the application and lives in its business
+> database. BlockQueue does not create, migrate, or read this table. The schema
+> below is a starting point that the application may adapt.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant API as Application
+    participant DB as Application database
+    participant R as Outbox relay
+    participant BQ as BlockQueue HTTP
+
+    API->>DB: BEGIN
+    API->>DB: UPDATE order + INSERT outbox row
+    API->>DB: COMMIT
+
+    loop Until published_at is set
+        R->>DB: Read unpublished row
+        R->>BQ: POST message?wait_for=commit<br/>idempotency_key = outbox.id
+
+        alt BlockQueue returns 200 persisted
+            BQ-->>R: Stable message ID
+            R->>DB: SET published_at
+        else Timeout, disconnect, or 5xx
+            BQ--xR: Commit outcome may be unknown
+            Note over R,BQ: Retry the same payload and idempotency key
+        end
+    end
+```
+
+The two important atomic boundaries are visible in the diagram:
+
+```text
+business change + outbox INSERT    commit together
+BlockQueue message + fan-out       commit together
+```
+
+The relay connects those transactions with a stable idempotency key.
+
+## 1. Create the outbox
 
 ```sql
 CREATE TABLE application_outbox (
@@ -17,18 +57,28 @@ CREATE TABLE application_outbox (
 );
 ```
 
-The application transaction writes both records atomically:
+The ID must be globally unique and must never be reused.
+
+## 2. Write business state and the event together
 
 ```sql
 BEGIN;
-UPDATE orders SET status = 'paid' WHERE id = :order_id;
+
+UPDATE orders
+SET status = 'paid'
+WHERE id = :order_id;
+
 INSERT INTO application_outbox (id, topic, message)
 VALUES (:event_id, 'orders.paid', :json_payload);
+
 COMMIT;
 ```
 
-Use a stable, globally unique outbox `id`. The relay sends it as BlockQueue's
-`idempotency_key` and requests a durable response:
+If this transaction rolls back, neither the paid state nor the event exists.
+
+## 3. Relay with durable publish
+
+Use the outbox ID as BlockQueue's `idempotency_key`:
 
 ```http
 POST /v1/topics/orders.paid/messages?wait_for=commit
@@ -40,23 +90,42 @@ Content-Type: application/json
 }
 ```
 
-Only mark the outbox row published after HTTP `200`. Do not mark it published
-after async `202`, because that response guarantees process-local admission,
-not a committed queue transaction. On a timeout, disconnect, `5xx`, or unknown
-response, retry the same payload with the same idempotency key. A crash after
-BlockQueue commits but before `published_at` is updated is safe: the next relay
-attempt resolves to the same canonical message instead of creating another
-fan-out.
+Mark the outbox row published only after HTTP `200`:
 
-PostgreSQL relays can claim rows in short transactions with `FOR UPDATE SKIP
-LOCKED`; SQLite relays should use one short writer transaction and a bounded
-batch. Never hold an application transaction open across the HTTP call. Claim
-or read a batch, commit, publish it, then mark successful rows in a separate
-short transaction.
+```sql
+UPDATE application_outbox
+SET published_at = CURRENT_TIMESTAMP,
+    last_error = NULL
+WHERE id = :event_id;
+```
 
-Outbox retention must exceed the maximum relay retry window. BlockQueue's
-idempotency guarantee lasts while the canonical message is retained, so outbox
-IDs must never be reused after message retention removes the original row.
-Monitor oldest unpublished age, retry count, and terminal authentication or
-validation failures. Authentication failures and permanent `4xx` responses
-require operator action; transient failures retain the row for retry.
+Do not mark it published after async `202`; that response means process-local
+admission, not a committed message.
+
+## Failure behavior
+
+```text
+HTTP 200
+  mark published
+
+timeout / disconnect / 5xx
+  keep row and retry the same ID
+
+permanent 4xx
+  keep row, record the error, alert an operator
+
+relay crashes after BlockQueue commit
+  retry the same ID; BlockQueue returns the same canonical message
+```
+
+A duplicate result after retry is success: it confirms that the same message
+was already committed without creating another subscriber fan-out.
+
+Keep relay transactions short. PostgreSQL relays can claim bounded batches
+with `FOR UPDATE SKIP LOCKED`; SQLite relays should use one short writer
+transaction. Never hold the application transaction open during the HTTP call.
+
+Monitor oldest unpublished age, retry count, and permanent errors. Retain
+outbox rows longer than the maximum relay retry window. BlockQueue idempotency
+lasts while the canonical message remains retained, so old outbox IDs must not
+be recycled.

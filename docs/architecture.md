@@ -1,209 +1,310 @@
 # Architecture
 
-BlockQueue has one engine, one canonical schema, and one current HTTP contract.
-Versioned HTTP paths and optional execution layers do not create versioned
-writers, schedulers, or database packages.
+This document describes ownership, transaction boundaries, locking, and
+multi-node coordination. Start with [Concepts](concepts.md) for the
+user-facing model.
 
-```text
-Go caller -> worker (optional) ----------┐
-Go caller -------------------------------+---> blockqueue.Queue
-HTTP /v1 -> httpapi.Service port --------┘
-                                         |
-                  +----------------------+----------------------+
-                  |                      |                      |
-               writer              delivery runtime         scheduler
-                  |                      |                      |
-                  +----------------------+----------------------+
-                                         v
-                       internal/persistence.Store
-                  topology / publish / delivery / schedule
-                                         |
-                            sqlDialect + store.Driver
-                                  /                 \
-                              SQLite             PostgreSQL
+BlockQueue has one engine, one canonical schema, and one HTTP contract at
+`/v1`. The optional worker and HTTP layers call the same queue primitives.
+
+```mermaid
+flowchart TB
+    G["Go application"] --> Q["blockqueue.Queue"]
+    W["worker package"] --> Q
+    H["HTTP /v1"] --> A["httpapi adapter"]
+    A --> Q
+
+    Q --> WR["writer"]
+    Q --> DR["delivery runtime"]
+    Q --> SC["scheduler"]
+    Q --> MT["maintenance"]
+
+    WR --> P["internal/persistence"]
+    DR --> P
+    SC --> P
+    MT --> P
+
+    P --> D["dialect strategy"]
+    D --> SQ[("SQLite")]
+    D --> PG[("PostgreSQL")]
 ```
 
-## Package boundaries
+## Package ownership
 
-- The root `blockqueue` package is the import-first public API and owns
-  lifecycle, admission, delivery, and scheduling primitives. Workflow/DAG
-  orchestration remains a separate future layer.
-- `worker` is an optional Go execution layer over the public delivery API. It
-  owns bounded handler concurrency, lease heartbeat, automatic ACK/NACK, typed
-  JSON decoding, receipt-fenced poison cancellation, set-based completion
-  batching, metrics, group supervision, and handler drain. It depends on the
-  root package and never owns `Queue` lifecycle or durable state.
-- `httpapi` owns routing, strict wire DTO validation, body limits, status
-  mapping, and the narrow service interface implemented by `Queue`.
-- `internal/persistence` is the only package that owns queue SQL, schema
-  migrations, prepared-statement caching, backend dialect strategy, and
-  durable row models. The root engine reaches it through one concrete adapter;
-  it is intentionally not a public extension point and does not expose a broad
-  repository interface.
-- `store` exposes a small `database/sql` driver contract. `store/sqlite` and
-  `store/postgres` own connection configuration; PostgreSQL uses pgx and native
-  UUID columns. `store/turso` is experimental.
-- The persistence package's unexported `sqlDialect` strategy owns backend syntax, bind limits,
-  lock clauses, notifications, and migration locking. Backend selection happens
-  once during construction; queue operations do not scatter driver-name
-  conditionals through hot paths.
-- SQL is grouped by storage concern in `topology.go`, `publish.go`,
-  `delivery.go`, `schedule.go`, `retention.go`, and `sqlite_maintenance.go` under
-  `internal/persistence`. Queue orchestration does not embed control-plane or
-  delivery queries.
-- Public domain models live at the module root, so embedded callers never need
-  transport or persistence implementation packages.
+```text
+blockqueue/
+  public models, lifecycle, admission, delivery, scheduling
 
-## Ownership and lock order
+worker/
+  optional handler runtime; owns no durable state
 
-The database is authoritative for durable state and delivery ownership. Memory
-contains only immutable routing snapshots and bounded admitted writes.
+httpapi/
+  transport validation and status mapping
 
-1. `Queue.admissionMu` fences lifecycle shutdown against admission. Each
-   `topicRuntime` has its own admission RW fence: a destructive mutation takes
-   only that topic's write fence, installs a writer barrier, and then commits
-   its database transaction. Publisher admission on unrelated topics remains
-   available while the barrier drains. Registered control operations are
-   included in graceful shutdown before the database closes.
-   `PublishTx` bypasses this process-local writer fence because its caller-owned
-   transaction is already fenced by the authoritative topic row lock; this
-   avoids lock inversion when one transaction publishes more than once.
-2. A publisher fences affected topic rows in sorted UUID order, verifies that
-   the topic and at least one subscriber still exist, inserts canonical
-   messages, and fans out delivery rows in the same transaction. PostgreSQL
-   uses `FOR SHARE`, so publishers do not serialize one another; destructive
-   topology mutations use `FOR UPDATE` and wait for open publishers.
-3. PostgreSQL claims lock candidate delivery rows with `FOR UPDATE SKIP LOCKED`.
-   SQLite uses an immediate writer transaction. No process-local claim mutex is
-   relied on for correctness.
-4. Runtime registry swaps happen only after a successful database commit. The
-   snapshots are immutable and published atomically, so hot-path reads do not
-   hold a mutex while querying the database.
-5. Scheduler ownership is fenced by owner, lease expiry, and an increasing
-   fencing token. Run creation, occurrence publish, fan-out, and schedule
-   advancement are one transaction.
-6. Embedded migrations use one transaction and a checksummed ledger.
-   PostgreSQL serializes migrators with a transaction-scoped advisory lock;
-   the supported SQLite driver begins an immediate transaction before reading
-   or updating the migration ledger.
+store/
+  public connection-driver contract and backend configuration
 
-No listener or scheduler callback executes SQL while holding a runtime registry
-mutex. PostgreSQL `LISTEN/NOTIFY` wakes local workers but is only a hint; bounded
-database reconciliation handles dropped notifications and multi-process use.
-The listener reconnects after both startup and runtime failures, and readiness
-exposes its health separately from the authoritative polling fallback.
+internal/persistence/
+  all queue SQL, migrations, row models, dialect behavior, statement cache
+```
 
-## Publish durability
+Public callers never import persistence models. Queue orchestration contains
+no embedded delivery or topology SQL. Backend selection happens once during
+construction; hot paths call one unexported dialect strategy instead of
+scattering driver-name conditionals.
 
-All admissions reserve both message count and estimated bytes. The reservation
-is held until commit or a definitive permanent failure. Transient database
-errors retain the batch and retry with jittered exponential backoff. Permanent
-errors are isolated per admission so one invalid request cannot poison adjacent
-valid admissions.
+The root package uses one concrete persistence adapter rather than exposing a
+broad repository interface. `store.Driver` remains intentionally small so an
+embedder can provide a database connection without replacing queue semantics.
 
-Durable wait cancellation is an ambiguous outcome, not a rollback request. The
-writer keeps ownership and returns `CommitUnknownError` with stable IDs.
-Persistence assigns immediate/delayed `created_at` and `visible_at` from the
-database clock inside the write transaction. Durable receipts read back the
-committed schedule, while async admitted receipts remain an admission-time
-estimate until their status resource becomes persisted.
+## State ownership
+
+```mermaid
+flowchart LR
+    DB[("Database<br/>authoritative")]
+    REG["Immutable topology snapshot<br/>process-local cache"]
+    BUF["Weighted writer budget<br/>bounded admission"]
+    WAKE["Wake channels / NOTIFY<br/>latency hints"]
+
+    DB -->|"reload after commit"| REG
+    BUF -->|"flush transaction"| DB
+    DB -.->|"reconciliation"| WAKE
+    WAKE -.->|"wake claim loops"| DB
+```
+
+Only the database owns durable messages, delivery ownership, schedule leases,
+and terminal outcomes. Memory owns:
+
+- immutable routing snapshots;
+- admitted writes bounded by message count and bytes;
+- health state; and
+- wake-up hints.
+
+A lost PostgreSQL notification or process restart cannot lose durable work;
+bounded database polling remains authoritative.
+
+## Publish and topology fencing
+
+Publish must commit one message and its complete subscriber fan-out against a
+stable topology. Destructive topology changes must not race through an older
+runtime snapshot.
+
+```mermaid
+sequenceDiagram
+    participant C as Publisher
+    participant R as Queue runtime
+    participant W as Writer
+    participant DB as Database
+
+    C->>R: Publish(topic, message)
+    R->>R: Reserve message + byte budget
+    R->>W: Admit stable message ID
+    W->>W: Coalesce available admissions
+    W->>DB: BEGIN
+    W->>DB: Fence topic and read active subscribers
+    W->>DB: INSERT canonical message
+    W->>DB: INSERT subscriber deliveries
+    W->>DB: COMMIT
+    DB-->>W: persisted / duplicate reconciliation
+    W->>R: Release budget and wake subscribers
+    R-->>C: Durable receipt
+```
+
+PostgreSQL publish uses `FOR SHARE` on affected topic rows, allowing publishers
+to proceed concurrently. Topic/subscriber deletion uses `FOR UPDATE`, so it
+waits for older publishers before changing active topology. Multi-topic batches
+lock topic UUIDs in sorted order.
+
+SQLite obtains the same serialization through its immediate writer
+transaction.
+
+A destructive mutation follows this order:
+
+```mermaid
+flowchart LR
+    F["Take topic admission fence"] --> B["Install writer barrier"]
+    B --> T["Commit topology transaction"]
+    T --> R["Atomically replace runtime snapshot"]
+    R --> C["Signal bounded physical cleanup"]
+```
+
+If the database transaction fails, the runtime snapshot is unchanged. Logical
+deletion is the API completion point; physical data removal is maintenance.
+
+## Writer durability
+
+The writer reserves both pending-message count and estimated bytes. A
+reservation is released only after commit or a definitive permanent failure.
+Reading an admission from the channel does not release capacity.
+
+```text
+transient database error
+  retain the exact batch -> jittered exponential backoff -> retry
+
+permanent admission error
+  isolate the admission -> complete its waiter with an error -> continue
+
+ambiguous commit
+  retry stable IDs -> ON CONFLICT reconciliation -> never duplicate fan-out
+```
+
+Durable caller cancellation after admission does not cancel writer ownership.
+It returns `CommitUnknownError` with stable IDs while persistence continues.
+Immediate and delayed timestamps come from database time inside the write
+transaction.
+
+## Delivery ownership
+
+Claim correctness is database-based; there is no process-global claim mutex.
+
+| Operation | SQLite | PostgreSQL |
+| --- | --- | --- |
+| Claim candidates | Immediate writer transaction | `FOR UPDATE SKIP LOCKED` |
+| Lease time | Database clock | Database clock |
+| Completion | Receipt-fenced update | Receipt-fenced update |
+| Batch ACK/NACK | Set-based transaction | Set-based transaction |
+
+Every claim writes a new receipt and lease expiry. ACK, NACK, heartbeat,
+snooze, and worker cancellation compare the current receipt in the transition
+statement. A stale worker therefore cannot complete a newer attempt.
+
+Terminal delivery transitions update only related schedule runs. The delivery
+hot path never performs a global schedule-run sweep.
+
+See [Delivery states](concepts.md#delivery-states) for the public state model.
 
 ## Caller-owned transactions
 
-`PublishTx` and `BatchPublishTx` stage the canonical message and complete
-subscriber fan-out in an existing `database/sql` transaction. Delivery-side
-`*Tx` methods allow application side effects and ACK, NACK, snooze, or
-cancellation to share the same commit. `Queue.WithTx` is preferred because it
-commits or rolls back consistently and sends local wake hints only after a
-successful commit.
+`PublishTx`, delivery-side `*Tx` methods, and `Job.CompleteTx` execute through
+the caller's `database/sql` transaction. `Queue.WithTx` is preferred because it
+registers in-flight work, owns commit/rollback, and emits local wake hints only
+after commit.
 
-These APIs require application tables to live in the same physical database as
-the queue. A transaction should remain short and must not perform remote I/O.
-PostgreSQL holds only a shared topic fence during publish. SQLite has one writer
-lock by design, so an open caller transaction serializes writer flushes, claims,
-and acknowledgements until it ends; the contract and contention benchmark make
-that cost explicit. Transactions created by `WithTx` are registered as in-flight
-work and drained during shutdown without holding the admission mutex across the
-callback. Raw caller transactions cannot be observed after a `*Tx` call returns,
-so their owner must finish them before shutting the queue down.
-`WithTx` never retries application code. A connection-level commit failure is
-returned as `TransactionCommitUnknownError`; callers reconcile the business
-operation and stable queue idempotency key rather than assuming rollback.
-
-## Delivery state machine
-
-```text
-pending --claim/new receipt--> delivered --ACK--> processed
-   ^       |                        |
-   |       +-------- cancel --------+--------------------> cancelled
-   |                                |
-   +-- snooze (no failure) ---------+
-   |                                |
-   +-- retry delay <-- NACK/expiry -+--max failures-----> dead_letter
-   |
-   +---------------- DLQ replay --------------------------+
+```mermaid
+flowchart TB
+    TX["Caller transaction"] --> APP["Application SQL"]
+    TX --> QSQL["Queue SQL through persistence adapter"]
+    APP --> COMMIT{"COMMIT"}
+    QSQL --> COMMIT
+    COMMIT -->|"success"| WAKE["Publish local wake hints"]
+    COMMIT -->|"connection lost"| UNKNOWN["TransactionCommitUnknownError"]
 ```
 
-ACK, NACK, worker cancellation, and lease extension require the current receipt
-token and an unexpired lease. Administrative cancellation remains available
-without a receipt. Repeating successful ACK or worker cancellation with the
-same token is idempotent; using a receipt from an older delivery returns lease
-lost. Run completion is updated in the same transaction as terminal delivery
-transitions.
+`WithTx` never retries the application callback. A commit connection error can
+mean that both application and queue rows already committed, so callers must
+reconcile rather than rerun non-idempotent logic.
 
-`delivery_count` counts lease claims and is useful for observability.
-`failure_count` counts only NACK and lease-expiry failures and controls the
-dead-letter threshold. Retry delay uses the subscriber's bounded exponential
-policy with deterministic jitter, so restart and concurrent nodes calculate the
-same outcome. Each failure is appended to `delivery_errors`; snooze does not add
-an error or consume the failure budget. `cancelled` is a terminal schedule-run
-state equivalent to processed or dead-lettered for overlap completion.
+PostgreSQL holds a shared topic fence during transactional publish. SQLite has
+one writer, so an open caller transaction serializes writer flushes, claims,
+and completions until it ends. Keep callbacks short and free of remote I/O.
 
-## Bounded maintenance work
+## Scheduler coordination
 
-Hot delivery paths never perform a global schedule-run sweep. Terminal ACK,
-DLQ, and cancellation transitions update only related runs; the reaper handles
-bounded reconciliation. A reaper pass handles at most eight 1,000-row chunks,
-and a scheduler pass handles at most 100 due occurrences; a saturated pass
-yields before reconciliation continues so SQLite's single writer remains
-available to publish, claim, and completion traffic.
+Schedule ownership is defined by owner ID, lease expiry, and an increasing
+fencing token. Claiming an occurrence, creating its run, publishing canonical
+message/fan-out rows, and advancing `next_run_at` share one transaction.
 
-Topic and subscriber deletion is logically atomic: once the API returns, the
-resource is absent from the database's active topology and runtime registry.
-Physical rows are then removed in dependency order by independently committed
-1,000-row chunks under one maintenance deadline. A topic row is never removed
-until its deliveries, runs, schedules, messages, and subscribers are gone, so
-foreign-key cascades cannot turn cleanup back into an unbounded writer
-transaction. The schema indexes delivery errors, retry leases, DLQ pages,
-subscriber deletion, schedule-run ownership, and cursor-based control-plane
-pages. Batch ACK, batch NACK, and bulk DLQ replay execute as set-based updates
-in one transaction while retaining per-item outcomes.
+```mermaid
+sequenceDiagram
+    participant A as Scheduler node A
+    participant DB as Database
+    participant B as Scheduler node B
 
-PostgreSQL elects one session-advisory-lock leader for retention and physical
-topology cleanup, preventing N nodes from repeating the same large scans. The
-lease reaper and scheduler remain distributed: their row leases, receipt tokens,
-`SKIP LOCKED`, and fencing tokens provide ownership without a single-node
-availability dependency.
+    A->>DB: Claim due schedule, token 41
+    DB-->>A: owner A, lease, token 41
+    B->>DB: Claim the same schedule
+    DB-->>B: Not available
+    A->>DB: Publish occurrence + advance next run
+    DB-->>A: Commit
 
-The optional server binary uses the standard `net/http` server with explicit
-header, idle, and long-poll-compatible write timeouts. It binds to
-`127.0.0.1` by default; public deployments should remain behind an authenticated
-reverse proxy. Embedded routers may install a principal resolver followed by
-authorization middleware; neither is enabled implicitly.
+    Note over A,DB: If A stops, its lease expires
 
-## Lifecycle
+    B->>DB: Take over, token 42
+    DB-->>B: owner B, lease, token 42
+```
 
-`Queue` moves through `new -> running -> stopping -> stopped`. Startup validates
-migrations, database access, and the complete runtime snapshot before starting
-maintenance goroutines. Shutdown stops admission, drains the writer, stops
-maintenance, performs a final SQLite truncate checkpoint, and closes the
-driver. A shutdown deadline with pending admitted messages returns an error
-instead of silently dropping them.
+Occurrence idempotency is derived from schedule ID and scheduled time. Restart
+recovery creates at most one missed occurrence before moving `next_run_at` into
+the future.
 
-An optional `worker.Worker` is single-use and deliberately has a separate
-lifecycle. `Run` claims only into free concurrency slots. Canceling its context
-stops new claims, keeps heartbeat active while handlers drain, and cancels
-handler contexts only after the configured drain deadline. It performs one
-short bounded hard-wait after cancellation; a handler that ignores its context
-may still outlive `Run`. Applications stop workers before shutting down `Queue`,
-so compliant handlers retain a live database connection throughout drain.
+## Bounded maintenance and multi-node work
+
+```mermaid
+flowchart TB
+    subgraph N1["PostgreSQL node A"]
+        C1["claims"]
+        S1["scheduler"]
+        R1["lease reaper"]
+        L1["maintenance leader"]
+    end
+
+    subgraph N2["PostgreSQL node B"]
+        C2["claims"]
+        S2["scheduler"]
+        R2["lease reaper"]
+        F2["maintenance follower<br/>lock not held"]
+    end
+
+    C1 --> DB[("PostgreSQL")]
+    S1 --> DB
+    R1 --> DB
+    L1 --> DB
+    C2 --> DB
+    S2 --> DB
+    R2 --> DB
+    F2 -.-> DB
+```
+
+Claims, schedulers, and lease reapers remain distributed because row locks,
+leases, receipts, and fencing tokens establish ownership. One session advisory
+lock leader performs global retention and physical topology cleanup so N nodes
+do not repeat the same scans.
+
+Large maintenance work is chunked:
+
+- reaper: at most eight 1,000-row chunks per pass;
+- scheduler: at most 100 due occurrences per pass;
+- topology cleanup: independently committed 1,000-row dependency batches; and
+- retention: bounded by batch size and a per-pass time budget.
+
+A saturated pass yields before continuing, preserving SQLite writer access and
+short PostgreSQL transactions. SQLite additionally performs adaptive WAL
+checkpointing and incremental vacuum.
+
+## Migrations
+
+Migrations are embedded, ordered, transactional, and recorded with SHA-256
+checksums. An applied file whose checksum changes causes startup to fail.
+
+PostgreSQL serializes migrators with a transaction-scoped advisory lock.
+SQLite begins an immediate transaction before reading or updating the migration
+ledger. `Queue.Run` completes migrations and loads the entire runtime snapshot
+before starting background processes.
+
+## Lifecycle and shutdown
+
+```mermaid
+flowchart LR
+    NEW["new"] -->|"Run"| START["migrate + validate + load topology"]
+    START --> RUN["running"]
+    RUN -->|"Shutdown"| STOPPING["stopping"]
+    STOPPING --> ADMISSION["stop admission"]
+    ADMISSION --> TX["drain control operations and WithTx"]
+    TX --> WRITER["flush or abort writer at deadline"]
+    WRITER --> BG["stop listener, scheduler, reaper, pruner, checkpointer"]
+    BG --> CP["final SQLite TRUNCATE checkpoint"]
+    CP --> CLOSE["close database"]
+    CLOSE --> STOPPED["stopped"]
+```
+
+Startup publishes no partially initialized runtime. Shutdown with undrained
+admissions returns an error rather than silently dropping ownership.
+
+Workers have a separate lifecycle. Canceling a worker stops new claims, keeps
+heartbeats active during its drain window, then cancels handler contexts.
+Applications stop workers before shutting down `Queue`, ensuring compliant
+handlers retain database access through completion.
+
+The optional HTTP binary first stops network admission and drains in-flight
+requests before invoking queue shutdown. Embedded applications own the same
+ordering around their HTTP server.

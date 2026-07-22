@@ -1,8 +1,7 @@
 # Changelog
 
 All notable changes to BlockQueue are documented in this file. The project is
-pre-1.0; minor releases can contain breaking changes when called out here and
-in a migration guide.
+pre-1.0; minor releases can contain breaking changes when called out here.
 
 ## [Unreleased]
 
@@ -16,6 +15,8 @@ in a migration guide.
   connections.
 - Cursor-paginated message status, delivery failure history, schedules, and
   run history across the Go and HTTP APIs.
+- A visual concepts guide for fan-out, topology, leases, transactions,
+  workers, scheduling, and maintenance.
 - Private vulnerability reporting guidance, package examples, and explicit
   public API compatibility boundaries.
 
@@ -47,8 +48,7 @@ in a migration guide.
 - Added durable and async publishing, transactional enqueue/completion, retry
   policy, scheduling, bounded maintenance, OpenAPI 3.1, and SQLite/PostgreSQL
   contract coverage.
-- Introduced a clean schema break from v0.1; see
-  [the v0.2 migration guide](docs/migration-v0.2.md).
+- Introduced a clean schema break from v0.1 that requires a new database.
 
 [Unreleased]: https://github.com/yudhasubki/blockqueue/compare/v0.2.0...HEAD
 [v0.2.0]: https://github.com/yudhasubki/blockqueue/releases/tag/v0.2.0

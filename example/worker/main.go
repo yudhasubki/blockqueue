@@ -48,12 +48,19 @@ func run() error {
 	}
 
 	topic := blockqueue.NewTopic("orders")
-	subscriber := blockqueue.NewSubscriber(topic, "fulfillment", blockqueue.SubscriberOptions{
-		MaxAttempts:        5,
-		VisibilityDuration: "1m",
-		DequeueBatchSize:   10,
-	})
-	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
+	subscribers := blockqueue.Subscribers{
+		blockqueue.NewSubscriber(topic, "fulfillment", blockqueue.SubscriberOptions{
+			MaxAttempts:        5,
+			VisibilityDuration: "1m",
+			DequeueBatchSize:   10,
+		}),
+		blockqueue.NewSubscriber(topic, "notifications", blockqueue.SubscriberOptions{
+			MaxAttempts:        5,
+			VisibilityDuration: "1m",
+			DequeueBatchSize:   10,
+		}),
+	}
+	if err := queue.CreateTopic(context.Background(), topic, subscribers); err != nil {
 		if !errors.Is(err, blockqueue.ErrResourceConflict) {
 			return fmt.Errorf("create topic: %w", err)
 		}
@@ -62,32 +69,33 @@ func run() error {
 			return errors.New("worker-example.db reported a topic conflict but the topic is unavailable")
 		}
 		topic = existing
-		subscriber.TopicID = existing.ID
 		log.Print("reusing existing orders topic")
 		statuses, statusErr := queue.GetSubscribersStatus(context.Background(), topic)
 		if statusErr != nil {
 			return fmt.Errorf("read subscriber status: %w", statusErr)
 		}
-		found := false
+		existingSubscribers := make(map[string]struct{}, len(statuses))
 		for _, status := range statuses {
-			if status.Name == subscriber.Name {
-				found = true
-				break
+			existingSubscribers[status.Name] = struct{}{}
+		}
+		missing := make(blockqueue.Subscribers, 0, len(subscribers))
+		for index := range subscribers {
+			subscribers[index].TopicID = existing.ID
+			if _, found := existingSubscribers[subscribers[index].Name]; !found {
+				missing = append(missing, subscribers[index])
 			}
 		}
-		if !found {
-			if err := queue.CreateSubscribers(
-				context.Background(), topic, blockqueue.Subscribers{subscriber},
-			); err != nil {
+		if len(missing) > 0 {
+			if err := queue.CreateSubscribers(context.Background(), topic, missing); err != nil {
 				return fmt.Errorf("create subscriber: %w", err)
 			}
 		}
 	}
 
-	runner, err := blockworker.NewJSON(
+	fulfillmentWorker, err := blockworker.NewJSON(
 		queue,
 		topic,
-		subscriber.Name,
+		subscribers[0].Name,
 		blockworker.TypedHandlerFunc[fulfillOrder](func(
 			ctx context.Context,
 			job *blockworker.TypedJob[fulfillOrder],
@@ -104,7 +112,30 @@ func run() error {
 		blockworker.Options{Concurrency: 4},
 	)
 	if err != nil {
-		return fmt.Errorf("create worker: %w", err)
+		return fmt.Errorf("create fulfillment worker: %w", err)
+	}
+
+	notificationWorker, err := blockworker.NewJSON(
+		queue,
+		topic,
+		subscribers[1].Name,
+		blockworker.TypedHandlerFunc[fulfillOrder](func(
+			_ context.Context,
+			job *blockworker.TypedJob[fulfillOrder],
+		) error {
+			log.Printf("notification requested for %s", job.Args.OrderID)
+			return nil
+		}),
+		blockworker.Options{Concurrency: 2},
+	)
+	if err != nil {
+		return fmt.Errorf("create notification worker: %w", err)
+	}
+
+	group, err := blockworker.New
+	\\Group(fulfillmentWorker, notificationWorker)
+	if err != nil {
+		return fmt.Errorf("create worker group: %w", err)
 	}
 
 	if _, err := queue.PublishDurable(context.Background(), topic, blockqueue.Message{
@@ -116,8 +147,8 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	log.Print("worker running; press Ctrl-C to drain and stop")
-	workerErr := runner.Run(ctx)
+	log.Print("worker group running; press Ctrl-C to drain and stop")
+	workerErr := group.Run(ctx)
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShutdown()
