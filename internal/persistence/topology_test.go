@@ -137,7 +137,9 @@ func TestTopologyDeleteSubscriber(t *testing.T) {
 	require.NoError(t, database.createTopic(ctx,
 		Topic{ID: topicID, Name: "subscriber-control-topic"},
 		Subscribers{{
-			ID: subscriberID, TopicID: topicID, Name: subscriberName,
+			ID:      subscriberID,
+			TopicID: topicID,
+			Name:    subscriberName,
 			Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "30s"},
 		}},
 	))
@@ -186,7 +188,9 @@ func TestTopologyCleanupYieldsBetweenChunks(t *testing.T) {
 	require.NoError(t, database.createTopic(ctx,
 		Topic{ID: topicID, Name: "chunked-cleanup"},
 		Subscribers{{
-			ID: subscriberID, TopicID: topicID, Name: "worker",
+			ID:      subscriberID,
+			TopicID: topicID,
+			Name:    "worker",
 			Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "30s"},
 		}},
 	))
@@ -232,7 +236,9 @@ func TestSubscriberCleanupCompletesScheduleRunWithoutActiveDeliveries(t *testing
 	require.NoError(t, database.createTopic(ctx,
 		Topic{ID: topicID, Name: "subscriber-run-completion"},
 		Subscribers{{
-			ID: subscriberID, TopicID: topicID, Name: "worker",
+			ID:      subscriberID,
+			TopicID: topicID,
+			Name:    "worker",
 			Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "30s"},
 		}},
 	))

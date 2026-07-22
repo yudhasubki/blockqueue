@@ -90,7 +90,9 @@ func (q *Queue) publishOne(ctx context.Context, topic Topic, request Message, du
 		return PublishReceipt{}, err
 	}
 	receipt := PublishReceipt{
-		MessageID: write.MessageID, State: PublishStateAdmitted, ScheduledAt: scheduledAt,
+		MessageID:   write.MessageID,
+		State:       PublishStateAdmitted,
+		ScheduledAt: scheduledAt,
 	}
 	if durable {
 		result, err := q.writer.waitAdmission(ctx, admission)
@@ -257,9 +259,12 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 			ScheduleMode  string          `json:"schedule_mode"`
 			ScheduleValue string          `json:"schedule_value"`
 		}{
-			Message: request.Message, Headers: json.RawMessage(headers),
-			CorrelationID: request.CorrelationID, Priority: request.Priority,
-			ScheduleMode: scheduleMode, ScheduleValue: scheduleValue,
+			Message:       request.Message,
+			Headers:       json.RawMessage(headers),
+			CorrelationID: request.CorrelationID,
+			Priority:      request.Priority,
+			ScheduleMode:  scheduleMode,
+			ScheduleValue: scheduleValue,
 		})
 		if err != nil {
 			return writeRequest{}, time.Time{}, fmt.Errorf("%w: fingerprint message", ErrInvalidPublish)

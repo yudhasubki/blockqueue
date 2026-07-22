@@ -54,7 +54,9 @@ func createPersistenceContractTopic(t *testing.T, database *db, name string) (To
 	t.Helper()
 	topic := Topic{ID: uuid.New(), Name: name}
 	subscriber := Subscriber{
-		ID: uuid.New(), TopicID: topic.ID, Name: "worker",
+		ID:      uuid.New(),
+		TopicID: topic.ID,
+		Name:    "worker",
 		Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1},
 	}
 	require.NoError(t, database.createTopic(
@@ -127,8 +129,12 @@ func TestAmbiguousCommitRetryContract(t *testing.T) {
 		topic, _ := createPersistenceContractTopic(t, database, "ambiguous-commit-contract")
 		now := time.Now().UTC().Truncate(time.Millisecond)
 		request := WriteRequest{
-			TopicID: topic.ID, MessageID: uuid.NewString(), Message: "commit-once",
-			Headers: []byte("{}"), VisibleAt: now, CreatedAt: now,
+			TopicID:   topic.ID,
+			MessageID: uuid.NewString(),
+			Message:   "commit-once",
+			Headers:   []byte("{}"),
+			VisibleAt: now,
+			CreatedAt: now,
 		}
 
 		result, err := database.persistWriteRequests(context.Background(), []WriteRequest{request})
@@ -164,16 +170,23 @@ func TestPublishSchedulingUsesDatabaseClockContract(t *testing.T) {
 		require.NoError(t, err)
 		requests := []WriteRequest{
 			{
-				TopicID: topic.ID, MessageID: uuid.NewString(), Message: "immediate", Headers: []byte("{}"),
+				TopicID:      topic.ID,
+				MessageID:    uuid.NewString(),
+				Message:      "immediate",
+				Headers:      []byte("{}"),
 				ScheduleMode: scheduleModeImmediate,
 				CreatedAt:    time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
 				VisibleAt:    time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
 			{
-				TopicID: topic.ID, MessageID: uuid.NewString(), Message: "delayed", Headers: []byte("{}"),
-				ScheduleMode: scheduleModeDelay, ScheduleDelay: 2 * time.Second,
-				CreatedAt: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
-				VisibleAt: time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
+				TopicID:       topic.ID,
+				MessageID:     uuid.NewString(),
+				Message:       "delayed",
+				Headers:       []byte("{}"),
+				ScheduleMode:  scheduleModeDelay,
+				ScheduleDelay: 2 * time.Second,
+				CreatedAt:     time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+				VisibleAt:     time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
 			},
 		}
 		result, err := database.persistWriteRequests(ctx, requests)

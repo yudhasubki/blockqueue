@@ -68,11 +68,14 @@ func (options SubscriberOptions) normalized() SubscriberOptions {
 
 func toSubscriberConfigOptions(options SubscriberOptions) subscriberconfig.Options {
 	return subscriberconfig.Options{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: subscriberconfig.RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
@@ -80,11 +83,14 @@ func toSubscriberConfigOptions(options SubscriberOptions) subscriberconfig.Optio
 
 func fromSubscriberConfigOptions(options subscriberconfig.Options) SubscriberOptions {
 	return SubscriberOptions{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}

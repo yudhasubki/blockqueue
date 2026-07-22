@@ -77,8 +77,9 @@ func TestNackWithoutExplicitDelayUsesSubscriberRetryPolicy(t *testing.T) {
 	ctx := context.Background()
 	topic := NewTopic("retry-policy-topic")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
-		RetryPolicy: RetryPolicy{InitialDelay: "40ms", MaxDelay: "40ms", Multiplier: 2, Jitter: 0.2},
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
+		RetryPolicy:        RetryPolicy{InitialDelay: "40ms", MaxDelay: "40ms", Multiplier: 2, Jitter: 0.2},
 	})
 	require.NoError(t, queue.CreateTopic(ctx, topic, Subscribers{subscriber}))
 	receipt, err := queue.Publish(ctx, topic, Message{Message: "retry-default"})
@@ -201,8 +202,9 @@ func TestDeliveryErrorHistorySurvivesDLQReplay(t *testing.T) {
 	ctx := context.Background()
 	topic := NewTopic("replay-error-history")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 1, VisibilityDuration: "1m",
-		RetryPolicy: RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
+		MaxAttempts:        1,
+		VisibilityDuration: "1m",
+		RetryPolicy:        RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
 	})
 	require.NoError(t, queue.CreateTopic(ctx, topic, Subscribers{subscriber}))
 	receipt, err := queue.Publish(ctx, topic, Message{Message: "two failure cycles"})

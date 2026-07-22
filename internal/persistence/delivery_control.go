@@ -264,9 +264,15 @@ func (d *db) getMessageStatus(ctx context.Context, topicID uuid.UUID, messageID 
 		return MessageStatus{}, fmt.Errorf("decode message headers: %w", err)
 	}
 	return MessageStatus{
-		ID: row.ID, TopicID: row.TopicID, Message: row.Message, Headers: headers,
-		CorrelationID: row.CorrelationID.String, IdempotencyKey: row.IdempotencyKey.String,
-		Priority: row.Priority, ScheduledAt: row.ScheduledAt, CreatedAt: row.CreatedAt,
-		Deliveries: deliveries,
+		ID:             row.ID,
+		TopicID:        row.TopicID,
+		Message:        row.Message,
+		Headers:        headers,
+		CorrelationID:  row.CorrelationID.String,
+		IdempotencyKey: row.IdempotencyKey.String,
+		Priority:       row.Priority,
+		ScheduledAt:    row.ScheduledAt,
+		CreatedAt:      row.CreatedAt,
+		Deliveries:     deliveries,
 	}, nil
 }

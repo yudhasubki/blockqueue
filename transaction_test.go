@@ -182,8 +182,10 @@ func TestShutdownDoesNotDeadlockTransactionBehindPendingWriter(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "shutdown-transaction-fence.db"), sqlite.Config{BusyTimeout: 5000})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond,
-		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize:     1,
+		FlushInterval: time.Millisecond,
+		RetryMin:      time.Millisecond,
+		RetryMax:      5 * time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("shutdown-transaction-fence")

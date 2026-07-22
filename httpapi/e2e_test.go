@@ -30,7 +30,8 @@ func TestHTTPRealTCPEndToEnd(t *testing.T) {
 	postgresURL := os.Getenv("BLOCKQUEUE_TEST_POSTGRES_URL")
 	backends := []e2eBackend{
 		{
-			name: "sqlite", enabled: true,
+			name:    "sqlite",
+			enabled: true,
 			open: func(t *testing.T) store.Driver {
 				driver, err := sqlite.Open(filepath.Join(t.TempDir(), "http-e2e.db"), sqlite.Config{})
 				require.NoError(t, err)
@@ -38,7 +39,8 @@ func TestHTTPRealTCPEndToEnd(t *testing.T) {
 			},
 		},
 		{
-			name: "postgres", enabled: postgresURL != "",
+			name:    "postgres",
+			enabled: postgresURL != "",
 			open: func(t *testing.T) store.Driver {
 				schema, err := testdb.OpenPostgreSQLSchema(
 					context.Background(), postgresURL, "_test", "blockqueue_http_e2e",

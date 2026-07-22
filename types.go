@@ -88,11 +88,14 @@ func (options SubscriberOptions) normalized() SubscriberOptions {
 
 func toSubscriberConfigOptions(options SubscriberOptions) subscriberconfig.Options {
 	return subscriberconfig.Options{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: subscriberconfig.RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
@@ -100,11 +103,14 @@ func toSubscriberConfigOptions(options SubscriberOptions) subscriberconfig.Optio
 
 func fromSubscriberConfigOptions(options subscriberconfig.Options) SubscriberOptions {
 	return SubscriberOptions{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
@@ -282,6 +288,9 @@ func NewTopic(name string) Topic {
 // NewSubscriber creates a normalized subscriber value with a new UUID.
 func NewSubscriber(topic Topic, name string, options SubscriberOptions) Subscriber {
 	return Subscriber{
-		ID: uuid.New(), TopicID: topic.ID, Name: name, Options: options.normalized(),
+		ID:      uuid.New(),
+		TopicID: topic.ID,
+		Name:    name,
+		Options: options.normalized(),
 	}
 }

@@ -229,7 +229,10 @@ func (w *writer) EnqueueContext(ctx context.Context, topicID uuid.UUID, messageI
 
 func (w *writer) enqueueAtContext(ctx context.Context, topicID uuid.UUID, messageID, message string, visibleAt time.Time) error {
 	return w.EnqueueBatchContext(ctx, []writeRequest{{
-		TopicID: topicID, MessageID: messageID, Message: message, VisibleAt: visibleAt,
+		TopicID:   topicID,
+		MessageID: messageID,
+		Message:   message,
+		VisibleAt: visibleAt,
 	}})
 }
 

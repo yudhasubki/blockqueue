@@ -26,14 +26,16 @@ func TestDashboardParsesAndRendersPageEnvelopes(t *testing.T) {
 		t.Fatal("orders topic was not created")
 	}
 	extraSubscriber := blockqueue.NewSubscriber(orders, "worker<primary>", blockqueue.SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	if err := queue.CreateSubscribers(context.Background(), orders, blockqueue.Subscribers{extraSubscriber}); err != nil {
 		t.Fatal(err)
 	}
 	dangerousTopic := blockqueue.NewTopic("returns<script>")
 	dangerousSubscriber := blockqueue.NewSubscriber(dangerousTopic, "worker", blockqueue.SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	if err := queue.CreateTopic(
 		context.Background(), dangerousTopic, blockqueue.Subscribers{dangerousSubscriber},

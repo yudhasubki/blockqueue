@@ -303,8 +303,10 @@ func (d *db) persistScheduleOccurrence(
 			}
 			if active > 0 {
 				resultRun = ScheduleRun{
-					ID: uuid.NewString(), ScheduleID: schedule.ID,
-					ScheduledFor: scheduledFor, Status: ScheduleRunStatusSkipped,
+					ID:           uuid.NewString(),
+					ScheduleID:   schedule.ID,
+					ScheduledFor: scheduledFor,
+					Status:       ScheduleRunStatusSkipped,
 				}
 				if _, err := tx.ExecContext(ctx, tx.Rebind(`
 					INSERT INTO schedule_runs
@@ -319,8 +321,10 @@ func (d *db) persistScheduleOccurrence(
 		}
 
 		resultRun = ScheduleRun{
-			ID: uuid.NewString(), ScheduleID: schedule.ID,
-			ScheduledFor: scheduledFor, Status: ScheduleRunStatusRunning,
+			ID:           uuid.NewString(),
+			ScheduleID:   schedule.ID,
+			ScheduledFor: scheduledFor,
+			Status:       ScheduleRunStatusRunning,
 		}
 		insertRun, err := tx.ExecContext(ctx, tx.Rebind(`
 			INSERT INTO schedule_runs (id, schedule_id, scheduled_for, status)
@@ -437,9 +441,11 @@ func (d *db) failScheduleOccurrence(
 			return ErrScheduleLeaseLost
 		}
 		resultRun = ScheduleRun{
-			ID: uuid.NewString(), ScheduleID: schedule.ID,
-			ScheduledFor: scheduledFor, Status: ScheduleRunStatusFailed,
-			Error: sql.NullString{String: failure, Valid: failure != ""},
+			ID:           uuid.NewString(),
+			ScheduleID:   schedule.ID,
+			ScheduledFor: scheduledFor,
+			Status:       ScheduleRunStatusFailed,
+			Error:        sql.NullString{String: failure, Valid: failure != ""},
 		}
 		insert, err := tx.ExecContext(ctx, tx.Rebind(`
 			INSERT INTO schedule_runs

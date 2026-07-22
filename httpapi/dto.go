@@ -17,8 +17,13 @@ type PublishRequest struct {
 
 func (r PublishRequest) command() blockqueue.Message {
 	return blockqueue.Message{
-		Message: r.Message, Headers: r.Headers, CorrelationID: r.CorrelationID,
-		IdempotencyKey: r.IdempotencyKey, Priority: r.Priority, Delay: r.Delay, ScheduleAt: r.ScheduleAt,
+		Message:        r.Message,
+		Headers:        r.Headers,
+		CorrelationID:  r.CorrelationID,
+		IdempotencyKey: r.IdempotencyKey,
+		Priority:       r.Priority,
+		Delay:          r.Delay,
+		ScheduleAt:     r.ScheduleAt,
 	}
 }
 
@@ -48,8 +53,10 @@ func subscriberCommands(requests []SubscriberRequest, topicID uuid.UUID) blockqu
 	result := make(blockqueue.Subscribers, 0, len(requests))
 	for _, request := range requests {
 		options := blockqueue.SubscriberOptions{
-			MaxAttempts: request.Option.MaxAttempts, VisibilityDuration: request.Option.VisibilityDuration,
-			DequeueBatchSize: request.Option.DequeueBatchSize, RetryPolicy: request.Option.RetryPolicy,
+			MaxAttempts:        request.Option.MaxAttempts,
+			VisibilityDuration: request.Option.VisibilityDuration,
+			DequeueBatchSize:   request.Option.DequeueBatchSize,
+			RetryPolicy:        request.Option.RetryPolicy,
 		}
 		result = append(result, blockqueue.Subscriber{ID: uuid.New(), TopicID: topicID, Name: request.Name, Options: options})
 	}
@@ -110,9 +117,15 @@ type ScheduleRequest struct {
 
 func (r ScheduleRequest) command() blockqueue.ScheduleInput {
 	return blockqueue.ScheduleInput{
-		Name: r.Name, CronExpression: r.CronExpression, Timezone: r.Timezone,
-		Message: r.Message, Headers: r.Headers, CorrelationID: r.CorrelationID,
-		Priority: r.Priority, MisfirePolicy: r.MisfirePolicy, OverlapPolicy: r.OverlapPolicy,
+		Name:           r.Name,
+		CronExpression: r.CronExpression,
+		Timezone:       r.Timezone,
+		Message:        r.Message,
+		Headers:        r.Headers,
+		CorrelationID:  r.CorrelationID,
+		Priority:       r.Priority,
+		MisfirePolicy:  r.MisfirePolicy,
+		OverlapPolicy:  r.OverlapPolicy,
 	}
 }
 

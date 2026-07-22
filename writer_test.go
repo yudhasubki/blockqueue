@@ -139,11 +139,15 @@ func TestWriterKeepsAsyncOnlyAdmissionInGroupCommitWindow(t *testing.T) {
 	require.NoError(t, err)
 
 	buffer := newWriter(context.Background(), newDb(sqliteDB), WriterOptions{
-		BatchSize: 100, FlushInterval: 200 * time.Millisecond,
+		BatchSize:     100,
+		FlushInterval: 200 * time.Millisecond,
 	})
 	defer buffer.Close()
 	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "async group commit", VisibleAt: time.Now().UTC(),
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "async group commit",
+		VisibleAt: time.Now().UTC(),
 	}}))
 	time.Sleep(30 * time.Millisecond)
 	var count int
@@ -158,12 +162,14 @@ func TestWriterFlushesIdleDurableAdmissionBeforeLongInterval(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "idle-flush.db"), sqlite.Config{})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 100, FlushInterval: 5 * time.Second,
+		BatchSize:     100,
+		FlushInterval: 5 * time.Second,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("idle-flush")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -434,18 +440,27 @@ func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
 		return persistWriteResult{}, ctx.Err()
 	}
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
-		BatchSize: 2, FlushInterval: time.Hour,
-		RetryMin: time.Millisecond, RetryMax: time.Millisecond,
-		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
-		persist: persist,
+		BatchSize:          2,
+		FlushInterval:      time.Hour,
+		RetryMin:           time.Millisecond,
+		RetryMax:           time.Millisecond,
+		MaxPendingMessages: 10,
+		MaxPendingBytes:    1 << 20,
+		persist:            persist,
 	})
 	now := time.Now().UTC()
 	first, err := wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "permanent", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "permanent",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, true)
 	require.NoError(t, err)
 	second, err := wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "blocked", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "blocked",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, true)
 	require.NoError(t, err)
 	<-blocked
@@ -465,22 +480,30 @@ func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
 func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
 	storageFailure := errors.New("injected permanent storage corruption")
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond,
-		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
+		BatchSize:          1,
+		FlushInterval:      time.Millisecond,
+		MaxPendingMessages: 10,
+		MaxPendingBytes:    1 << 20,
 		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
 			return persistWriteResult{}, storageFailure
 		},
 	})
 	now := time.Now().UTC()
 	admission, err := wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "fatal", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "fatal",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, true)
 	require.NoError(t, err)
 	_, err = wb.waitAdmission(context.Background(), admission)
 	require.ErrorIs(t, err, storageFailure)
 	require.Eventually(t, func() bool { return !wb.Healthy() && !wb.accepting.Load() }, time.Second, time.Millisecond)
 	_, err = wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "rejected", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "rejected",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, true)
 	require.ErrorIs(t, err, ErrWriterClosed)
 	require.NoError(t, wb.CloseContext(context.Background()))
@@ -488,15 +511,20 @@ func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
 
 func TestDomainWriteFailureDoesNotPoisonWriterHealth(t *testing.T) {
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond,
-		MaxPendingMessages: 10, MaxPendingBytes: 1 << 20,
+		BatchSize:          1,
+		FlushInterval:      time.Millisecond,
+		MaxPendingMessages: 10,
+		MaxPendingBytes:    1 << 20,
 		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
 			return persistWriteResult{}, ErrNoActiveSubscriber
 		},
 	})
 	now := time.Now().UTC()
 	admission, err := wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "domain failure", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "domain failure",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, true)
 	require.NoError(t, err)
 	_, err = wb.waitAdmission(context.Background(), admission)
@@ -515,14 +543,16 @@ func TestTransientWriteErrorClassifiesRecoverableSQLiteCapacityFailures(t *testi
 		{
 			name: "database full value",
 			err: sqlite3.Error{
-				Code: sqlite3.ErrFull, ExtendedCode: sqlite3.ErrFull.Extend(0),
+				Code:         sqlite3.ErrFull,
+				ExtendedCode: sqlite3.ErrFull.Extend(0),
 			},
 			transient: true,
 		},
 		{
 			name: "database full wrapped pointer",
 			err: errors.Join(errors.New("wrapped"), &sqlite3.Error{
-				Code: sqlite3.ErrFull, ExtendedCode: sqlite3.ErrFull.Extend(0),
+				Code:         sqlite3.ErrFull,
+				ExtendedCode: sqlite3.ErrFull.Extend(0),
 			}),
 			transient: true,
 		},
@@ -541,9 +571,12 @@ func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
 	persistStarted := make(chan struct{})
 	var startedOnce sync.Once
 	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
-		BatchSize: 1, FlushInterval: time.Hour,
-		MaxPendingMessages: 1, MaxPendingBytes: 1 << 20,
-		RetryMin: time.Millisecond, RetryMax: time.Millisecond,
+		BatchSize:          1,
+		FlushInterval:      time.Hour,
+		MaxPendingMessages: 1,
+		MaxPendingBytes:    1 << 20,
+		RetryMin:           time.Millisecond,
+		RetryMax:           time.Millisecond,
 		persist: func(ctx context.Context, _ []writeRequest) (persistWriteResult, error) {
 			startedOnce.Do(func() { close(persistStarted) })
 			<-ctx.Done()
@@ -552,7 +585,10 @@ func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
 	})
 	now := time.Now().UTC()
 	_, err := wb.admitOne(context.Background(), writeRequest{
-		MessageID: uuid.NewString(), Message: "blocked persistence", CreatedAt: now, VisibleAt: now,
+		MessageID: uuid.NewString(),
+		Message:   "blocked persistence",
+		CreatedAt: now,
+		VisibleAt: now,
 	}, false)
 	require.NoError(t, err)
 	<-persistStarted

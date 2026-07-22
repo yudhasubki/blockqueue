@@ -27,7 +27,10 @@ type db struct {
 func newDb(driver store.Driver) *db {
 	dialect, dialectErr := newSQLDialect(driver.Dialect())
 	return &db{
-		Database: driver, connection: sqlx.NewDb(driver.DB(), driver.DriverName()), dialect: dialect, dialectErr: dialectErr,
+		Database:   driver,
+		connection: sqlx.NewDb(driver.DB(), driver.DriverName()),
+		dialect:    dialect,
+		dialectErr: dialectErr,
 		statements: newStatementCache(defaultStatementCacheSize),
 	}
 }

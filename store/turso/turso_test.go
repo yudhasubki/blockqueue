@@ -29,7 +29,8 @@ func TestExperimentalLocalSmoke(t *testing.T) {
 	}
 	topic := blockqueue.NewTopic("turso-smoke")
 	subscriber := blockqueue.NewSubscriber(topic, "worker", blockqueue.SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "30s",
+		MaxAttempts:        3,
+		VisibilityDuration: "30s",
 	})
 	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
 		t.Fatal(err)

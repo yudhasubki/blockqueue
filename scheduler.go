@@ -108,12 +108,19 @@ func (q *Queue) CreateSchedule(ctx context.Context, topic Topic, input ScheduleI
 		return Schedule{}, ErrResourceConflict
 	}
 	schedule := Schedule{
-		ID: uuid.NewString(), TopicID: runtime.id.String(), Name: input.Name,
-		CronExpression: input.CronExpression, Timezone: input.Timezone,
-		Message: input.Message, Headers: string(headers),
-		CorrelationID: sql.NullString{String: input.CorrelationID, Valid: input.CorrelationID != ""},
-		Priority:      input.Priority, MisfirePolicy: input.MisfirePolicy,
-		OverlapPolicy: input.OverlapPolicy, Version: 1, NextRunAt: next,
+		ID:             uuid.NewString(),
+		TopicID:        runtime.id.String(),
+		Name:           input.Name,
+		CronExpression: input.CronExpression,
+		Timezone:       input.Timezone,
+		Message:        input.Message,
+		Headers:        string(headers),
+		CorrelationID:  sql.NullString{String: input.CorrelationID, Valid: input.CorrelationID != ""},
+		Priority:       input.Priority,
+		MisfirePolicy:  input.MisfirePolicy,
+		OverlapPolicy:  input.OverlapPolicy,
+		Version:        1,
+		NextRunAt:      next,
 	}
 	if err := q.db.createSchedule(ctx, schedule); err != nil {
 		return Schedule{}, err
@@ -189,11 +196,16 @@ func (q *Queue) UpdateSchedule(ctx context.Context, topic Topic, scheduleID stri
 		return Schedule{}, err
 	}
 	updated := Schedule{
-		Name: input.Name, CronExpression: input.CronExpression, Timezone: input.Timezone,
-		Message: input.Message, Headers: string(headers),
-		CorrelationID: sql.NullString{String: input.CorrelationID, Valid: input.CorrelationID != ""},
-		Priority:      input.Priority, MisfirePolicy: input.MisfirePolicy,
-		OverlapPolicy: input.OverlapPolicy, NextRunAt: next,
+		Name:           input.Name,
+		CronExpression: input.CronExpression,
+		Timezone:       input.Timezone,
+		Message:        input.Message,
+		Headers:        string(headers),
+		CorrelationID:  sql.NullString{String: input.CorrelationID, Valid: input.CorrelationID != ""},
+		Priority:       input.Priority,
+		MisfirePolicy:  input.MisfirePolicy,
+		OverlapPolicy:  input.OverlapPolicy,
+		NextRunAt:      next,
 	}
 	if err := q.db.updateSchedule(ctx, runtime.id, scheduleID, expectedVersion, updated); err != nil {
 		return Schedule{}, err

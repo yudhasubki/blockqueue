@@ -161,7 +161,8 @@ func TestHTTPDeliveryControlsAndProblemDetails(t *testing.T) {
 	}
 
 	snoozeBody, _ := json.Marshal(map[string]string{
-		"receipt_token": claimed.Data[0].ReceiptToken, "delay": "1ms",
+		"receipt_token": claimed.Data[0].ReceiptToken,
+		"delay":         "1ms",
 	})
 	snooze := httptest.NewRecorder()
 	handler.ServeHTTP(snooze, httptest.NewRequest(
@@ -183,7 +184,9 @@ func TestHTTPDeliveryControlsAndProblemDetails(t *testing.T) {
 	}
 
 	nackBody, _ := json.Marshal(map[string]string{
-		"receipt_token": claimed.Data[0].ReceiptToken, "retry_delay": "1ms", "error": "temporary",
+		"receipt_token": claimed.Data[0].ReceiptToken,
+		"retry_delay":   "1ms",
+		"error":         "temporary",
 	})
 	nack := httptest.NewRecorder()
 	handler.ServeHTTP(nack, httptest.NewRequest(
@@ -320,7 +323,11 @@ func TestOpenAPIRouteMethodCoverageIsBidirectional(t *testing.T) {
 	}
 	expected := make(map[string]struct{})
 	methods := map[string]struct{}{
-		"get": {}, "post": {}, "put": {}, "patch": {}, "delete": {},
+		"get":    {},
+		"post":   {},
+		"put":    {},
+		"patch":  {},
+		"delete": {},
 	}
 	for path, item := range document.Paths {
 		for method := range item {
@@ -504,7 +511,8 @@ func setupHTTPQueueWithDriver(t *testing.T, driver store.Driver) (*blockqueue.Qu
 	})
 	topic := blockqueue.NewTopic("orders")
 	subscriber := blockqueue.NewSubscriber(topic, "worker", blockqueue.SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
 		t.Fatal(err)

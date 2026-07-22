@@ -244,7 +244,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 				JOIN topic_subscribers subscribers ON subscribers.id = deliveries.subscriber_id
 				WHERE subscribers.deleted_at IS NOT NULL
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 		{query: `UPDATE schedule_runs
 			SET status = ?, finished_at = CURRENT_TIMESTAMP
 			WHERE id IN (
@@ -258,11 +259,12 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 					  AND deliveries.status NOT IN (?, ?, ?)
 				  )
 				LIMIT ?
-			)`, args: []any{
-			ScheduleRunStatusCompleted, ScheduleRunStatusRunning,
-			DeliveryStatusProcessed, DeliveryStatusDeadLetter, DeliveryStatusCancelled,
-			topologyCleanupBatchSize,
-		}},
+			)`,
+			args: []any{
+				ScheduleRunStatusCompleted, ScheduleRunStatusRunning,
+				DeliveryStatusProcessed, DeliveryStatusDeadLetter, DeliveryStatusCancelled,
+				topologyCleanupBatchSize,
+			}},
 		{query: `DELETE FROM schedule_runs
 			WHERE id IN (
 				SELECT runs.id FROM schedule_runs runs
@@ -270,7 +272,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 				JOIN topics ON topics.id = schedules.topic_id
 				WHERE topics.deleted_at IS NOT NULL
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 		{query: `DELETE FROM schedules
 			WHERE id IN (
 				SELECT schedules.id FROM schedules
@@ -281,7 +284,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 					WHERE schedule_runs.schedule_id = schedules.id
 				  )
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 		{query: `DELETE FROM messages
 			WHERE id IN (
 				SELECT messages.id FROM messages
@@ -292,7 +296,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 					WHERE message_deliveries.message_id = messages.id
 				  )
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 		{query: `DELETE FROM topic_subscribers
 			WHERE id IN (
 				SELECT subscribers.id FROM topic_subscribers subscribers
@@ -302,7 +307,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 					WHERE message_deliveries.subscriber_id = subscribers.id
 				  )
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 		{query: `DELETE FROM topics
 			WHERE id IN (
 				SELECT topics.id FROM topics
@@ -311,7 +317,8 @@ func (d *db) pruneDeletedTopology(ctx context.Context, budget time.Duration) (in
 				  AND NOT EXISTS (SELECT 1 FROM schedules WHERE schedules.topic_id = topics.id)
 				  AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.topic_id = topics.id)
 				LIMIT ?
-			)`, args: limitArgs()},
+			)`,
+			args: limitArgs()},
 	}
 
 	var total int64

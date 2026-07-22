@@ -40,8 +40,12 @@ func (worker *Worker) completeAutomatically(
 			return worker.completeIndividually(ctx, job, kind, retryDelay, failure)
 		}
 		request := completionRequest{
-			ctx: ctx, job: job, kind: kind, retryDelay: retryDelay, failure: failure,
-			result: make(chan error, 1),
+			ctx:        ctx,
+			job:        job,
+			kind:       kind,
+			retryDelay: retryDelay,
+			failure:    failure,
+			result:     make(chan error, 1),
 		}
 		select {
 		case worker.completions <- request:
@@ -144,8 +148,10 @@ func (worker *Worker) flushNacks(ctx context.Context, requests []completionReque
 		}
 		errorText = boundedDeliveryText(errorText)
 		items[index] = blockqueue.BatchNackItem{
-			MessageID: request.job.ID, ReceiptToken: request.job.ReceiptToken,
-			RetryDelay: request.retryDelay, Error: errorText,
+			MessageID:    request.job.ID,
+			ReceiptToken: request.job.ReceiptToken,
+			RetryDelay:   request.retryDelay,
+			Error:        errorText,
 		}
 	}
 	operationContext, cancel := worker.batchContext(ctx, requests)

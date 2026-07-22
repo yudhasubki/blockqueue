@@ -159,8 +159,10 @@ func (q *Queue) ListSubscriberStatuses(ctx context.Context, topic Topic, limit i
 			break
 		}
 		page.Subscribers = append(page.Subscribers, SubscriberStatus{
-			TopicID: runtime.id, Name: row.Name,
-			UnpublishedMessage: row.Pending, UnackedMessage: row.Delivered,
+			TopicID:            runtime.id,
+			Name:               row.Name,
+			UnpublishedMessage: row.Pending,
+			UnackedMessage:     row.Delivered,
 		})
 	}
 	if len(rows) > limit {

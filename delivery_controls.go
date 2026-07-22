@@ -189,7 +189,9 @@ func (q *Queue) cancelMessageTx(ctx context.Context, tx *sql.Tx, topic Topic, me
 	results := make([]DeliveryResult, len(rows))
 	for index, row := range rows {
 		results[index] = DeliveryResult{
-			MessageID: row.MessageID, SubscriberID: row.SubscriberID, Status: row.Status,
+			MessageID:    row.MessageID,
+			SubscriberID: row.SubscriberID,
+			Status:       row.Status,
 		}
 	}
 	if tx == nil {

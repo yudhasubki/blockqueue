@@ -51,7 +51,9 @@ func TestGlobalReaperMovesMaxAttemptToDLQ(t *testing.T) {
 	})
 	topic := Topic{ID: uuid.New(), Name: "reaper"}
 	subscriber := Subscriber{
-		ID: uuid.New(), TopicID: topic.ID, Name: "worker",
+		ID:      uuid.New(),
+		TopicID: topic.ID,
+		Name:    "worker",
 		Options: SubscriberOptions{MaxAttempts: 1, VisibilityDuration: "30ms"},
 	}
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
@@ -81,7 +83,10 @@ func TestClaimDoesNotSweepUnrelatedScheduleRuns(t *testing.T) {
 	require.NoError(t, queue.AckDelivery(ctx, topic, "worker", claimed[0].ID, claimed[0].ReceiptToken))
 
 	schedule, err := queue.CreateSchedule(ctx, topic, ScheduleInput{
-		Name: "claim-no-sweep", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "scheduled",
+		Name:           "claim-no-sweep",
+		CronExpression: "0 0 * * *",
+		Timezone:       "UTC",
+		Message:        "scheduled",
 	})
 	require.NoError(t, err)
 	now := time.Now().UTC()
@@ -182,13 +187,19 @@ func TestPreCanceledAdmissionReleasesWeightedBudget(t *testing.T) {
 	require.NoError(t, err)
 
 	writer := newWriter(context.Background(), newDb(driver), WriterOptions{
-		BatchSize: 1, MaxPendingMessages: 1, MaxPendingBytes: 1024,
+		BatchSize:          1,
+		MaxPendingMessages: 1,
+		MaxPendingBytes:    1024,
 	})
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	now := time.Now().UTC()
 	err = writer.EnqueueBatchContext(canceled, []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "canceled", VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "canceled",
+		VisibleAt: now,
+		CreatedAt: now,
 	}})
 	require.ErrorIs(t, err, context.Canceled)
 	messages, bytes := writer.Pending()
@@ -196,7 +207,11 @@ func TestPreCanceledAdmissionReleasesWeightedBudget(t *testing.T) {
 	require.Zero(t, bytes)
 
 	_, err = writer.EnqueueBatchDurable(context.Background(), []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "committed", VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "committed",
+		VisibleAt: now,
+		CreatedAt: now,
 	}})
 	require.NoError(t, err)
 	messages, bytes = writer.Pending()
@@ -209,12 +224,14 @@ func TestShutdownDrainsEverySuccessfulConcurrentAdmission(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "shutdown.db"), sqlite.Config{})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 25, FlushInterval: 5 * time.Millisecond,
+		BatchSize:     25,
+		FlushInterval: 5 * time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("shutdown")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "30s",
+		MaxAttempts:        3,
+		VisibilityDuration: "30s",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 
@@ -252,7 +269,10 @@ func TestShutdownDeadlineAbortsWriterAndReachesStopped(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "shutdown-abort.db"), sqlite.Config{BusyTimeout: 1})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize:     1,
+		FlushInterval: time.Millisecond,
+		RetryMin:      time.Millisecond,
+		RetryMax:      5 * time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("shutdown-abort")
@@ -301,7 +321,10 @@ func TestShutdownDeadlineAbortsWriterAndReachesStopped(t *testing.T) {
 func TestScheduleUpdateRejectsStaleVersion(t *testing.T) {
 	queue, _, topic := setupQueue(t)
 	input := ScheduleInput{
-		Name: "versioned", CronExpression: "*/5 * * * *", Timezone: "UTC", Message: "first",
+		Name:           "versioned",
+		CronExpression: "*/5 * * * *",
+		Timezone:       "UTC",
+		Message:        "first",
 	}
 	schedule, err := queue.CreateSchedule(context.Background(), topic, input)
 	require.NoError(t, err)
@@ -327,9 +350,16 @@ func TestScheduleLeaseTakeoverFencesStaleOwner(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	database := newDb(driver)
 	schedule := Schedule{
-		ID: "018f0000-0000-7000-8000-000000001001", TopicID: topicID.String(), Name: "takeover",
-		CronExpression: "* * * * *", Timezone: "UTC", Message: "tick", Headers: "{}",
-		MisfirePolicy: "fire_once", OverlapPolicy: "skip", NextRunAt: now.Add(-time.Minute),
+		ID:             "018f0000-0000-7000-8000-000000001001",
+		TopicID:        topicID.String(),
+		Name:           "takeover",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "tick",
+		Headers:        "{}",
+		MisfirePolicy:  "fire_once",
+		OverlapPolicy:  "skip",
+		NextRunAt:      now.Add(-time.Minute),
 	}
 	require.NoError(t, database.createSchedule(context.Background(), schedule))
 
@@ -358,17 +388,24 @@ func TestScheduleClaimUsesDatabaseTimeWithoutClockOverride(t *testing.T) {
 	require.NoError(t, database.createTopic(context.Background(),
 		Topic{ID: topicID, Name: "database-clock"},
 		Subscribers{{
-			ID: subscriberID, TopicID: topicID, Name: "worker",
+			ID:      subscriberID,
+			TopicID: topicID,
+			Name:    "worker",
 			Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"},
 		}},
 	))
 	databaseNow, err := database.persistence.DatabaseNow(context.Background())
 	require.NoError(t, err)
 	schedule := Schedule{
-		ID: uuid.NewString(), TopicID: topicID.String(), Name: "future",
-		CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
-		MisfirePolicy: ScheduleMisfirePolicyFireOnce, OverlapPolicy: ScheduleOverlapPolicySkip,
-		NextRunAt: databaseNow.Add(time.Minute),
+		ID:             uuid.NewString(),
+		TopicID:        topicID.String(),
+		Name:           "future",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "tick",
+		MisfirePolicy:  ScheduleMisfirePolicyFireOnce,
+		OverlapPolicy:  ScheduleOverlapPolicySkip,
+		NextRunAt:      databaseNow.Add(time.Minute),
 	}
 	require.NoError(t, database.createSchedule(context.Background(), schedule))
 	_, claimed, err := database.claimDueSchedule(context.Background(), "db-clock", time.Time{}, defaultScheduleLease)
@@ -391,7 +428,10 @@ func TestSchedulerRecordsPermanentFailureAndAdvances(t *testing.T) {
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "1m"})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
-		Name: "each-minute", CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
+		Name:           "each-minute",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "tick",
 	})
 	require.NoError(t, err)
 	require.NoError(t, queue.DeleteSubscriber(context.Background(), topic, subscriber.Name))
@@ -428,11 +468,15 @@ func TestSchedulerRestartFiresAtMostOneMissedOccurrence(t *testing.T) {
 	require.NoError(t, first.Run(context.Background()))
 	topic := NewTopic("restart")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "30s",
+		MaxAttempts:        3,
+		VisibilityDuration: "30s",
 	})
 	require.NoError(t, first.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	schedule, err := first.CreateSchedule(context.Background(), topic, ScheduleInput{
-		Name: "every-minute", CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
+		Name:           "every-minute",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "tick",
 	})
 	require.NoError(t, err)
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -579,13 +623,16 @@ func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "topic-fence.db"), sqlite.Config{BusyTimeout: 100})
 	require.NoError(t, err)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 100, FlushInterval: time.Millisecond,
-		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize:     100,
+		FlushInterval: time.Millisecond,
+		RetryMin:      time.Millisecond,
+		RetryMax:      5 * time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	blockedTopic := NewTopic("blocked-topic")
 	blockedSubscriber := NewSubscriber(blockedTopic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), blockedTopic, Subscribers{blockedSubscriber}))
 	t.Cleanup(func() {
@@ -595,7 +642,8 @@ func TestTopicMutationBarrierDoesNotBlockOtherTopicAdmission(t *testing.T) {
 	})
 	otherTopic := NewTopic("unrelated-topic")
 	otherSubscriber := NewSubscriber(otherTopic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), otherTopic, Subscribers{otherSubscriber}))
 
@@ -648,7 +696,9 @@ func TestInvalidTopicRuntimeNeverCommitsMetadata(t *testing.T) {
 	queue, driver, _ := setupQueue(t)
 	topic := Topic{ID: uuid.New(), Name: "invalid-runtime"}
 	subscriber := Subscriber{
-		ID: uuid.New(), TopicID: topic.ID, Name: "worker",
+		ID:      uuid.New(),
+		TopicID: topic.ID,
+		Name:    "worker",
 		Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "not-a-duration"},
 	}
 	err := queue.CreateTopic(context.Background(), topic, Subscribers{subscriber})
@@ -665,7 +715,9 @@ func TestResourceNamesRejectUnaddressablePathSegments(t *testing.T) {
 
 	topic.Name = "orders"
 	subscriber := Subscriber{
-		ID: uuid.New(), TopicID: topic.ID, Name: "worker/priority",
+		ID:      uuid.New(),
+		TopicID: topic.ID,
+		Name:    "worker/priority",
 		Options: SubscriberOptions{MaxAttempts: 3, VisibilityDuration: "30s"},
 	}
 	_, err = buildTopicRuntime(topic, Subscribers{subscriber})
@@ -707,15 +759,21 @@ func TestDurableWaitCancellationReturnsStableCommitUnknownIDs(t *testing.T) {
 	_, err = lock.Exec("UPDATE topics SET name = name WHERE id = ?", topicID)
 	require.NoError(t, err)
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{
-		BatchSize: 1, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize: 1,
+		RetryMin:  time.Millisecond,
+		RetryMax:  5 * time.Millisecond,
 	})
 	messageID := newMessageID()
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err = buffer.EnqueueBatchDurable(ctx, []writeRequest{{
-		TopicID: topicID, MessageID: messageID, Message: "ambiguous", Headers: []byte("{}"),
-		VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: messageID,
+		Message:   "ambiguous",
+		Headers:   []byte("{}"),
+		VisibleAt: now,
+		CreatedAt: now,
 	}})
 	var unknown *CommitUnknownError
 	require.True(t, errors.As(err, &unknown), err)

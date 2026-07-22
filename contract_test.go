@@ -100,7 +100,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	}
 
 	cancelTopic, cancelSubscriber := createContractTopic(t, queue, "contract-receipt-cancel", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	cancelReceipt, err := queue.PublishDurable(context.Background(), cancelTopic, Message{Message: "poison"})
 	require.NoError(t, err)
@@ -135,7 +137,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	// the global reaper and its terminal timestamp update on every backend.
 	reaperTopic := NewTopic("contract-global-reaper")
 	reaperSubscriber := NewSubscriber(reaperTopic, "worker", SubscriberOptions{
-		MaxAttempts: 1, VisibilityDuration: "25ms", DequeueBatchSize: 1,
+		MaxAttempts:        1,
+		VisibilityDuration: "25ms",
+		DequeueBatchSize:   1,
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), reaperTopic, Subscribers{reaperSubscriber}))
 	reaperReceipt, err := queue.PublishDurable(context.Background(), reaperTopic, Message{Message: "expire-to-dlq"})
@@ -150,7 +154,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	}, 3*time.Second, 20*time.Millisecond, "expired delivery must reach the DLQ without another claim")
 
 	priorityTopic, prioritySubscriber := createContractTopic(t, queue, "contract-priority", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 10,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   10,
 	})
 	low, err := queue.PublishDurable(context.Background(), priorityTopic, Message{Message: "low", Priority: -10})
 	require.NoError(t, err)
@@ -179,7 +185,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		delayedClaim[0].ID, delayedClaim[0].ReceiptToken))
 
 	snoozeTopic, snoozeSubscriber := createContractTopic(t, queue, "contract-snooze", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	snoozeReceipt, err := queue.PublishDurable(context.Background(), snoozeTopic, Message{Message: "snooze without failure"})
 	require.NoError(t, err)
@@ -218,7 +226,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		resumedClaim[0].ID, resumedClaim[0].ReceiptToken))
 
 	retryTopic, retrySubscriber := createContractTopic(t, queue, "contract-retry", SubscriberOptions{
-		MaxAttempts: 2, VisibilityDuration: "250ms", DequeueBatchSize: 1,
+		MaxAttempts:        2,
+		VisibilityDuration: "250ms",
+		DequeueBatchSize:   1,
 	})
 	retryReceipt, err := queue.PublishDurable(context.Background(), retryTopic, Message{Message: "retry-to-dlq"})
 	require.NoError(t, err)
@@ -267,8 +277,10 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Len(t, errorHistory.Errors, 4, "DLQ replay must start a new failure cycle without losing history")
 
 	policyTopic, policySubscriber := createContractTopic(t, queue, "contract-retry-policy", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
-		RetryPolicy: RetryPolicy{InitialDelay: "200ms", MaxDelay: "200ms", Multiplier: 2, Jitter: 0.2},
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
+		RetryPolicy:        RetryPolicy{InitialDelay: "200ms", MaxDelay: "200ms", Multiplier: 2, Jitter: 0.2},
 	})
 	policyReceipt, err := queue.PublishDurable(context.Background(), policyTopic, Message{Message: "policy retry"})
 	require.NoError(t, err)
@@ -286,9 +298,14 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Equal(t, 1, policyStatus.Deliveries[0].FailureCount)
 
 	_, noJitterSubscriber := createContractTopic(t, queue, "contract-no-jitter", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 		RetryPolicy: RetryPolicy{
-			InitialDelay: "200ms", MaxDelay: "200ms", Multiplier: 2, DisableJitter: true,
+			InitialDelay:  "200ms",
+			MaxDelay:      "200ms",
+			Multiplier:    2,
+			DisableJitter: true,
 		},
 	})
 	var storedJitter float64
@@ -297,7 +314,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Zero(t, storedJitter)
 
 	retentionTopic, retentionSubscriber := createContractTopic(t, queue, "contract-error-retention", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	retentionReceipt, err := queue.PublishDurable(context.Background(), retentionTopic, Message{Message: "cascade error history"})
 	require.NoError(t, err)
@@ -317,7 +336,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	}, 3*time.Second, 10*time.Millisecond, "failure history retention must follow its delivery row")
 
 	concurrentTopic, concurrentSubscriber := createContractTopic(t, queue, "contract-concurrent-claim", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	concurrentReceipt, err := queue.PublishDurable(context.Background(), concurrentTopic, Message{Message: "single-owner"})
 	require.NoError(t, err)
@@ -356,7 +377,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 		owner.ID, owner.ReceiptToken))
 
 	terminalTopic, terminalSubscriber := createContractTopic(t, queue, "contract-terminal-race", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	terminalReceipt, err := queue.PublishDurable(context.Background(), terminalTopic, Message{Message: "one terminal owner"})
 	require.NoError(t, err)
@@ -412,7 +435,9 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Equal(t, expectedTerminalStatus, terminalStatus.Deliveries[0].Status)
 
 	batchTopic, batchSubscriber := createContractTopic(t, queue, "contract-batch-result", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	_, err = queue.PublishDurable(context.Background(), batchTopic, Message{Message: "batch-result"})
 	require.NoError(t, err)
@@ -428,11 +453,17 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	require.Equal(t, "failed", batchResults[1].Status)
 
 	scheduleTopic, scheduleSubscriber := createContractTopic(t, queue, "contract-schedule", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1s", DequeueBatchSize: 1,
+		MaxAttempts:        3,
+		VisibilityDuration: "1s",
+		DequeueBatchSize:   1,
 	})
 	schedule, err := queue.CreateSchedule(context.Background(), scheduleTopic, ScheduleInput{
-		Name: "daily", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "scheduled-contract",
-		Headers: map[string]string{"source": "contract"}, Priority: 7,
+		Name:           "daily",
+		CronExpression: "0 0 * * *",
+		Timezone:       "UTC",
+		Message:        "scheduled-contract",
+		Headers:        map[string]string{"source": "contract"},
+		Priority:       7,
 	})
 	require.NoError(t, err)
 	run, err := queue.RunScheduleNow(context.Background(), scheduleTopic, schedule.ID, false)
@@ -451,11 +482,16 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	}, time.Second, 20*time.Millisecond)
 
 	expiryTopic, expirySubscriber := createContractTopic(t, queue, "contract-schedule-expiry", SubscriberOptions{
-		MaxAttempts: 1, VisibilityDuration: "25ms", DequeueBatchSize: 1,
-		RetryPolicy: RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
+		MaxAttempts:        1,
+		VisibilityDuration: "25ms",
+		DequeueBatchSize:   1,
+		RetryPolicy:        RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
 	})
 	expirySchedule, err := queue.CreateSchedule(context.Background(), expiryTopic, ScheduleInput{
-		Name: "expire", CronExpression: "0 0 * * *", Timezone: "UTC", Message: "expire-run",
+		Name:           "expire",
+		CronExpression: "0 0 * * *",
+		Timezone:       "UTC",
+		Message:        "expire-run",
 	})
 	require.NoError(t, err)
 	_, err = queue.RunScheduleNow(context.Background(), expiryTopic, expirySchedule.ID, false)
@@ -471,7 +507,8 @@ func runStorageContract(t *testing.T, driver store.Driver) {
 	}, 3*time.Second, 20*time.Millisecond, "lease-expiry DLQ must complete only its related schedule run")
 
 	defaultTopic, defaultSubscriber := createContractTopic(t, queue, "contract-default-attempts", SubscriberOptions{
-		VisibilityDuration: "25ms", DequeueBatchSize: 1,
+		VisibilityDuration: "25ms",
+		DequeueBatchSize:   1,
 	})
 	require.Equal(t, 3, defaultSubscriber.Options.MaxAttempts)
 	defaultReceipt, err := queue.PublishDurable(context.Background(), defaultTopic, Message{Message: "retry-by-default"})
@@ -537,7 +574,9 @@ func runPaginationContract(t *testing.T, queue *Queue, topic Topic) {
 	for index := 0; index < 3; index++ {
 		_, err := queue.CreateSchedule(ctx, topic, ScheduleInput{
 			Name:           fmt.Sprintf("contract-page-schedule-%d", index),
-			CronExpression: "0 0 * * *", Timezone: "UTC", Message: "pagination",
+			CronExpression: "0 0 * * *",
+			Timezone:       "UTC",
+			Message:        "pagination",
 		})
 		require.NoError(t, err)
 	}

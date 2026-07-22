@@ -187,8 +187,12 @@ func New(client Client, topic blockqueue.Topic, subscriber string, handler Handl
 		return nil, err
 	}
 	worker := &Worker{
-		client: client, topic: topic, subscriber: subscriber, handler: handler, options: normalized,
-		metrics: metrics,
+		client:     client,
+		topic:      topic,
+		subscriber: subscriber,
+		handler:    handler,
+		options:    normalized,
+		metrics:    metrics,
 	}
 	if batchClient, ok := client.(BatchClient); ok {
 		worker.batchClient = batchClient

@@ -31,7 +31,8 @@ func TestRouterPublishClaimAckAndStrictJSON(t *testing.T) {
 	})
 	topic := blockqueue.NewTopic("orders")
 	subscriber := blockqueue.NewSubscriber(topic, "worker", blockqueue.SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	if err := queue.CreateTopic(context.Background(), topic, blockqueue.Subscribers{subscriber}); err != nil {
 		t.Fatal(err)

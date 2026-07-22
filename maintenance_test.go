@@ -128,7 +128,8 @@ func TestDeliveryReaperWriteFailureDoesNotHotSpin(t *testing.T) {
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("reaper-backoff")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -173,11 +174,15 @@ func TestSchedulerClaimFailureDoesNotHotSpin(t *testing.T) {
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("scheduler-backoff")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	_, err = queue.CreateSchedule(context.Background(), topic, ScheduleInput{
-		Name: "each-minute", CronExpression: "* * * * *", Timezone: "UTC", Message: "tick",
+		Name:           "each-minute",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "tick",
 	})
 	require.NoError(t, err)
 	_, err = testDB(driver).Exec(`
@@ -215,7 +220,8 @@ func TestDeliveryReaperYieldsAfterBoundedPass(t *testing.T) {
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("reaper-fairness")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {

@@ -192,8 +192,10 @@ func (topic *topicRuntime) subscriberStatus(ctx context.Context, database *db) (
 	for _, subscriber := range items {
 		queueStats := stats[subscriber.id]
 		result = append(result, SubscriberStatus{
-			TopicID: topic.id, Name: subscriber.name,
-			UnpublishedMessage: queueStats.Pending, UnackedMessage: queueStats.Delivered,
+			TopicID:            topic.id,
+			Name:               subscriber.name,
+			UnpublishedMessage: queueStats.Pending,
+			UnackedMessage:     queueStats.Delivered,
 		})
 	}
 	return result, nil

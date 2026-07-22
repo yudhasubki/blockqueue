@@ -33,8 +33,11 @@ func openAmbiguousCommitStore(t *testing.T, commitErr error) *ambiguousCommitSto
 	t.Helper()
 	storage := &ambiguousCommitStore{name: "blockqueue_commit_fault_" + uuid.NewString(), commitErr: commitErr}
 	sql.Register(storage.name, &commitFaultDriver{
-		inner: &sqlite3.SQLiteDriver{}, armed: &storage.armed, commitErr: commitErr,
-		scheduledReadFault: &storage.scheduledReadFault, scheduledReadQueries: &storage.scheduledReadQueries,
+		inner:                &sqlite3.SQLiteDriver{},
+		armed:                &storage.armed,
+		commitErr:            commitErr,
+		scheduledReadFault:   &storage.scheduledReadFault,
+		scheduledReadQueries: &storage.scheduledReadQueries,
 	})
 	dsn := fmt.Sprintf("file:%s?_synchronous=full&_journal_mode=wal&_foreign_keys=on&_busy_timeout=5000&_txlock=immediate&_auto_vacuum=2",
 		filepath.Join(t.TempDir(), "ambiguous-commit.db"))
@@ -66,8 +69,11 @@ func (fault *commitFaultDriver) Open(name string) (driver.Conn, error) {
 		return nil, err
 	}
 	return &commitFaultConn{
-		Conn: connection, armed: fault.armed, commitErr: fault.commitErr,
-		scheduledReadFault: fault.scheduledReadFault, scheduledReadQueries: fault.scheduledReadQueries,
+		Conn:                 connection,
+		armed:                fault.armed,
+		commitErr:            fault.commitErr,
+		scheduledReadFault:   fault.scheduledReadFault,
+		scheduledReadQueries: fault.scheduledReadQueries,
 	}, nil
 }
 
@@ -182,13 +188,16 @@ func testWriterRecoversFromAmbiguousCommit(t *testing.T, commitErr error) {
 	t.Helper()
 	driver := openAmbiguousCommitStore(t, commitErr)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond,
-		RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize:     1,
+		FlushInterval: time.Millisecond,
+		RetryMin:      time.Millisecond,
+		RetryMax:      5 * time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("ambiguous-commit")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "1m",
+		MaxAttempts:        3,
+		VisibilityDuration: "1m",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -219,7 +228,8 @@ func testWriterRecoversFromAmbiguousCommit(t *testing.T, commitErr error) {
 func TestDurableDelayReceiptDoesNotDependOnPostCommitRead(t *testing.T) {
 	driver := openAmbiguousCommitStore(t, nil)
 	queue := New(driver, Options{Writer: WriterOptions{
-		BatchSize: 1, FlushInterval: time.Millisecond,
+		BatchSize:     1,
+		FlushInterval: time.Millisecond,
 	}})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("post-commit-read")
@@ -236,7 +246,9 @@ func TestDurableDelayReceiptDoesNotDependOnPostCommitRead(t *testing.T) {
 	readErr := fmt.Errorf("injected post-commit scheduled_at read failure")
 	driver.scheduledReadFault.Store(&scheduledReadFault{err: readErr})
 	receipt, err := queue.PublishDurable(context.Background(), topic, Message{
-		Message: "database-clock delay", IdempotencyKey: "database-clock-delay", Delay: "2s",
+		Message:        "database-clock delay",
+		IdempotencyKey: "database-clock-delay",
+		Delay:          "2s",
 	})
 	require.NoError(t, err)
 	require.Equal(t, PublishStatePersisted, receipt.State)
@@ -263,7 +275,9 @@ func TestDurableDelayReceiptDoesNotDependOnPostCommitRead(t *testing.T) {
 	require.Equal(t, persistedScheduledAt, receipt.ScheduledAt)
 
 	retry, err := queue.PublishDurable(context.Background(), topic, Message{
-		Message: "database-clock delay", IdempotencyKey: "database-clock-delay", Delay: "2s",
+		Message:        "database-clock delay",
+		IdempotencyKey: "database-clock-delay",
+		Delay:          "2s",
 	})
 	require.NoError(t, err)
 	require.Equal(t, receipt.MessageID, retry.MessageID)
@@ -319,7 +333,8 @@ func testWithTxReportsAmbiguousCommit(t *testing.T, commitErr error) {
 			return err
 		}
 		_, err := queue.PublishTx(context.Background(), tx, topic, Message{
-			Message: "order paid", IdempotencyKey: "paid-order",
+			Message:        "order paid",
+			IdempotencyKey: "paid-order",
 		})
 		return err
 	})

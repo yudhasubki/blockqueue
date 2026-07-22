@@ -562,9 +562,14 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 		headers := make(map[string]string)
 		_ = json.Unmarshal([]byte(row.Headers), &headers)
 		page.Messages = append(page.Messages, Delivery{
-			ID: row.MessageID, Message: row.Message, Headers: headers,
-			CorrelationID: row.CorrelationID.String, Status: row.Status,
-			DeliveryCount: row.DeliveryCount, FailureCount: row.FailureCount, Priority: row.Priority,
+			ID:             row.MessageID,
+			Message:        row.Message,
+			Headers:        headers,
+			CorrelationID:  row.CorrelationID.String,
+			Status:         row.Status,
+			DeliveryCount:  row.DeliveryCount,
+			FailureCount:   row.FailureCount,
+			Priority:       row.Priority,
 			ReceiptToken:   row.ReceiptToken.String,
 			LeaseExpiresAt: optionalTime(row.LeaseExpiresAt),
 			VisibleAt:      row.VisibleAt,

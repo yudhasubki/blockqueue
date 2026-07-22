@@ -11,7 +11,11 @@ import (
 func TestConnectionURLDefaultsAndEscapesCredentials(t *testing.T) {
 	const password = "p@ss:/?# word"
 	connectionURL, err := buildConnectionURL(Config{
-		Host: "localhost", Port: 5432, Username: "queue user", Password: password, Name: "queue/db",
+		Host:     "localhost",
+		Port:     5432,
+		Username: "queue user",
+		Password: password,
+		Name:     "queue/db",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +81,10 @@ func TestConnectionURLSupportsIPv6Host(t *testing.T) {
 
 func TestOpenRejectsPoolTooSmallForMaintenanceLeadership(t *testing.T) {
 	_, err := Open(Config{
-		Host: "localhost", Username: "queue", Name: "queue", MaxOpenConns: 1,
+		Host:         "localhost",
+		Username:     "queue",
+		Name:         "queue",
+		MaxOpenConns: 1,
 	})
 	if err == nil || !strings.Contains(err.Error(), "at least 2") {
 		t.Fatalf("expected maintenance pool capacity error, got %v", err)

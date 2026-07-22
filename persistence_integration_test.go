@@ -12,14 +12,16 @@ import (
 
 func TestPersistenceWorksWithSingleSQLiteConnection(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "single-connection.db"), sqlite.Config{
-		MaxOpenConns: 1, MaxIdleConns: 1,
+		MaxOpenConns: 1,
+		MaxIdleConns: 1,
 	})
 	require.NoError(t, err)
 	queue := New(driver, Options{})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("single-connection")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "30s",
+		MaxAttempts:        3,
+		VisibilityDuration: "30s",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -31,14 +33,16 @@ func TestPersistenceWorksWithSingleSQLiteConnection(t *testing.T) {
 
 func TestDeliveryHotPathStatementsReuseSingleConnectionSafely(t *testing.T) {
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "delivery-statements.db"), sqlite.Config{
-		MaxOpenConns: 1, MaxIdleConns: 1,
+		MaxOpenConns: 1,
+		MaxIdleConns: 1,
 	})
 	require.NoError(t, err)
 	queue := New(driver, Options{})
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("delivery-statements")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 3, VisibilityDuration: "30s",
+		MaxAttempts:        3,
+		VisibilityDuration: "30s",
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

@@ -39,8 +39,10 @@ type db struct {
 func newDb(driver store.Driver) *db {
 	storage := persistence.New(driver)
 	return &db{
-		Database: driver, persistence: storage,
-		dialect: databaseDialect{backend: driver.Dialect()}, dialectErr: storage.DialectError(),
+		Database:    driver,
+		persistence: storage,
+		dialect:     databaseDialect{backend: driver.Dialect()},
+		dialectErr:  storage.DialectError(),
 	}
 }
 
@@ -90,25 +92,34 @@ type subscriberStatusRow struct {
 
 func toPersistenceTopic(topic Topic) persistence.Topic {
 	return persistence.Topic{
-		ID: topic.ID, Name: topic.Name, Paused: topic.Paused,
-		CreatedAt: topic.CreatedAt, DeletedAt: topic.DeletedAt,
+		ID:        topic.ID,
+		Name:      topic.Name,
+		Paused:    topic.Paused,
+		CreatedAt: topic.CreatedAt,
+		DeletedAt: topic.DeletedAt,
 	}
 }
 
 func fromPersistenceTopic(topic persistence.Topic) Topic {
 	return Topic{
-		ID: topic.ID, Name: topic.Name, Paused: topic.Paused,
-		CreatedAt: topic.CreatedAt, DeletedAt: topic.DeletedAt,
+		ID:        topic.ID,
+		Name:      topic.Name,
+		Paused:    topic.Paused,
+		CreatedAt: topic.CreatedAt,
+		DeletedAt: topic.DeletedAt,
 	}
 }
 
 func toPersistenceSubscriberOptions(options SubscriberOptions) persistence.SubscriberOptions {
 	return persistence.SubscriberOptions{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: persistence.RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
@@ -116,11 +127,14 @@ func toPersistenceSubscriberOptions(options SubscriberOptions) persistence.Subsc
 
 func fromPersistenceSubscriberOptions(options persistence.SubscriberOptions) SubscriberOptions {
 	return SubscriberOptions{
-		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
-		DequeueBatchSize: options.DequeueBatchSize,
+		MaxAttempts:        options.MaxAttempts,
+		VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize:   options.DequeueBatchSize,
 		RetryPolicy: RetryPolicy{
-			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
-			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			InitialDelay:  options.RetryPolicy.InitialDelay,
+			MaxDelay:      options.RetryPolicy.MaxDelay,
+			Multiplier:    options.RetryPolicy.Multiplier,
+			Jitter:        options.RetryPolicy.Jitter,
 			DisableJitter: options.RetryPolicy.DisableJitter,
 		},
 	}
@@ -128,17 +142,27 @@ func fromPersistenceSubscriberOptions(options persistence.SubscriberOptions) Sub
 
 func toPersistenceSubscriber(subscriber Subscriber) persistence.Subscriber {
 	return persistence.Subscriber{
-		ID: subscriber.ID, TopicID: subscriber.TopicID, TopicName: subscriber.TopicName,
-		Name: subscriber.Name, Options: toPersistenceSubscriberOptions(subscriber.Options),
-		Paused: subscriber.Paused, CreatedAt: subscriber.CreatedAt, DeletedAt: subscriber.DeletedAt,
+		ID:        subscriber.ID,
+		TopicID:   subscriber.TopicID,
+		TopicName: subscriber.TopicName,
+		Name:      subscriber.Name,
+		Options:   toPersistenceSubscriberOptions(subscriber.Options),
+		Paused:    subscriber.Paused,
+		CreatedAt: subscriber.CreatedAt,
+		DeletedAt: subscriber.DeletedAt,
 	}
 }
 
 func fromPersistenceSubscriber(subscriber persistence.Subscriber) Subscriber {
 	return Subscriber{
-		ID: subscriber.ID, TopicID: subscriber.TopicID, TopicName: subscriber.TopicName,
-		Name: subscriber.Name, Options: fromPersistenceSubscriberOptions(subscriber.Options),
-		Paused: subscriber.Paused, CreatedAt: subscriber.CreatedAt, DeletedAt: subscriber.DeletedAt,
+		ID:        subscriber.ID,
+		TopicID:   subscriber.TopicID,
+		TopicName: subscriber.TopicName,
+		Name:      subscriber.Name,
+		Options:   fromPersistenceSubscriberOptions(subscriber.Options),
+		Paused:    subscriber.Paused,
+		CreatedAt: subscriber.CreatedAt,
+		DeletedAt: subscriber.DeletedAt,
 	}
 }
 
@@ -152,7 +176,8 @@ func toPersistenceSubscribers(subscribers Subscribers) persistence.Subscribers {
 
 func (d *db) getTopics(ctx context.Context, filter TopicFilter) (Topics, error) {
 	rows, err := d.persistence.GetTopics(ctx, persistence.TopicFilter{
-		Names: filter.Names, WithDeleted: filter.WithDeleted,
+		Names:       filter.Names,
+		WithDeleted: filter.WithDeleted,
 	})
 	if err != nil {
 		return nil, err
@@ -178,7 +203,9 @@ func (d *db) listTopics(ctx context.Context, limit int, afterName, afterID strin
 
 func (d *db) getSubscribers(ctx context.Context, filter subscriberFilter) (Subscribers, error) {
 	rows, err := d.persistence.GetSubscribers(ctx, persistence.SubscriberFilter{
-		TopicIDs: filter.TopicIDs, Names: filter.Names, WithDeleted: filter.WithDeleted,
+		TopicIDs:    filter.TopicIDs,
+		Names:       filter.Names,
+		WithDeleted: filter.WithDeleted,
 	})
 	if err != nil {
 		return nil, err
@@ -234,7 +261,10 @@ func (d *db) listSubscriberStatuses(ctx context.Context, topicID uuid.UUID, limi
 	result := make([]subscriberStatusRow, len(rows))
 	for index, row := range rows {
 		result[index] = subscriberStatusRow{
-			ID: row.ID, Name: row.Name, Pending: row.Pending, Delivered: row.Delivered,
+			ID:        row.ID,
+			Name:      row.Name,
+			Pending:   row.Pending,
+			Delivered: row.Delivered,
 		}
 	}
 	return result, nil
@@ -292,8 +322,10 @@ func (d *db) batchNackDeliveries(ctx context.Context, subscriberID uuid.UUID, re
 	items := make([]persistence.BatchNackItem, len(requests))
 	for index, request := range requests {
 		items[index] = persistence.BatchNackItem{
-			MessageID: request.MessageID, ReceiptToken: request.ReceiptToken,
-			RetryDelay: request.RetryDelay, Error: request.Error,
+			MessageID:    request.MessageID,
+			ReceiptToken: request.ReceiptToken,
+			RetryDelay:   request.RetryDelay,
+			Error:        request.Error,
 		}
 	}
 	return d.persistence.BatchNackDeliveries(ctx, subscriberID, items)
@@ -331,8 +363,12 @@ func (d *db) listDeliveryErrors(ctx context.Context, subscriberID uuid.UUID, mes
 	result := make([]DeliveryError, len(rows))
 	for index, row := range rows {
 		result[index] = DeliveryError{
-			ID: row.ID, MessageID: row.MessageID, SubscriberID: row.SubscriberID,
-			FailureCount: row.FailureCount, Error: row.Error, FailedAt: row.FailedAt,
+			ID:           row.ID,
+			MessageID:    row.MessageID,
+			SubscriberID: row.SubscriberID,
+			FailureCount: row.FailureCount,
+			Error:        row.Error,
+			FailedAt:     row.FailedAt,
 		}
 	}
 	return result, nil
@@ -345,52 +381,92 @@ func (d *db) getMessageStatus(ctx context.Context, topicID uuid.UUID, messageID 
 	deliveries := make([]MessageDeliveryStatus, len(row.Deliveries))
 	for index, delivery := range row.Deliveries {
 		deliveries[index] = MessageDeliveryStatus{
-			SubscriberID: delivery.SubscriberID, Subscriber: delivery.Subscriber,
-			Status: delivery.Status, DeliveryCount: delivery.DeliveryCount,
-			FailureCount: delivery.FailureCount, VisibleAt: delivery.VisibleAt,
-			ProcessedAt: delivery.ProcessedAt, CancelledAt: delivery.CancelledAt,
-			CancelReason: delivery.CancelReason,
+			SubscriberID:  delivery.SubscriberID,
+			Subscriber:    delivery.Subscriber,
+			Status:        delivery.Status,
+			DeliveryCount: delivery.DeliveryCount,
+			FailureCount:  delivery.FailureCount,
+			VisibleAt:     delivery.VisibleAt,
+			ProcessedAt:   delivery.ProcessedAt,
+			CancelledAt:   delivery.CancelledAt,
+			CancelReason:  delivery.CancelReason,
 		}
 	}
 	return MessageStatus{
-		ID: row.ID, TopicID: row.TopicID, Message: row.Message, Headers: row.Headers,
-		CorrelationID: row.CorrelationID, IdempotencyKey: row.IdempotencyKey,
-		Priority: row.Priority, ScheduledAt: row.ScheduledAt, CreatedAt: row.CreatedAt,
-		Deliveries: deliveries,
+		ID:             row.ID,
+		TopicID:        row.TopicID,
+		Message:        row.Message,
+		Headers:        row.Headers,
+		CorrelationID:  row.CorrelationID,
+		IdempotencyKey: row.IdempotencyKey,
+		Priority:       row.Priority,
+		ScheduledAt:    row.ScheduledAt,
+		CreatedAt:      row.CreatedAt,
+		Deliveries:     deliveries,
 	}, nil
 }
 
 func toPersistenceSchedule(schedule Schedule) persistence.Schedule {
 	return persistence.Schedule{
-		ID: schedule.ID, TopicID: schedule.TopicID, Name: schedule.Name,
-		CronExpression: schedule.CronExpression, Timezone: schedule.Timezone,
-		Message: schedule.Message, Headers: schedule.Headers, CorrelationID: schedule.CorrelationID,
-		Priority: schedule.Priority, MisfirePolicy: schedule.MisfirePolicy, OverlapPolicy: schedule.OverlapPolicy,
-		Paused: schedule.Paused, Version: schedule.Version, NextRunAt: schedule.NextRunAt,
-		OwnerID: schedule.OwnerID, LeaseExpiresAt: schedule.LeaseExpiresAt,
-		FencingToken: schedule.FencingToken, CreatedAt: schedule.CreatedAt, UpdatedAt: schedule.UpdatedAt,
-		ClaimedAt: schedule.claimedAt,
+		ID:             schedule.ID,
+		TopicID:        schedule.TopicID,
+		Name:           schedule.Name,
+		CronExpression: schedule.CronExpression,
+		Timezone:       schedule.Timezone,
+		Message:        schedule.Message,
+		Headers:        schedule.Headers,
+		CorrelationID:  schedule.CorrelationID,
+		Priority:       schedule.Priority,
+		MisfirePolicy:  schedule.MisfirePolicy,
+		OverlapPolicy:  schedule.OverlapPolicy,
+		Paused:         schedule.Paused,
+		Version:        schedule.Version,
+		NextRunAt:      schedule.NextRunAt,
+		OwnerID:        schedule.OwnerID,
+		LeaseExpiresAt: schedule.LeaseExpiresAt,
+		FencingToken:   schedule.FencingToken,
+		CreatedAt:      schedule.CreatedAt,
+		UpdatedAt:      schedule.UpdatedAt,
+		ClaimedAt:      schedule.claimedAt,
 	}
 }
 
 func fromPersistenceSchedule(schedule persistence.Schedule) Schedule {
 	return Schedule{
-		ID: schedule.ID, TopicID: schedule.TopicID, Name: schedule.Name,
-		CronExpression: schedule.CronExpression, Timezone: schedule.Timezone,
-		Message: schedule.Message, Headers: schedule.Headers, CorrelationID: schedule.CorrelationID,
-		Priority: schedule.Priority, MisfirePolicy: schedule.MisfirePolicy, OverlapPolicy: schedule.OverlapPolicy,
-		Paused: schedule.Paused, Version: schedule.Version, NextRunAt: schedule.NextRunAt,
-		OwnerID: schedule.OwnerID, LeaseExpiresAt: schedule.LeaseExpiresAt,
-		FencingToken: schedule.FencingToken, CreatedAt: schedule.CreatedAt, UpdatedAt: schedule.UpdatedAt,
-		claimedAt: schedule.ClaimedAt,
+		ID:             schedule.ID,
+		TopicID:        schedule.TopicID,
+		Name:           schedule.Name,
+		CronExpression: schedule.CronExpression,
+		Timezone:       schedule.Timezone,
+		Message:        schedule.Message,
+		Headers:        schedule.Headers,
+		CorrelationID:  schedule.CorrelationID,
+		Priority:       schedule.Priority,
+		MisfirePolicy:  schedule.MisfirePolicy,
+		OverlapPolicy:  schedule.OverlapPolicy,
+		Paused:         schedule.Paused,
+		Version:        schedule.Version,
+		NextRunAt:      schedule.NextRunAt,
+		OwnerID:        schedule.OwnerID,
+		LeaseExpiresAt: schedule.LeaseExpiresAt,
+		FencingToken:   schedule.FencingToken,
+		CreatedAt:      schedule.CreatedAt,
+		UpdatedAt:      schedule.UpdatedAt,
+		claimedAt:      schedule.ClaimedAt,
 	}
 }
 
 func fromPersistenceScheduleRun(run persistence.ScheduleRun) ScheduleRun {
 	return ScheduleRun{
-		ID: run.ID, ScheduleID: run.ScheduleID, MessageID: run.MessageID,
-		ScheduledFor: run.ScheduledFor, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt,
-		Status: run.Status, Error: run.Error, CreatedAt: run.CreatedAt,
+		ID:           run.ID,
+		ScheduleID:   run.ScheduleID,
+		MessageID:    run.MessageID,
+		ScheduledFor: run.ScheduledFor,
+		StartedAt:    run.StartedAt,
+		FinishedAt:   run.FinishedAt,
+		Status:       run.Status,
+		Error:        run.Error,
+		CreatedAt:    run.CreatedAt,
 	}
 }
 

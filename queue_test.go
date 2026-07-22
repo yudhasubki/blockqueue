@@ -24,8 +24,9 @@ func setupQueue(t *testing.T) (*Queue, *sqlite.Driver, Topic) {
 	require.NoError(t, queue.Run(context.Background()))
 	topic := NewTopic("queue-topic")
 	subscriber := NewSubscriber(topic, "worker", SubscriberOptions{
-		MaxAttempts: 5, VisibilityDuration: "100ms",
-		RetryPolicy: RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
+		MaxAttempts:        5,
+		VisibilityDuration: "100ms",
+		RetryPolicy:        RetryPolicy{InitialDelay: "0s", MaxDelay: "0s"},
 	})
 	require.NoError(t, queue.CreateTopic(context.Background(), topic, Subscribers{subscriber}))
 	t.Cleanup(func() {
@@ -63,7 +64,8 @@ func TestDurableIdempotency(t *testing.T) {
 func TestDurableBatchIdempotencyConflictRollsBackEveryItem(t *testing.T) {
 	queue, driver, topic := setupQueue(t)
 	_, err := queue.PublishDurable(context.Background(), topic, Message{
-		Message: "original", IdempotencyKey: "existing-key",
+		Message:        "original",
+		IdempotencyKey: "existing-key",
 	})
 	require.NoError(t, err)
 
@@ -83,8 +85,10 @@ func TestIdempotencyComparesCorrelationAndExplicitSchedule(t *testing.T) {
 	queue, _, topic := setupQueue(t)
 	scheduledAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	request := Message{
-		Message: "scheduled", IdempotencyKey: "scheduled-key", CorrelationID: "correlation-a",
-		ScheduleAt: scheduledAt.Format(time.RFC3339),
+		Message:        "scheduled",
+		IdempotencyKey: "scheduled-key",
+		CorrelationID:  "correlation-a",
+		ScheduleAt:     scheduledAt.Format(time.RFC3339),
 	}
 	first, err := queue.PublishDurable(context.Background(), topic, request)
 	require.NoError(t, err)
@@ -164,17 +168,28 @@ func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	require.NoError(t, err)
 
 	buffer := newWriter(context.Background(), database, WriterOptions{
-		BatchSize: 2, FlushInterval: time.Hour, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond,
+		BatchSize:     2,
+		FlushInterval: time.Hour,
+		RetryMin:      time.Millisecond,
+		RetryMax:      5 * time.Millisecond,
 	})
 	t.Cleanup(func() { buffer.Close() })
 	now := time.Now().UTC()
 	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "invalid", Headers: []byte("{"),
-		VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "invalid",
+		Headers:   []byte("{"),
+		VisibleAt: now,
+		CreatedAt: now,
 	}}))
 	duplicates, err := buffer.EnqueueBatchDurable(context.Background(), []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "valid", Headers: []byte("{}"),
-		VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "valid",
+		Headers:   []byte("{}"),
+		VisibleAt: now,
+		CreatedAt: now,
 	}})
 	require.NoError(t, err)
 	require.Equal(t, []bool{false}, duplicates)
@@ -349,7 +364,10 @@ func TestClaimWaitUsesStoredVisibilityDeadline(t *testing.T) {
 func TestSchedulerRunNowAndOverlap(t *testing.T) {
 	queue, _, topic := setupQueue(t)
 	schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
-		Name: "heartbeat", CronExpression: "* * * * *", Timezone: "UTC", Message: "scheduled",
+		Name:           "heartbeat",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "scheduled",
 	})
 	require.NoError(t, err)
 	run, err := queue.RunScheduleNow(context.Background(), topic, schedule.ID, false)
@@ -371,7 +389,10 @@ func TestSchedulerRunNowAndOverlap(t *testing.T) {
 func TestSchedulerOverlapTreatsCancelledDeliveryAsTerminal(t *testing.T) {
 	queue, driver, topic := setupQueue(t)
 	schedule, err := queue.CreateSchedule(context.Background(), topic, ScheduleInput{
-		Name: "cancel-recovery", CronExpression: "* * * * *", Timezone: "UTC", Message: "scheduled",
+		Name:           "cancel-recovery",
+		CronExpression: "* * * * *",
+		Timezone:       "UTC",
+		Message:        "scheduled",
 	})
 	require.NoError(t, err)
 	first, err := queue.RunScheduleNow(context.Background(), topic, schedule.ID, false)
@@ -447,7 +468,11 @@ func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{BatchSize: 1, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond})
 	now := time.Now().UTC()
 	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
-		TopicID: topicID, MessageID: newMessageID(), Message: "retained", VisibleAt: now, CreatedAt: now,
+		TopicID:   topicID,
+		MessageID: newMessageID(),
+		Message:   "retained",
+		VisibleAt: now,
+		CreatedAt: now,
 	}}))
 	require.Eventually(t, func() bool { return !buffer.Healthy() }, time.Second, 5*time.Millisecond)
 	messages, _ := buffer.Pending()

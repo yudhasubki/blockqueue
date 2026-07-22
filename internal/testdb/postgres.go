@@ -101,7 +101,10 @@ func OpenPostgreSQLSchema(ctx context.Context, rawURL, requiredDatabaseSuffix, p
 
 	driver := &schemaDriver{database: connection}
 	return &Schema{
-		Driver: driver, DatabaseName: databaseName, Name: schemaName, admin: admin,
+		Driver:       driver,
+		DatabaseName: databaseName,
+		Name:         schemaName,
+		admin:        admin,
 	}, nil
 }
 

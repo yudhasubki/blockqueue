@@ -36,8 +36,10 @@ func TestNormalizeCanDisableJitter(t *testing.T) {
 func TestParseRejectsInvalidOptions(t *testing.T) {
 	valid := func() Options {
 		return Options{
-			MaxAttempts: 3, VisibilityDuration: "1m", DequeueBatchSize: 10,
-			RetryPolicy: RetryPolicy{InitialDelay: "1s", MaxDelay: "1m", Multiplier: 2, Jitter: 0.2},
+			MaxAttempts:        3,
+			VisibilityDuration: "1m",
+			DequeueBatchSize:   10,
+			RetryPolicy:        RetryPolicy{InitialDelay: "1s", MaxDelay: "1m", Multiplier: 2, Jitter: 0.2},
 		}
 	}
 	tests := []struct {
@@ -51,10 +53,11 @@ func TestParseRejectsInvalidOptions(t *testing.T) {
 		{name: "negative initial delay", change: func(options *Options) { options.RetryPolicy.InitialDelay = "-1s" }},
 		{name: "sub-millisecond initial delay", change: func(options *Options) { options.RetryPolicy.InitialDelay = "500us" }},
 		{name: "max below initial", change: func(options *Options) { options.RetryPolicy.MaxDelay = "500ms" }},
-		{name: "sub-millisecond max delay", change: func(options *Options) {
-			options.RetryPolicy.InitialDelay = "0s"
-			options.RetryPolicy.MaxDelay = "500us"
-		}},
+		{name: "sub-millisecond max delay",
+			change: func(options *Options) {
+				options.RetryPolicy.InitialDelay = "0s"
+				options.RetryPolicy.MaxDelay = "500us"
+			}},
 		{name: "small multiplier", change: func(options *Options) { options.RetryPolicy.Multiplier = 0.5 }},
 		{name: "nan multiplier", change: func(options *Options) { options.RetryPolicy.Multiplier = math.NaN() }},
 		{name: "infinite multiplier", change: func(options *Options) { options.RetryPolicy.Multiplier = math.Inf(1) }},

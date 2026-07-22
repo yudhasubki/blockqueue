@@ -601,8 +601,12 @@ func writeProblem(w http.ResponseWriter, request *http.Request, status int, code
 		instance = request.URL.Path
 	}
 	_ = json.NewEncoder(w).Encode(problem{
-		Type: "https://blockqueue.dev/problems/" + code, Title: http.StatusText(status),
-		Status: status, Detail: message, Code: code, Instance: instance,
+		Type:     "https://blockqueue.dev/problems/" + code,
+		Title:    http.StatusText(status),
+		Status:   status,
+		Detail:   message,
+		Code:     code,
+		Instance: instance,
 	})
 }
 
