@@ -25,6 +25,7 @@ func PrincipalFromContext(ctx context.Context) (string, bool) {
 	return principal, ok && principal != ""
 }
 
+// Options configures API routing, dashboard serving, and authentication hooks.
 type Options struct {
 	// Prefix defaults to /v1. Handler.Attach can be used directly when the
 	// embedding application wants to own all routing decisions.
@@ -40,6 +41,7 @@ type Options struct {
 	PrincipalResolver PrincipalResolver
 }
 
+// Router builds the health, OpenAPI, dashboard, and versioned API routes.
 func Router(queue *blockqueue.Queue, options Options) http.Handler {
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)

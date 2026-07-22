@@ -22,8 +22,8 @@ func (q *Queue) startCheckpointer() {
 	}
 
 	interval := q.options.CheckpointInterval
-	if interval < 30*time.Second {
-		interval = 30 * time.Second
+	if interval == 0 {
+		interval = MinimumCheckpointInterval
 	}
 	lastCheckpoint := time.Now()
 	ticker := time.NewTicker(5 * time.Second)

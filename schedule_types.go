@@ -6,6 +6,7 @@ import (
 	"time"
 )
 
+// ScheduleInput defines a recurring five-field cron publish.
 type ScheduleInput struct {
 	Name           string            `json:"name"`
 	CronExpression string            `json:"cron"`
@@ -18,6 +19,7 @@ type ScheduleInput struct {
 	OverlapPolicy  string            `json:"overlap_policy,omitempty"`
 }
 
+// Schedule is the persisted scheduler definition and its next occurrence.
 type Schedule struct {
 	ID             string         `db:"id" json:"id"`
 	TopicID        string         `db:"topic_id" json:"topic_id"`
@@ -41,17 +43,20 @@ type Schedule struct {
 	claimedAt      time.Time
 }
 
+// SchedulePage is one cursor-paginated page of schedules.
 type SchedulePage struct {
 	Schedules  []Schedule `json:"schedules"`
 	NextCursor string     `json:"next_cursor,omitempty"`
 }
 
+// PublicHeaders decodes the schedule's persisted JSON headers.
 func (schedule Schedule) PublicHeaders() map[string]string {
 	headers := make(map[string]string)
 	_ = json.Unmarshal([]byte(schedule.Headers), &headers)
 	return headers
 }
 
+// MarshalJSON exposes decoded headers and optional correlation data.
 func (schedule Schedule) MarshalJSON() ([]byte, error) {
 	type alias Schedule
 	return json.Marshal(struct {
@@ -61,6 +66,7 @@ func (schedule Schedule) MarshalJSON() ([]byte, error) {
 	}{alias: alias(schedule), Headers: schedule.PublicHeaders(), CorrelationID: schedule.CorrelationID.String})
 }
 
+// ScheduleRun records one scheduled occurrence and its terminal outcome.
 type ScheduleRun struct {
 	ID           string         `db:"id" json:"id"`
 	ScheduleID   string         `db:"schedule_id" json:"schedule_id"`
@@ -73,6 +79,7 @@ type ScheduleRun struct {
 	CreatedAt    time.Time      `db:"created_at" json:"created_at"`
 }
 
+// MarshalJSON exposes nullable run fields as optional JSON strings.
 func (run ScheduleRun) MarshalJSON() ([]byte, error) {
 	type alias ScheduleRun
 	result := struct {
@@ -87,6 +94,7 @@ func (run ScheduleRun) MarshalJSON() ([]byte, error) {
 	return json.Marshal(result)
 }
 
+// ScheduleRunPage is one cursor-paginated page of occurrence history.
 type ScheduleRunPage struct {
 	Runs       []ScheduleRun `json:"runs"`
 	NextCursor string        `json:"next_cursor,omitempty"`

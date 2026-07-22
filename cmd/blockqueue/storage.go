@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	blockqueue "github.com/yudhasubki/blockqueue"
 	"github.com/yudhasubki/blockqueue/store"
 	"github.com/yudhasubki/blockqueue/store/postgres"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
@@ -72,8 +73,8 @@ func configuredCheckpointInterval(config Config) (time.Duration, error) {
 		return 0, nil
 	}
 	interval, err := time.ParseDuration(config.SQLite.CheckpointInterval)
-	if err != nil || interval < 30*time.Second {
-		return 0, fmt.Errorf("sqlite.checkpoint_interval must be at least 30s")
+	if err != nil || interval < blockqueue.MinimumCheckpointInterval {
+		return 0, fmt.Errorf("sqlite.checkpoint_interval must be at least %s", blockqueue.MinimumCheckpointInterval)
 	}
 	return interval, nil
 }

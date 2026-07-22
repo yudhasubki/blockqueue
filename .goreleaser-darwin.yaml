@@ -31,6 +31,8 @@ archives:
     files:
       - README.md
       - LICENSE
+      - NOTICE
+      - CHANGELOG.md
       - config.yaml.example
 
 checksum:

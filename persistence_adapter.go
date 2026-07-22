@@ -75,6 +75,7 @@ const (
 type deliveryRow = persistence.DeliveryRow
 type persistWriteResult = persistence.PersistWriteResult
 
+// SubscriberQueueStats contains persisted pending and leased delivery counts.
 type SubscriberQueueStats struct {
 	Pending   int `db:"pending"`
 	Delivered int `db:"delivered"`

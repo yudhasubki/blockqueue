@@ -219,12 +219,7 @@ func (q *Queue) DeliveryErrors(
 	if err != nil {
 		return DeliveryErrorPage{}, err
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
+	limit = normalizedResourcePageLimit(limit)
 	rows, err := q.db.listDeliveryErrors(ctx, runtime.id, messageID, limit+1, cursor)
 	if err != nil {
 		return DeliveryErrorPage{}, err

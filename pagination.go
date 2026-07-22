@@ -6,7 +6,17 @@ import (
 	"fmt"
 )
 
-const maximumResourcePageSize = 1000
+const (
+	defaultResourcePageSize = 100
+	maximumResourcePageSize = 1000
+)
+
+func normalizedResourcePageLimit(limit int) int {
+	if limit <= 0 {
+		return defaultResourcePageSize
+	}
+	return min(limit, maximumResourcePageSize)
+}
 
 type resourceCursor struct {
 	Sort string `json:"sort"`

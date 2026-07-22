@@ -118,10 +118,12 @@ func (q *Queue) Run(ctx context.Context) error {
 	return nil
 }
 
+// State returns the queue's current lifecycle state.
 func (q *Queue) State() LifecycleState {
 	return LifecycleState(q.state.Load())
 }
 
+// String returns the stable lowercase lifecycle name.
 func (s LifecycleState) String() string {
 	switch s {
 	case LifecycleNew:
@@ -137,6 +139,8 @@ func (s LifecycleState) String() string {
 	}
 }
 
+// Close shuts down with Options.ShutdownTimeout and discards the returned
+// error. Use Shutdown when the caller must observe an incomplete drain.
 func (q *Queue) Close() {
 	timeout := q.options.ShutdownTimeout
 	if timeout <= 0 {
@@ -241,14 +245,17 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	return errors.Join(flushErr, transactionErr, workersErr, closeErr)
 }
 
+// Live reports whether the queue has not reached the stopped state.
 func (q *Queue) Live() bool {
 	return q.State() != LifecycleStopped
 }
 
+// WriterHealthy reports whether persistence is currently accepting progress.
 func (q *Queue) WriterHealthy() bool {
 	return q.writer != nil && q.writer.Healthy()
 }
 
+// Ready checks lifecycle, persistence, maintenance health, and backlog limits.
 func (q *Queue) Ready(ctx context.Context) bool {
 	if q.State() != LifecycleRunning || q.writer == nil || !q.writer.Healthy() ||
 		!q.schedulerHealthy.Load() || !q.deliveryHealthy.Load() {
@@ -266,6 +273,10 @@ func (q *Queue) Ready(ctx context.Context) bool {
 }
 
 func (q *Queue) validateRuntimeConfiguration() error {
+	if q.db.supportsSQLiteMaintenance() && q.options.CheckpointInterval != 0 &&
+		q.options.CheckpointInterval < MinimumCheckpointInterval {
+		return fmt.Errorf("sqlite checkpoint interval must be zero or at least %s", MinimumCheckpointInterval)
+	}
 	if q.db.dialect.kind() != store.DialectPostgres {
 		return nil
 	}

@@ -20,6 +20,8 @@ var ErrInvalidTransaction = errors.New("invalid blockqueue transaction")
 // blindly repeat non-idempotent business operations.
 var ErrTransactionCommitUnknown = errors.New("transaction commit outcome unknown")
 
+// TransactionCommitUnknownError reports that a caller-owned transaction may
+// have committed even though Commit returned an error.
 type TransactionCommitUnknownError struct {
 	Cause error
 }

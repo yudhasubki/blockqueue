@@ -47,4 +47,5 @@ type Service interface {
 	ScheduleRunHistory(context.Context, blockqueue.Topic, string, int, string) (blockqueue.ScheduleRunPage, error)
 }
 
+// ErrorMapper converts domain failures into stable HTTP problem fields.
 type ErrorMapper func(error) (status int, code, message string)

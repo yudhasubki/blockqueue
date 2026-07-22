@@ -102,6 +102,27 @@ func TestTopologyTopicLifecycle(t *testing.T) {
 	}
 }
 
+func TestHasDeletedTopologyDistinguishesCleanDatabase(t *testing.T) {
+	ctx := context.Background()
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "deleted-topology-check.db"), sqlite.Config{})
+	require.NoError(t, err)
+	require.NoError(t, Migrate(ctx, driver))
+
+	database := newDb(driver)
+	t.Cleanup(func() { require.NoError(t, database.close()) })
+
+	hasDeleted, err := database.hasDeletedTopology(ctx)
+	require.NoError(t, err)
+	require.False(t, hasDeleted, "a clean startup must not schedule a competing cleanup pass")
+
+	topicID := uuid.New()
+	require.NoError(t, database.createTopic(ctx, Topic{ID: topicID, Name: "deleted-check"}, nil))
+	require.NoError(t, database.deleteTopic(ctx, topicID))
+	hasDeleted, err = database.hasDeletedTopology(ctx)
+	require.NoError(t, err)
+	require.True(t, hasDeleted, "durable tombstones must resume cleanup after restart")
+}
+
 func TestTopologyDeleteSubscriber(t *testing.T) {
 	ctx := context.Background()
 	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "subscriber-control.db"), sqlite.Config{})

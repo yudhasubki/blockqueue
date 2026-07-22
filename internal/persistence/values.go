@@ -10,6 +10,7 @@ const (
 	deliveryAckUpdateChunk         = 300 // 603 binds.
 	deliveryNackUpdateChunk        = 100 // 702 binds.
 	deliveryIdentityLookupChunk    = 500
+	deliveryFanoutChunkSize        = 200 // 801 binds including the topic ID.
 )
 
 const (

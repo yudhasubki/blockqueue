@@ -33,7 +33,7 @@ pgsql:
   durability: "strict" # strict (synchronous_commit=on) or balanced (local)
 writer:
   batch_size: 100          # Messages per batch
-  flush_interval: "100ms"  # Max time before flush
+  flush_interval: "50ms"   # Max time before flush
   max_pending_messages: 100000
   max_pending_bytes: 268435456 # 256MiB
 maintenance:

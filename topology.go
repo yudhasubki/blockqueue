@@ -66,10 +66,13 @@ func (mutation *topicMutation) close() {
 	mutation.runtime.admissionMu.Unlock()
 }
 
+// GetTopics returns all topics matching filter. Prefer ListTopics for bounded
+// operator-facing enumeration.
 func (q *Queue) GetTopics(ctx context.Context, filter TopicFilter) (Topics, error) {
 	return q.getTopics(ctx, filter)
 }
 
+// ListTopics returns a bounded cursor page ordered by name and ID.
 func (q *Queue) ListTopics(ctx context.Context, limit int, cursor string) (TopicPage, error) {
 	if err := q.requireRunning(); err != nil {
 		return TopicPage{}, err
@@ -99,6 +102,7 @@ func (q *Queue) ListTopics(ctx context.Context, limit int, cursor string) (Topic
 	return page, nil
 }
 
+// GetTopic reads one active topic from the immutable runtime registry.
 func (q *Queue) GetTopic(topicName string) (Topic, bool) {
 	topic, exists := q.registry.Load().byName[topicName]
 	if !exists {
@@ -111,18 +115,23 @@ func (q *Queue) GetTopic(topicName string) (Topic, bool) {
 	}, true
 }
 
+// CreateTopic atomically persists a topic and its initial subscribers.
 func (q *Queue) CreateTopic(ctx context.Context, topic Topic, subscribers Subscribers) error {
 	return q.createTopic(ctx, topic, subscribers)
 }
 
+// DeleteTopic logically removes a topic after fencing earlier admissions.
+// Physical rows are reclaimed asynchronously in bounded chunks.
 func (q *Queue) DeleteTopic(ctx context.Context, topic Topic) error {
 	return q.deleteTopic(ctx, topic)
 }
 
+// GetSubscribersStatus returns all subscriber queue-depth summaries.
 func (q *Queue) GetSubscribersStatus(ctx context.Context, topic Topic) (SubscriberStatuses, error) {
 	return q.getSubscribersStatus(ctx, topic)
 }
 
+// ListSubscriberStatuses returns a bounded cursor page ordered by name and ID.
 func (q *Queue) ListSubscriberStatuses(ctx context.Context, topic Topic, limit int, cursor string) (SubscriberStatusPage, error) {
 	runtime, exists := q.getTopicRuntime(topic)
 	if !exists {
@@ -161,17 +170,13 @@ func (q *Queue) ListSubscriberStatuses(ctx context.Context, topic Topic, limit i
 	return page, nil
 }
 
-func normalizedResourcePageLimit(limit int) int {
-	if limit <= 0 {
-		return 100
-	}
-	return min(limit, maximumResourcePageSize)
-}
-
+// CreateSubscribers atomically adds subscribers to an existing topic.
 func (q *Queue) CreateSubscribers(ctx context.Context, topic Topic, subscribers Subscribers) error {
 	return q.createSubscribers(ctx, topic, subscribers)
 }
 
+// DeleteSubscriber logically removes one subscriber after fencing earlier
+// admissions. Physical deliveries are reclaimed asynchronously.
 func (q *Queue) DeleteSubscriber(ctx context.Context, topic Topic, subscriber string) error {
 	return q.deleteSubscriber(ctx, topic, subscriber)
 }

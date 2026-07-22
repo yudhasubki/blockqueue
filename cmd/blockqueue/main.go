@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yudhasubki/blockqueue/httpapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -113,10 +114,10 @@ func ReadConfigFile(filename string) (_ Config, err error) {
 		config.Http.IdleTimeout = 2 * time.Minute
 	}
 	if config.Http.WriteTimeout == 0 {
-		config.Http.WriteTimeout = 65 * time.Second
+		config.Http.WriteTimeout = httpapi.MinimumWriteTimeout
 	}
-	if config.Http.WriteTimeout < 65*time.Second {
-		return config, errors.New("http.write_timeout must be at least 65s to cover maximum long-poll requests")
+	if config.Http.WriteTimeout < httpapi.MinimumWriteTimeout {
+		return config, fmt.Errorf("http.write_timeout must be at least %s to cover maximum long-poll requests", httpapi.MinimumWriteTimeout)
 	}
 	port, portErr := strconv.Atoi(config.Http.Port)
 	if portErr != nil || port < 1 || port > 65535 {

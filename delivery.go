@@ -23,9 +23,7 @@ var (
 )
 
 const (
-	maximumDeliveryLease    = persistence.MaximumDeliveryLease
 	maxDeliveryClaimSize    = 1000
-	maxDeliveryPageSize     = 1000
 	deliveryReaperBatchSize = 1000
 	deliveryReaperPassLimit = 8
 )
@@ -57,8 +55,8 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	}
 	if lease <= 0 {
 		lease = subscriberRuntime.options.VisibilityDuration
-	} else if lease > maximumDeliveryLease {
-		return nil, fmt.Errorf("%w: lease cannot exceed 12h", ErrInvalidPublish)
+	} else if lease > MaximumDeliveryLease {
+		return nil, fmt.Errorf("%w: lease cannot exceed %s", ErrInvalidPublish, MaximumDeliveryLease)
 	}
 	if topicRuntime.paused.Load() || subscriberRuntime.paused.Load() || subscriberRuntime.deleted.Load() {
 		return Deliveries{}, ErrResourcePaused
@@ -102,8 +100,9 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	return response, nil
 }
 
-// ClaimWait long-polls without a polling backoff. Its timer is reset to the
-// earliest pending visibility or expired lease deadline stored in the DB.
+// ClaimWait claims immediately available work or long-polls without a polling
+// backoff. Its timer follows the earliest pending visibility or expired lease
+// deadline stored in the database and also wakes on hints or ctx cancellation.
 func (q *Queue) ClaimWait(ctx context.Context, topic Topic, subscriber string, limit int, lease time.Duration) (Deliveries, error) {
 	topicRuntime, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
@@ -164,6 +163,8 @@ func (q *Queue) ClaimWait(ctx context.Context, topic Topic, subscriber string, l
 	}
 }
 
+// AckDelivery receipt-fences a successful lease transition to processed.
+// Repeating the same successful receipt is idempotent.
 func (q *Queue) AckDelivery(ctx context.Context, topic Topic, subscriber, messageID, receipt string) error {
 	started := time.Now()
 	defer q.observeDeliveryDuration(metric.DeliveryOperationAck, started)
@@ -198,6 +199,8 @@ func (q *Queue) AckDelivery(ctx context.Context, topic Topic, subscriber, messag
 	return nil
 }
 
+// NackDelivery records one failed attempt. A zero retryDelay applies the
+// subscriber retry policy; a stale receipt returns ErrLeaseLost.
 func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messageID, receipt string, retryDelay time.Duration, errorText string) error {
 	started := time.Now()
 	defer q.observeDeliveryDuration(metric.DeliveryOperationNack, started)
@@ -254,6 +257,7 @@ func (q *Queue) NackDelivery(ctx context.Context, topic Topic, subscriber, messa
 	return nil
 }
 
+// ExtendLease moves an active receipt's expiry forward using database time.
 func (q *Queue) ExtendLease(ctx context.Context, topic Topic, subscriber, messageID, receipt string, extension time.Duration) (time.Time, error) {
 	started := time.Now()
 	defer q.observeDeliveryDuration(metric.DeliveryOperationLease, started)
@@ -272,8 +276,8 @@ func (q *Queue) ExtendLease(ctx context.Context, topic Topic, subscriber, messag
 	}
 	if extension <= 0 {
 		extension = subscriberRuntime.options.VisibilityDuration
-	} else if extension > maximumDeliveryLease {
-		return time.Time{}, fmt.Errorf("%w: lease extension cannot exceed 12h", ErrInvalidPublish)
+	} else if extension > MaximumDeliveryLease {
+		return time.Time{}, fmt.Errorf("%w: lease extension cannot exceed %s", ErrInvalidPublish, MaximumDeliveryLease)
 	}
 	expires, err := q.db.extendDeliveryLease(ctx, subscriberRuntime.id, messageID, receipt, extension)
 	result := metric.OutcomeSuccess
@@ -379,6 +383,8 @@ func (q *Queue) startDeliveryReaper() {
 	}
 }
 
+// BatchAckDeliveries acknowledges items in one set-based transaction and
+// returns an outcome for every request.
 func (q *Queue) BatchAckDeliveries(ctx context.Context, topic Topic, subscriber string, requests []BatchAckItem) []DeliveryResult {
 	started := time.Now()
 	defer q.observeDeliveryDuration(metric.DeliveryOperationBatchAck, started)
@@ -420,6 +426,8 @@ func (q *Queue) BatchAckDeliveries(ctx context.Context, topic Topic, subscriber 
 	return results
 }
 
+// BatchNackDeliveries records failures in one set-based transaction and
+// returns an outcome for every request.
 func (q *Queue) BatchNackDeliveries(ctx context.Context, topic Topic, subscriber string, requests []BatchNackItem) []DeliveryResult {
 	started := time.Now()
 	defer q.observeDeliveryDuration(metric.DeliveryOperationBatchNack, started)
@@ -472,10 +480,12 @@ func (q *Queue) BatchNackDeliveries(ctx context.Context, topic Topic, subscriber
 	return results
 }
 
+// PauseTopic stops new claims while continuing to accept publishes.
 func (q *Queue) PauseTopic(ctx context.Context, topic Topic) error {
 	return q.setTopicPaused(ctx, topic, true)
 }
 
+// ResumeTopic allows claims and wakes waiting subscribers.
 func (q *Queue) ResumeTopic(ctx context.Context, topic Topic) error {
 	return q.setTopicPaused(ctx, topic, false)
 }
@@ -498,10 +508,12 @@ func (q *Queue) setTopicPaused(ctx context.Context, topic Topic, paused bool) er
 	return nil
 }
 
+// PauseSubscriber stops new claims for one subscriber while retaining work.
 func (q *Queue) PauseSubscriber(ctx context.Context, topic Topic, subscriber string) error {
 	return q.setSubscriberPaused(ctx, topic, subscriber, true)
 }
 
+// ResumeSubscriber allows claims and wakes the selected subscriber.
 func (q *Queue) ResumeSubscriber(ctx context.Context, topic Topic, subscriber string) error {
 	return q.setSubscriberPaused(ctx, topic, subscriber, false)
 }
@@ -527,17 +539,14 @@ func (q *Queue) setSubscriberPaused(ctx context.Context, topic Topic, subscriber
 	return nil
 }
 
+// ListDeliveries returns a cursor page of active deliveries or, when
+// deadLetter is true, dead-lettered deliveries.
 func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber string, deadLetter bool, limit int, cursor string) (DeliveryPage, error) {
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	if err != nil {
 		return DeliveryPage{}, err
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > maxDeliveryPageSize {
-		limit = maxDeliveryPageSize
-	}
+	limit = normalizedResourcePageLimit(limit)
 	rows, err := q.db.listDeliveries(ctx, subscriberRuntime.id, deadLetter, limit+1, cursor)
 	if err != nil {
 		return DeliveryPage{}, err
@@ -565,6 +574,8 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 	return page, nil
 }
 
+// ReplayDeadLetters returns selected terminal deliveries to pending and resets
+// their failure budget while retaining prior error history.
 func (q *Queue) ReplayDeadLetters(ctx context.Context, topic Topic, subscriber string, messageIDs []string) []DeliveryResult {
 	_, subscriberRuntime, err := q.deliveryTarget(topic, subscriber)
 	results := make([]DeliveryResult, len(messageIDs))

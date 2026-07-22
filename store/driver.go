@@ -6,6 +6,7 @@ import (
 	"database/sql"
 )
 
+// Dialect selects backend-specific SQL and locking behavior.
 type Dialect string
 
 const (
@@ -13,6 +14,7 @@ const (
 	DialectPostgres Dialect = "postgres"
 )
 
+// Durability selects the backend commit-strength profile.
 type Durability string
 
 const (

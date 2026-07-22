@@ -37,7 +37,7 @@ const (
 	defaultHardStopTimeout  = time.Second
 	claimRetryMinimum       = 50 * time.Millisecond
 	claimRetryMaximum       = time.Second
-	maximumLeaseDuration    = 12 * time.Hour
+	maximumConcurrency      = 1000
 )
 
 // Client is the queue surface required by a Worker. ClaimWait implementations
@@ -221,26 +221,26 @@ func NewJSON[T any](
 }
 
 func normalizeOptions(options Options) (Options, error) {
-	if options.Concurrency < 0 || options.Concurrency > 1000 {
-		return Options{}, fmt.Errorf("%w: concurrency must be between 1 and 1000", ErrInvalidConfiguration)
+	if options.Concurrency < 0 || options.Concurrency > maximumConcurrency {
+		return Options{}, fmt.Errorf("%w: concurrency must be between 1 and %d", ErrInvalidConfiguration, maximumConcurrency)
 	}
 	if options.Concurrency == 0 {
 		options.Concurrency = 1
 	}
-	if options.BatchSize < 0 || options.BatchSize > 1000 {
-		return Options{}, fmt.Errorf("%w: batch size must be between 1 and 1000", ErrInvalidConfiguration)
+	if options.BatchSize < 0 || options.BatchSize > maximumConcurrency {
+		return Options{}, fmt.Errorf("%w: batch size must be between 1 and %d", ErrInvalidConfiguration, maximumConcurrency)
 	}
 	if options.BatchSize == 0 {
 		options.BatchSize = options.Concurrency
 	}
-	if options.LeaseDuration < 0 || options.LeaseDuration > maximumLeaseDuration {
-		return Options{}, fmt.Errorf("%w: lease duration must be between 1ms and 12h", ErrInvalidConfiguration)
+	if options.LeaseDuration < 0 || options.LeaseDuration > blockqueue.MaximumDeliveryLease {
+		return Options{}, fmt.Errorf("%w: lease duration must be between 1ms and %s", ErrInvalidConfiguration, blockqueue.MaximumDeliveryLease)
 	}
 	if options.LeaseDuration == 0 {
 		options.LeaseDuration = defaultLeaseDuration
 	}
 	if options.LeaseDuration < time.Millisecond {
-		return Options{}, fmt.Errorf("%w: lease duration must be between 1ms and 12h", ErrInvalidConfiguration)
+		return Options{}, fmt.Errorf("%w: lease duration must be between 1ms and %s", ErrInvalidConfiguration, blockqueue.MaximumDeliveryLease)
 	}
 	if options.HeartbeatInterval < 0 {
 		return Options{}, fmt.Errorf("%w: heartbeat interval cannot be negative", ErrInvalidConfiguration)
@@ -277,8 +277,8 @@ func normalizeOptions(options Options) (Options, error) {
 	if options.PausePollInterval == 0 {
 		options.PausePollInterval = defaultPausePoll
 	}
-	if options.CompletionBatchSize < 0 || options.CompletionBatchSize > 1000 {
-		return Options{}, fmt.Errorf("%w: completion batch size must be between 1 and 1000", ErrInvalidConfiguration)
+	if options.CompletionBatchSize < 0 || options.CompletionBatchSize > maximumConcurrency {
+		return Options{}, fmt.Errorf("%w: completion batch size must be between 1 and %d", ErrInvalidConfiguration, maximumConcurrency)
 	}
 	if options.CompletionBatchSize == 0 {
 		options.CompletionBatchSize = defaultCompletionBatch

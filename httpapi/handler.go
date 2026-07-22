@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -19,10 +20,16 @@ const (
 	maxRequestBody = 16 << 20
 	maxBatch       = 1000
 	defaultPoll    = 30 * time.Second
-	maximumPoll    = 60 * time.Second
-	maximumLease   = 12 * time.Hour
 )
 
+// MaximumPollDuration is the longest claim request accepted by the HTTP API.
+const MaximumPollDuration = 60 * time.Second
+
+// MinimumWriteTimeout leaves five seconds to encode and write a response after
+// the longest supported claim poll completes.
+const MinimumWriteTimeout = MaximumPollDuration + 5*time.Second
+
+// Handler implements the versioned queue HTTP contract over Service.
 type Handler struct {
 	service  Service
 	mapError ErrorMapper
@@ -43,6 +50,7 @@ type problem struct {
 
 type topicContextKey struct{}
 
+// New constructs an HTTP handler with an optional domain error mapper.
 func New(service Service, mapper ErrorMapper) *Handler {
 	if mapper == nil {
 		mapper = func(error) (int, string, string) {
@@ -52,6 +60,7 @@ func New(service Service, mapper ErrorMapper) *Handler {
 	return &Handler{service: service, mapError: mapper}
 }
 
+// Attach registers all version-relative routes on root.
 func (h *Handler) Attach(root chi.Router) {
 	root.Get("/topics", h.getTopics)
 	root.Post("/topics", h.createTopic)
@@ -106,7 +115,7 @@ func (h *Handler) createTopic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Name == "" || len(request.Name) > 150 || len(request.Subscribers) == 0 || len(request.Subscribers) > maxBatch {
-		h.validation(w, errors.New("topic name and 1-1000 subscribers are required"))
+		h.validation(w, fmt.Errorf("topic name and 1-%d subscribers are required", maxBatch))
 		return
 	}
 	topic, subscribers := request.domain()
@@ -138,7 +147,7 @@ func (h *Handler) createSubscribers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(request) == 0 || len(request) > maxBatch {
-		h.validation(w, errors.New("subscriber batch must contain 1-1000 items"))
+		h.validation(w, fmt.Errorf("subscriber batch must contain 1-%d items", maxBatch))
 		return
 	}
 	for _, subscriber := range request {
@@ -195,7 +204,7 @@ func (h *Handler) batchPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(request) == 0 || len(request) > maxBatch {
-		h.validation(w, errors.New("batch must contain 1-1000 messages"))
+		h.validation(w, fmt.Errorf("batch must contain 1-%d messages", maxBatch))
 		return
 	}
 	commands := make([]blockqueue.Message, len(request))
@@ -241,7 +250,7 @@ func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 	timeout := defaultPoll
 	if raw := r.URL.Query().Get(queryParamTimeout); raw != "" {
 		parsed, err := time.ParseDuration(raw)
-		if err != nil || parsed <= 0 || parsed > maximumPoll {
+		if err != nil || parsed <= 0 || parsed > MaximumPollDuration {
 			h.validation(w, errors.New("timeout must be >0 and <=60s"))
 			return
 		}
@@ -250,8 +259,8 @@ func (h *Handler) claim(w http.ResponseWriter, r *http.Request) {
 	lease := time.Duration(0)
 	if raw := r.URL.Query().Get(queryParamLease); raw != "" {
 		parsed, err := time.ParseDuration(raw)
-		if err != nil || parsed <= 0 || parsed > maximumLease {
-			h.validation(w, errors.New("lease must be >0 and <=12h"))
+		if err != nil || parsed <= 0 || parsed > blockqueue.MaximumDeliveryLease {
+			h.validation(w, fmt.Errorf("lease must be >0 and <=%s", blockqueue.MaximumDeliveryLease))
 			return
 		}
 		lease = parsed
@@ -341,8 +350,8 @@ func (h *Handler) lease(w http.ResponseWriter, r *http.Request) {
 		h.validation(w, err)
 		return
 	}
-	if extension > maximumLease {
-		h.validation(w, errors.New("lease extension must be <=12h"))
+	if extension > blockqueue.MaximumDeliveryLease {
+		h.validation(w, fmt.Errorf("lease extension must be <=%s", blockqueue.MaximumDeliveryLease))
 		return
 	}
 	expires, err := h.service.ExtendLease(r.Context(), topicFrom(r.Context()), chi.URLParam(r, urlParamSubscriberName), chi.URLParam(r, urlParamMessageID), request.ReceiptToken, extension)

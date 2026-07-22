@@ -103,6 +103,7 @@ type WriterOptions struct {
 	persist            func(context.Context, []writeRequest) (persistWriteResult, error)
 }
 
+// DefaultWriterOptions returns the bounded production writer defaults.
 func DefaultWriterOptions() WriterOptions {
 	return WriterOptions{
 		BatchSize:          100,

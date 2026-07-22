@@ -2,6 +2,7 @@ package blockqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -39,6 +40,19 @@ func TestCheckpointDeferralIsNilSafeAndBounded(t *testing.T) {
 	require.False(t, queue.shouldDeferCheckpoint(2*time.Minute))
 }
 
+func TestRunRejectsSQLiteCheckpointIntervalBelowMinimum(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "checkpoint-interval.db"), sqlite.Config{})
+	require.NoError(t, err)
+
+	queue := New(driver, Options{
+		CheckpointInterval: MinimumCheckpointInterval - time.Second,
+		DisableMetrics:     true,
+	})
+	err = queue.Run(context.Background())
+	require.ErrorContains(t, err, "sqlite checkpoint interval")
+	require.Equal(t, LifecycleStopped, queue.State())
+}
+
 func TestMaintenanceRetryWaitsForBackoffOrCancellation(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC()}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -71,6 +85,13 @@ func TestMaintenanceYieldUsesBoundedClockDelay(t *testing.T) {
 	}
 	clock.Advance(maintenanceYieldInterval)
 	require.True(t, <-done)
+}
+
+func TestSchedulerLeaseLossDoesNotDegradeHealth(t *testing.T) {
+	require.False(t, scheduleOccurrenceFailureIsUnhealthy(ErrScheduleLeaseLost, false))
+	require.False(t, scheduleOccurrenceFailureIsUnhealthy(ErrNoActiveSubscriber, true))
+	require.True(t, scheduleOccurrenceFailureIsUnhealthy(ErrNoActiveSubscriber, false))
+	require.True(t, scheduleOccurrenceFailureIsUnhealthy(errors.New("database unavailable"), false))
 }
 
 func TestRunResumesDeferredTopologyCleanupImmediately(t *testing.T) {
@@ -175,7 +196,11 @@ func TestSchedulerClaimFailureDoesNotHotSpin(t *testing.T) {
 	slog.SetDefault(slog.New(countingLogHandler{message: "scheduler claim failed", count: &failures}))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 	clock.Advance(time.Minute)
-	require.Eventually(t, func() bool { return failures.Load() == 1 }, time.Second, time.Millisecond)
+	// The fake-clock edge may happen before the scheduler has registered its
+	// timer under the race detector. The explicit hint makes the due-row check
+	// deterministic without changing the retry timing under test.
+	queue.signalScheduler()
+	require.Eventually(t, func() bool { return failures.Load() == 1 }, 3*time.Second, time.Millisecond)
 	time.Sleep(50 * time.Millisecond)
 	require.EqualValues(t, 1, failures.Load(), "scheduler retried before its backoff elapsed")
 	clock.Advance(time.Second)

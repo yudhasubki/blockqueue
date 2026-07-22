@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://pkg.go.dev/github.com/yudhasubki/blockqueue"><img src="https://pkg.go.dev/badge/github.com/yudhasubki/blockqueue.svg" alt="Go Reference"></a>
+  <a href="https://github.com/yudhasubki/blockqueue/actions/workflows/ci.yaml"><img src="https://github.com/yudhasubki/blockqueue/actions/workflows/ci.yaml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Go-1.25.12%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.25.12+">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 license"></a>
 </p>
@@ -25,7 +26,7 @@ Turso/libSQL support is experimental.
 > v0.2.0 is a clean schema break and requires a new, empty database. It does
 > not perform an in-place database upgrade from v0.1.
 
-## What v0.2.0 provides
+## Core capabilities
 
 - Durable publish is the default in the Go API; explicit async publish is
   available when admission latency matters more than crash durability.
@@ -402,6 +403,9 @@ transaction.
 Processed deliveries are retained for seven days and schedule-run history for
 30 days by default. Dead letters are retained indefinitely unless
 `Options.DeadLetterRetention` is set explicitly.
+SQLite checkpoint intervals use a 30-second default; a nonzero
+`Options.CheckpointInterval` below `blockqueue.MinimumCheckpointInterval` is
+rejected at startup instead of being silently clamped.
 
 Core Prometheus collectors cover persistence outcomes and lag, pending message
 and byte budgets, flush behavior, delivery operations, checkpoints, scheduler
@@ -409,6 +413,19 @@ lag and health, lease-reaper health, PostgreSQL notification-listener health,
 and bounded maintenance passes. Supply `Options.MetricRegisterer` to isolate
 collectors in an application-owned registry, or set `Options.DisableMetrics`
 for a fully no-op metrics path.
+
+## Compatibility policy
+
+BlockQueue is pre-1.0. The root package, `worker`, `httpapi`, `store`,
+`store/sqlite`, and `store/postgres` are supported public APIs. Patch releases
+within a minor line preserve their source and persistence contracts. A minor
+release may make a breaking change only when it is called out in the changelog
+and accompanied by migration guidance.
+
+The HTTP `/v1` contract remains compatible throughout the v0.3 release line;
+additive fields and endpoints may be introduced. `store/turso` is experimental
+and is limited to smoke-test coverage. Internal packages, dashboard assets, and
+the standalone binary's implementation details are not import contracts.
 
 ## Development
 
@@ -443,12 +460,15 @@ For component boundaries and lock ownership, see
 
 ## Roadmap
 
-- v0.3: typed workers, bounded concurrency, lease heartbeats, transactional
-  completion, cancellation, batched completion, metrics, and group supervision.
 - v0.3.x: release hardening and focused test helpers without schema changes.
 - v0.4: tracing hooks and cross-language HTTP client ergonomics.
 - Later: versioned workflow/DAG orchestration as a separate layer over the
   queue, after the scheduler and worker runtime have production evidence.
+
+## Security
+
+Report suspected vulnerabilities through
+[GitHub private vulnerability reporting](SECURITY.md), not a public issue.
 
 ## License
 

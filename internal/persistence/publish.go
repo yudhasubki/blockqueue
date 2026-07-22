@@ -57,8 +57,8 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 	}
 	if external == nil {
 		for _, count := range messagesByTopic {
-			for remaining := count; remaining > 0; remaining -= min(200, remaining) {
-				rows := min(200, remaining)
+			for remaining := count; remaining > 0; remaining -= min(deliveryFanoutChunkSize, remaining) {
+				rows := min(deliveryFanoutChunkSize, remaining)
 				if _, exists := deliveryStatements[rows]; exists {
 					continue
 				}
@@ -234,7 +234,7 @@ func (d *db) persistWriteRequestsWithTx(ctx context.Context, external *sql.Tx, r
 		}
 		for topicID, topicRequests := range byTopic {
 			for remaining := topicRequests; len(remaining) > 0; {
-				take := min(200, len(remaining)) // 801 bind variables including topic.
+				take := min(deliveryFanoutChunkSize, len(remaining))
 				chunk := remaining[:take]
 				remaining = remaining[take:]
 				args := make([]any, 0, len(chunk)*4+1)

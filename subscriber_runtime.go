@@ -3,12 +3,11 @@ package blockqueue
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sync/atomic"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/yudhasubki/blockqueue/internal/persistence"
+	"github.com/yudhasubki/blockqueue/internal/subscriberconfig"
 )
 
 var (
@@ -16,15 +15,7 @@ var (
 	ErrSubscriberDeleted  = errors.New("subscriber was deleted")
 )
 
-type subscriberOptions struct {
-	MaxAttempts        int
-	VisibilityDuration time.Duration
-	DequeueBatchSize   int
-	RetryInitialDelay  time.Duration
-	RetryMaxDelay      time.Duration
-	RetryMultiplier    float64
-	RetryJitter        float64
-}
+type subscriberOptions = subscriberconfig.Parsed
 
 // subscriberRuntime is immutable except for pause/deletion flags. It owns no
 // goroutine and no claim mutex: PostgreSQL row locks and SQLite's immediate
@@ -54,59 +45,7 @@ func newSubscriberRuntime(subscriber Subscriber) (*subscriberRuntime, error) {
 }
 
 func parseSubscriberOptions(subscriber Subscriber) (subscriberOptions, error) {
-	option := subscriber.Options.normalized()
-	visibilityDuration, err := time.ParseDuration(option.VisibilityDuration)
-	if err != nil || visibilityDuration <= 0 {
-		return subscriberOptions{}, errors.New("subscriber visibility_duration must be positive")
-	}
-	if visibilityDuration > maximumDeliveryLease {
-		return subscriberOptions{}, errors.New("subscriber visibility_duration cannot exceed 12h")
-	}
-	if visibilityDuration < time.Millisecond {
-		return subscriberOptions{}, errors.New("subscriber visibility_duration must be at least 1ms")
-	}
-	maxAttempts := option.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 3
-	}
-	dequeueBatchSize := option.DequeueBatchSize
-	if dequeueBatchSize <= 0 {
-		dequeueBatchSize = 10
-	}
-	if dequeueBatchSize > 1000 {
-		return subscriberOptions{}, errors.New("subscriber dequeue_batch_size exceeds 1000")
-	}
-	retryInitialDelay, err := time.ParseDuration(option.RetryPolicy.InitialDelay)
-	if err != nil || retryInitialDelay < 0 {
-		return subscriberOptions{}, errors.New("subscriber retry initial_delay must be non-negative")
-	}
-	if retryInitialDelay > 0 && retryInitialDelay < time.Millisecond {
-		return subscriberOptions{}, errors.New("subscriber retry initial_delay must be zero or at least 1ms")
-	}
-	retryMaxDelay, err := time.ParseDuration(option.RetryPolicy.MaxDelay)
-	if err != nil || retryMaxDelay < retryInitialDelay {
-		return subscriberOptions{}, errors.New("subscriber retry max_delay must be at least initial_delay")
-	}
-	if retryMaxDelay > 0 && retryMaxDelay < time.Millisecond {
-		return subscriberOptions{}, errors.New("subscriber retry max_delay must be zero or at least 1ms")
-	}
-	if math.IsNaN(option.RetryPolicy.Multiplier) || math.IsInf(option.RetryPolicy.Multiplier, 0) ||
-		option.RetryPolicy.Multiplier < 1 {
-		return subscriberOptions{}, errors.New("subscriber retry multiplier must be at least 1")
-	}
-	if math.IsNaN(option.RetryPolicy.Jitter) || math.IsInf(option.RetryPolicy.Jitter, 0) ||
-		option.RetryPolicy.Jitter < 0 || option.RetryPolicy.Jitter > 1 {
-		return subscriberOptions{}, errors.New("subscriber retry jitter must be between 0 and 1")
-	}
-	return subscriberOptions{
-		MaxAttempts:        maxAttempts,
-		VisibilityDuration: visibilityDuration,
-		DequeueBatchSize:   dequeueBatchSize,
-		RetryInitialDelay:  retryInitialDelay,
-		RetryMaxDelay:      retryMaxDelay,
-		RetryMultiplier:    option.RetryPolicy.Multiplier,
-		RetryJitter:        option.RetryPolicy.Jitter,
-	}, nil
+	return subscriberconfig.Parse(toSubscriberConfigOptions(subscriber.Options))
 }
 
 func (subscriber *subscriberRuntime) notify() {

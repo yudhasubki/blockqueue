@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/yudhasubki/blockqueue/internal/subscriberconfig"
 )
 
+// Topic identifies a fan-out stream. Names are unique among active topics.
 type Topic struct {
 	ID        uuid.UUID  `db:"id" json:"id"`
 	Name      string     `db:"name" json:"name"`
@@ -17,18 +19,22 @@ type Topic struct {
 	DeletedAt *time.Time `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
+// Topics is a collection of queue topics.
 type Topics []Topic
 
+// TopicPage is one cursor-paginated page of topics.
 type TopicPage struct {
 	Topics     Topics `json:"topics"`
 	NextCursor string `json:"next_cursor,omitempty"`
 }
 
+// TopicFilter selects topics for GetTopics.
 type TopicFilter struct {
 	Names       []string
 	WithDeleted bool
 }
 
+// Subscriber defines one independently leased delivery stream for a topic.
 type Subscriber struct {
 	ID        uuid.UUID         `db:"id" json:"id"`
 	TopicID   uuid.UUID         `db:"topic_id" json:"topic_id"`
@@ -40,6 +46,7 @@ type Subscriber struct {
 	DeletedAt *time.Time        `db:"deleted_at" json:"deleted_at,omitempty"`
 }
 
+// Subscribers is a collection of topic subscribers.
 type Subscribers []Subscriber
 
 func (subscribers Subscribers) mapByTopic() map[uuid.UUID]Subscribers {
@@ -56,6 +63,8 @@ type subscriberFilter struct {
 	WithDeleted bool
 }
 
+// SubscriberOptions controls retries, lease visibility, and claim batching.
+// Zero fields are normalized to safe defaults when the subscriber is created.
 type SubscriberOptions struct {
 	MaxAttempts        int         `json:"max_attempts"`
 	VisibilityDuration string      `json:"visibility_duration"`
@@ -74,32 +83,34 @@ type RetryPolicy struct {
 }
 
 func (options SubscriberOptions) normalized() SubscriberOptions {
-	if options.MaxAttempts <= 0 {
-		options.MaxAttempts = 3
-	}
-	if options.VisibilityDuration == "" {
-		options.VisibilityDuration = "5m"
-	}
-	if options.DequeueBatchSize <= 0 {
-		options.DequeueBatchSize = 10
-	}
-	if options.RetryPolicy.InitialDelay == "" {
-		options.RetryPolicy.InitialDelay = "1s"
-	}
-	if options.RetryPolicy.MaxDelay == "" {
-		options.RetryPolicy.MaxDelay = "1h"
-	}
-	if options.RetryPolicy.Multiplier == 0 {
-		options.RetryPolicy.Multiplier = 2
-	}
-	if options.RetryPolicy.DisableJitter {
-		options.RetryPolicy.Jitter = 0
-	} else if options.RetryPolicy.Jitter == 0 {
-		options.RetryPolicy.Jitter = 0.2
-	}
-	return options
+	return fromSubscriberConfigOptions(subscriberconfig.Normalize(toSubscriberConfigOptions(options)))
 }
 
+func toSubscriberConfigOptions(options SubscriberOptions) subscriberconfig.Options {
+	return subscriberconfig.Options{
+		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize: options.DequeueBatchSize,
+		RetryPolicy: subscriberconfig.RetryPolicy{
+			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
+			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			DisableJitter: options.RetryPolicy.DisableJitter,
+		},
+	}
+}
+
+func fromSubscriberConfigOptions(options subscriberconfig.Options) SubscriberOptions {
+	return SubscriberOptions{
+		MaxAttempts: options.MaxAttempts, VisibilityDuration: options.VisibilityDuration,
+		DequeueBatchSize: options.DequeueBatchSize,
+		RetryPolicy: RetryPolicy{
+			InitialDelay: options.RetryPolicy.InitialDelay, MaxDelay: options.RetryPolicy.MaxDelay,
+			Multiplier: options.RetryPolicy.Multiplier, Jitter: options.RetryPolicy.Jitter,
+			DisableJitter: options.RetryPolicy.DisableJitter,
+		},
+	}
+}
+
+// Value implements driver.Valuer using the normalized JSON representation.
 func (options SubscriberOptions) Value() (driver.Value, error) {
 	encoded, err := json.Marshal(options.normalized())
 	if err != nil {
@@ -108,6 +119,7 @@ func (options SubscriberOptions) Value() (driver.Value, error) {
 	return string(encoded), nil
 }
 
+// Scan implements sql.Scanner for a persisted JSON options value.
 func (options *SubscriberOptions) Scan(source any) error {
 	if source == nil {
 		*options = SubscriberOptions{}.normalized()
@@ -129,6 +141,7 @@ func (options *SubscriberOptions) Scan(source any) error {
 	return nil
 }
 
+// SubscriberStatus summarizes pending and currently leased work.
 type SubscriberStatus struct {
 	TopicID            uuid.UUID `json:"topic_id"`
 	Name               string    `json:"name"`
@@ -136,13 +149,16 @@ type SubscriberStatus struct {
 	UnackedMessage     int       `json:"unacked_message"`
 }
 
+// SubscriberStatuses is a collection of subscriber status summaries.
 type SubscriberStatuses []SubscriberStatus
 
+// SubscriberStatusPage is one cursor-paginated subscriber status page.
 type SubscriberStatusPage struct {
 	Subscribers SubscriberStatuses `json:"subscribers"`
 	NextCursor  string             `json:"next_cursor,omitempty"`
 }
 
+// Message is a canonical publish request shared by all active subscribers.
 type Message struct {
 	Message        string            `json:"message"`
 	Headers        map[string]string `json:"headers,omitempty"`
@@ -153,6 +169,7 @@ type Message struct {
 	ScheduleAt     string            `json:"schedule_at,omitempty"`
 }
 
+// PublishReceipt reports a stable message identity and persistence state.
 type PublishReceipt struct {
 	MessageID   string    `json:"message_id"`
 	State       string    `json:"state"`
@@ -160,6 +177,7 @@ type PublishReceipt struct {
 	ScheduledAt time.Time `json:"scheduled_at"`
 }
 
+// PublishReceipts contains one receipt per input message, in input order.
 type PublishReceipts []PublishReceipt
 
 // MessageStatus is the canonical message and the current state of every
@@ -190,6 +208,7 @@ type MessageDeliveryStatus struct {
 	CancelReason  string     `db:"cancel_reason" json:"cancel_reason,omitempty"`
 }
 
+// Delivery is one subscriber-specific view of a canonical message.
 type Delivery struct {
 	ID             string            `json:"id"`
 	Message        string            `json:"message"`
@@ -207,8 +226,10 @@ type Delivery struct {
 	CancelReason   string            `json:"cancel_reason,omitempty"`
 }
 
+// Deliveries is a collection of claimed or listed deliveries.
 type Deliveries []Delivery
 
+// DeliveryResult reports the per-item outcome of a batch operation.
 type DeliveryResult struct {
 	MessageID    string `json:"message_id"`
 	SubscriberID string `json:"subscriber_id,omitempty"`
@@ -216,16 +237,19 @@ type DeliveryResult struct {
 	Error        string `json:"error,omitempty"`
 }
 
+// DeliveryPage is one cursor-paginated page of active or dead-letter work.
 type DeliveryPage struct {
 	Messages   Deliveries `json:"messages"`
 	NextCursor string     `json:"next_cursor,omitempty"`
 }
 
+// BatchAckItem identifies one receipt-fenced acknowledgement.
 type BatchAckItem struct {
 	MessageID    string
 	ReceiptToken string
 }
 
+// BatchNackItem identifies one receipt-fenced failure and optional retry delay.
 type BatchNackItem struct {
 	MessageID    string
 	ReceiptToken string
@@ -250,10 +274,12 @@ type DeliveryErrorPage struct {
 	NextCursor string          `json:"next_cursor,omitempty"`
 }
 
+// NewTopic creates a topic value with a new UUID.
 func NewTopic(name string) Topic {
 	return Topic{ID: uuid.New(), Name: name}
 }
 
+// NewSubscriber creates a normalized subscriber value with a new UUID.
 func NewSubscriber(topic Topic, name string, options SubscriberOptions) Subscriber {
 	return Subscriber{
 		ID: uuid.New(), TopicID: topic.ID, Name: name, Options: options.normalized(),

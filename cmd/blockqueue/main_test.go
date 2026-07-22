@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	blockqueue "github.com/yudhasubki/blockqueue"
+	"github.com/yudhasubki/blockqueue/httpapi"
 )
 
 func TestReadConfigFileExpandsEnvironmentAndAppliesDefaults(t *testing.T) {
@@ -131,16 +134,16 @@ func TestExampleConfigurationsParse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if config.Http.WriteTimeout < 65*time.Second {
-				t.Fatalf("write_timeout = %s, want at least 65s", config.Http.WriteTimeout)
+			if config.Http.WriteTimeout < httpapi.MinimumWriteTimeout {
+				t.Fatalf("write_timeout = %s, want at least %s", config.Http.WriteTimeout, httpapi.MinimumWriteTimeout)
 			}
 			if config.Http.Driver == storageDriverSQLite {
 				interval, err := configuredCheckpointInterval(config)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if interval < 30*time.Second {
-					t.Fatalf("checkpoint_interval = %s, want at least 30s", interval)
+				if interval < blockqueue.MinimumCheckpointInterval {
+					t.Fatalf("checkpoint_interval = %s, want at least %s", interval, blockqueue.MinimumCheckpointInterval)
 				}
 			}
 		})

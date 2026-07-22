@@ -28,8 +28,10 @@ var (
 	ErrResourceConflict   = persistence.ErrResourceConflict
 )
 
+// LifecycleState describes whether a Queue accepts work or is shutting down.
 type LifecycleState uint32
 
+// Queue lifecycle states progress monotonically from new to stopped.
 const (
 	LifecycleNew LifecycleState = iota
 	LifecycleRunning
@@ -74,6 +76,8 @@ type topicRegistry struct {
 	byID   map[uuid.UUID]*topicRuntime
 }
 
+// Options configures queue persistence, maintenance, shutdown, and metrics.
+// Zero values select the documented production defaults.
 type Options struct {
 	Writer               WriterOptions
 	CheckpointInterval   time.Duration         // Default: 30s
@@ -87,6 +91,8 @@ type Options struct {
 	MetricRegisterer     prometheus.Registerer // Optional collector registry; defaults to Prometheus global registry
 }
 
+// New constructs a queue that owns driver. Call Run before publishing and
+// Shutdown when the application stops.
 func New(driver store.Driver, opt Options) *Queue {
 	if !opt.DisableMetrics {
 		if err := metric.Register(opt.MetricRegisterer); err != nil {

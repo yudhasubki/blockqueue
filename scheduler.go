@@ -29,6 +29,7 @@ var (
 	ErrScheduleLeaseLost = persistence.ErrScheduleLeaseLost
 )
 
+// Clock supplies scheduler time and is injectable for deterministic tests.
 type Clock interface {
 	Now() time.Time
 	After(time.Duration) <-chan time.Time
@@ -57,11 +58,11 @@ func validateScheduleInput(input ScheduleInput, now time.Time) (ScheduleInput, c
 	if err != nil {
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: %v", ErrInvalidPublish, err)
 	}
-	if input.Priority < -1000 || input.Priority > 1000 || len(input.Message) > 1<<20 {
+	if input.Priority < MinimumPriority || input.Priority > MaximumPriority || len(input.Message) > MaximumMessageBytes {
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: invalid schedule message or priority", ErrInvalidPublish)
 	}
-	if len([]byte(input.CorrelationID)) > 255 {
-		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: correlation_id exceeds 255 bytes", ErrInvalidPublish)
+	if len([]byte(input.CorrelationID)) > MaximumCorrelationIDBytes {
+		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: correlation_id exceeds %d bytes", ErrInvalidPublish, MaximumCorrelationIDBytes)
 	}
 	if input.MisfirePolicy == "" {
 		input.MisfirePolicy = ScheduleMisfirePolicyFireOnce
@@ -76,7 +77,7 @@ func validateScheduleInput(input ScheduleInput, now time.Time) (ScheduleInput, c
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: unsupported overlap_policy", ErrInvalidPublish)
 	}
 	headers, err := json.Marshal(input.Headers)
-	if err != nil || len(headers) > 16<<10 {
+	if err != nil || len(headers) > MaximumHeadersBytes {
 		return input, cronExpression{}, time.Time{}, nil, fmt.Errorf("%w: invalid schedule headers", ErrInvalidPublish)
 	}
 	if input.Headers == nil {
@@ -89,6 +90,7 @@ func validateScheduleInput(input ScheduleInput, now time.Time) (ScheduleInput, c
 	return input, parsed, next, headers, nil
 }
 
+// CreateSchedule persists a recurring cron publish and computes its next run.
 func (q *Queue) CreateSchedule(ctx context.Context, topic Topic, input ScheduleInput) (Schedule, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -120,6 +122,7 @@ func (q *Queue) CreateSchedule(ctx context.Context, topic Topic, input ScheduleI
 	return q.GetSchedule(ctx, topic, schedule.ID)
 }
 
+// GetSchedule returns one schedule by ID within topic.
 func (q *Queue) GetSchedule(ctx context.Context, topic Topic, scheduleID string) (Schedule, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -131,6 +134,8 @@ func (q *Queue) GetSchedule(ctx context.Context, topic Topic, scheduleID string)
 	return q.db.getSchedule(ctx, runtime.id, scheduleID)
 }
 
+// ListSchedules returns every schedule for topic. Prefer ListSchedulesPage for
+// bounded operator-facing enumeration.
 func (q *Queue) ListSchedules(ctx context.Context, topic Topic) ([]Schedule, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -139,6 +144,7 @@ func (q *Queue) ListSchedules(ctx context.Context, topic Topic) ([]Schedule, err
 	return q.db.listSchedules(ctx, runtime.id)
 }
 
+// ListSchedulesPage returns a bounded cursor page ordered by name and ID.
 func (q *Queue) ListSchedulesPage(ctx context.Context, topic Topic, limit int, cursor string) (SchedulePage, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -169,6 +175,7 @@ func (q *Queue) ListSchedulesPage(ctx context.Context, topic Topic, limit int, c
 	return page, nil
 }
 
+// UpdateSchedule replaces a schedule when expectedVersion matches.
 func (q *Queue) UpdateSchedule(ctx context.Context, topic Topic, scheduleID string, expectedVersion int, input ScheduleInput) (Schedule, error) {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -195,6 +202,7 @@ func (q *Queue) UpdateSchedule(ctx context.Context, topic Topic, scheduleID stri
 	return q.GetSchedule(ctx, topic, scheduleID)
 }
 
+// DeleteSchedule removes one recurring schedule.
 func (q *Queue) DeleteSchedule(ctx context.Context, topic Topic, scheduleID string) error {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -210,6 +218,7 @@ func (q *Queue) DeleteSchedule(ctx context.Context, topic Topic, scheduleID stri
 	return nil
 }
 
+// PauseSchedule changes whether future occurrences may be claimed.
 func (q *Queue) PauseSchedule(ctx context.Context, topic Topic, scheduleID string, paused bool) error {
 	runtime, ok := q.getTopicRuntime(topic)
 	if !ok {
@@ -225,6 +234,8 @@ func (q *Queue) PauseSchedule(ctx context.Context, topic Topic, scheduleID strin
 	return nil
 }
 
+// RunScheduleNow publishes an immediate occurrence. force bypasses overlap
+// protection but preserves occurrence idempotency.
 func (q *Queue) RunScheduleNow(ctx context.Context, topic Topic, scheduleID string, force bool) (ScheduleRun, error) {
 	schedule, err := q.GetSchedule(ctx, topic, scheduleID)
 	if err != nil {
@@ -242,16 +253,12 @@ func (q *Queue) RunScheduleNow(ctx context.Context, topic Topic, scheduleID stri
 	return run, err
 }
 
+// ScheduleRunHistory returns newest occurrences first using an opaque cursor.
 func (q *Queue) ScheduleRunHistory(ctx context.Context, topic Topic, scheduleID string, limit int, cursor string) (ScheduleRunPage, error) {
 	if _, err := q.GetSchedule(ctx, topic, scheduleID); err != nil {
 		return ScheduleRunPage{}, err
 	}
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
+	limit = normalizedResourcePageLimit(limit)
 	var before time.Time
 	var beforeID string
 	if cursor != "" {
@@ -353,13 +360,13 @@ func (q *Queue) startScheduler() {
 					return
 				}
 				ownershipLost := errors.Is(err, ErrScheduleLeaseLost)
-				handled := ownershipLost
+				permanentFailureRecorded := false
 				if !ownershipLost && permanentScheduleOccurrenceError(err) {
 					_, recordErr := q.recordScheduleFailure(
 						q.serverCtx, schedule, schedule.NextRunAt, true, err,
 					)
 					if recordErr == nil {
-						handled = true
+						permanentFailureRecorded = true
 					} else {
 						err = errors.Join(err, recordErr)
 					}
@@ -369,7 +376,7 @@ func (q *Queue) startScheduler() {
 						metric.SchedulerOperationPublished, metric.OutcomeFailed,
 					).Inc()
 				}
-				if !handled {
+				if scheduleOccurrenceFailureIsUnhealthy(err, permanentFailureRecorded) {
 					q.setSchedulerHealthy(false)
 				}
 				if ownershipLost {
@@ -401,6 +408,13 @@ func permanentScheduleOccurrenceError(err error) bool {
 	return errors.Is(err, ErrNoActiveSubscriber) ||
 		errors.Is(err, ErrIdempotencyConflict) ||
 		errors.Is(err, ErrInvalidPublish)
+}
+
+func scheduleOccurrenceFailureIsUnhealthy(err error, permanentFailureRecorded bool) bool {
+	if errors.Is(err, ErrScheduleLeaseLost) {
+		return false
+	}
+	return !permanentFailureRecorded || !permanentScheduleOccurrenceError(err)
 }
 
 func (q *Queue) recordScheduleFailure(

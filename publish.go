@@ -16,6 +16,7 @@ func (q *Queue) Publish(ctx context.Context, topic Topic, request Message) (Publ
 	return q.publishOne(ctx, topic, request, true)
 }
 
+// BatchPublish validates the entire batch and waits for one atomic commit.
 func (q *Queue) BatchPublish(ctx context.Context, topic Topic, requests []Message) (PublishReceipts, error) {
 	return q.publishRequests(ctx, topic, requests, true)
 }
@@ -26,6 +27,7 @@ func (q *Queue) PublishDurable(ctx context.Context, topic Topic, request Message
 	return q.Publish(ctx, topic, request)
 }
 
+// BatchPublishDurable is the explicit durable alias for BatchPublish.
 func (q *Queue) BatchPublishDurable(ctx context.Context, topic Topic, requests []Message) (PublishReceipts, error) {
 	return q.publishRequests(ctx, topic, requests, true)
 }
@@ -36,6 +38,8 @@ func (q *Queue) PublishAsync(ctx context.Context, topic Topic, request Message) 
 	return q.publishOne(ctx, topic, request, false)
 }
 
+// BatchPublishAsync validates and admits an entire batch without waiting for
+// its database commit.
 func (q *Queue) BatchPublishAsync(ctx context.Context, topic Topic, requests []Message) (PublishReceipts, error) {
 	return q.publishRequests(ctx, topic, requests, false)
 }
@@ -189,17 +193,17 @@ func (q *Queue) publishRequests(ctx context.Context, topic Topic, requests []Mes
 }
 
 func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (writeRequest, time.Time, error) {
-	if len(request.Message) > 1<<20 {
-		return writeRequest{}, time.Time{}, fmt.Errorf("%w: message exceeds 1MiB", ErrInvalidPublish)
+	if len(request.Message) > MaximumMessageBytes {
+		return writeRequest{}, time.Time{}, fmt.Errorf("%w: message exceeds %d bytes", ErrInvalidPublish, MaximumMessageBytes)
 	}
-	if request.Priority < -1000 || request.Priority > 1000 {
-		return writeRequest{}, time.Time{}, fmt.Errorf("%w: priority must be between -1000 and 1000", ErrInvalidPublish)
+	if request.Priority < MinimumPriority || request.Priority > MaximumPriority {
+		return writeRequest{}, time.Time{}, fmt.Errorf("%w: priority must be between %d and %d", ErrInvalidPublish, MinimumPriority, MaximumPriority)
 	}
-	if len([]byte(request.IdempotencyKey)) > 128 {
-		return writeRequest{}, time.Time{}, fmt.Errorf("%w: idempotency_key exceeds 128 bytes", ErrInvalidPublish)
+	if len([]byte(request.IdempotencyKey)) > MaximumIdempotencyKeyBytes {
+		return writeRequest{}, time.Time{}, fmt.Errorf("%w: idempotency_key exceeds %d bytes", ErrInvalidPublish, MaximumIdempotencyKeyBytes)
 	}
-	if len([]byte(request.CorrelationID)) > 255 {
-		return writeRequest{}, time.Time{}, fmt.Errorf("%w: correlation_id exceeds 255 bytes", ErrInvalidPublish)
+	if len([]byte(request.CorrelationID)) > MaximumCorrelationIDBytes {
+		return writeRequest{}, time.Time{}, fmt.Errorf("%w: correlation_id exceeds %d bytes", ErrInvalidPublish, MaximumCorrelationIDBytes)
 	}
 	if request.Delay != "" && request.ScheduleAt != "" {
 		return writeRequest{}, time.Time{}, fmt.Errorf("%w: delay and schedule_at are mutually exclusive", ErrInvalidPublish)
@@ -238,7 +242,7 @@ func buildWriteRequest(topicID uuid.UUID, request Message, now time.Time) (write
 			return writeRequest{}, time.Time{}, fmt.Errorf("%w: invalid headers", ErrInvalidPublish)
 		}
 	}
-	if len(headers) > 16<<10 {
+	if len(headers) > MaximumHeadersBytes {
 		return writeRequest{}, time.Time{}, fmt.Errorf("%w: headers exceed 16KiB", ErrInvalidPublish)
 	}
 	messageID := newMessageIDAt(now)
