@@ -37,6 +37,9 @@ pre-1.0; minor releases can contain breaking changes when called out here.
   duplicate fan-out or false failure reports.
 - Shutdown aborts an undrainable writer and reaches `stopped` without leaking
   admitted work ownership.
+- Durable completion releases its pending-budget reservation before waking the
+  caller, so a successful return cannot briefly report committed work as
+  pending.
 - Delivery reaping and scheduler retries yield after write failures instead of
   hot-spinning.
 - Dashboard parsing follows the cursor-page HTTP response envelope.

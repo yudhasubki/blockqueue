@@ -711,6 +711,7 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, result persist
 	offset := 0
 	for _, admission := range admissions {
 		n := len(admission.requests)
+		w.release(admission.messages, admission.bytes)
 		if admission.result != nil {
 			outcome := writeOutcome{err: outcomeErr}
 			if outcomeErr == nil {
@@ -719,7 +720,6 @@ func (w *writer) completeAdmissions(admissions []*writeAdmission, result persist
 			}
 			admission.result <- outcome
 		}
-		w.release(admission.messages, admission.bytes)
 		offset += n
 	}
 
