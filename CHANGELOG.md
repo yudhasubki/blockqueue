@@ -30,6 +30,8 @@ in a migration guide.
 
 ### Fixed
 
+- Updated `golang.org/x/text` to `v0.39.0` to remediate GO-2026-5970 in
+  reachable PostgreSQL connection paths.
 - Ambiguous publish commits reconcile by stable message identity without
   duplicate fan-out or false failure reports.
 - Shutdown aborts an undrainable writer and reaches `stopped` without leaking
