@@ -132,8 +132,7 @@ func run() error {
 		return fmt.Errorf("create notification worker: %w", err)
 	}
 
-	group, err := blockworker.New
-	\\Group(fulfillmentWorker, notificationWorker)
+	group, err := blockworker.NewGroup(fulfillmentWorker, notificationWorker)
 	if err != nil {
 		return fmt.Errorf("create worker group: %w", err)
 	}
