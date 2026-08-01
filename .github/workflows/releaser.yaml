@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# A release candidate and its final release can intentionally point at the
+# same commit. Do not let GoReleaser infer the wrong tag from Git history.
+env:
+  GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
