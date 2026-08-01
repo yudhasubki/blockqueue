@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -94,11 +95,26 @@ type Options struct {
 // New constructs a queue that owns driver. Call Run before publishing and
 // Shutdown when the application stops.
 func New(driver store.Driver, opt Options) *Queue {
+	queue, err := NewChecked(driver, opt)
+	if err == nil {
+		return queue
+	}
+	slog.Error("register blockqueue metrics", "error", err)
+	return newQueue(driver, opt)
+}
+
+// NewChecked constructs a queue and returns metric registration failures.
+// The caller retains ownership of driver when an error is returned.
+func NewChecked(driver store.Driver, opt Options) (*Queue, error) {
 	if !opt.DisableMetrics {
 		if err := metric.Register(opt.MetricRegisterer); err != nil {
-			slog.Error("register blockqueue metrics", "error", err)
+			return nil, fmt.Errorf("register blockqueue metrics: %w", err)
 		}
 	}
+	return newQueue(driver, opt), nil
+}
+
+func newQueue(driver store.Driver, opt Options) *Queue {
 	baseCtx, cancel := context.WithCancel(context.Background())
 	queue := &Queue{
 		db:              newDb(driver),

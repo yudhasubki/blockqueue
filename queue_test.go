@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/store/sqlite"
 )
@@ -463,6 +464,23 @@ func TestRunPreservesPartialWriterOptions(t *testing.T) {
 	require.Equal(t, 7*time.Millisecond, queue.writer.retryMin)
 	require.Equal(t, 11*time.Millisecond, queue.writer.retryMax)
 	require.Equal(t, DefaultWriterOptions().BatchSize, queue.writer.batchSize)
+}
+
+func TestNewCheckedReturnsMetricRegistrationCollision(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "metric-collision.db"), sqlite.Config{})
+	require.NoError(t, err)
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "blockqueue",
+		Name:      "persistence_total",
+		Help:      "Persistence outcomes.",
+	}, []string{"result"}))
+
+	queue, err := NewChecked(driver, Options{MetricRegisterer: registry})
+	require.Nil(t, queue)
+	require.ErrorContains(t, err, "register blockqueue metrics")
+	require.NoError(t, driver.DB().Ping(), "constructor error must not close the caller's driver")
+	require.NoError(t, driver.Close())
 }
 
 func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {

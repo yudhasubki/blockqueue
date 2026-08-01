@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/internal/headercodec"
 	"github.com/yudhasubki/blockqueue/internal/textlimit"
 )
 
@@ -71,6 +72,11 @@ func (d *db) claimDeliveries(ctx context.Context, subscriberID uuid.UUID, limit 
 		}
 		if len(candidates) == 0 {
 			return nil
+		}
+		for _, candidate := range candidates {
+			if _, err := headercodec.Decode(candidate.Headers); err != nil {
+				return fmt.Errorf("message %s: decode persisted headers: %w", candidate.MessageID, err)
+			}
 		}
 
 		leaseExpires := now.Add(lease)

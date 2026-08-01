@@ -24,15 +24,18 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Topics"
+						"$ref": "#/components/responses/TopicPage"
 					}
 				}
 			},
 			"post": {
 				"operationId": "createTopic",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Topic"
+				},
 				"responses": {
 					"201": {
-						"description": "Topic created"
+						"$ref": "#/components/responses/Topic"
 					},
 					"400": {
 						"$ref": "#/components/responses/Problem"
@@ -46,6 +49,9 @@
 		"/topics/{topicName}/messages": {
 			"post": {
 				"operationId": "publishMessage",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Publish"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -53,19 +59,10 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Persisted"
+						"$ref": "#/components/responses/PublishReceipt"
 					},
 					"202": {
-						"description": "Admitted",
-						"headers": {
-							"Location": {
-								"description": "Canonical message status resource",
-								"schema": {
-									"type": "string",
-									"format": "uri-reference"
-								}
-							}
-						}
+						"$ref": "#/components/responses/AdmittedPublishReceipt"
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
@@ -79,6 +76,9 @@
 		"/topics/{topicName}/messages/batch": {
 			"post": {
 				"operationId": "publishMessageBatch",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/PublishBatch"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -86,10 +86,10 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Persisted receipts"
+						"$ref": "#/components/responses/PublishReceipts"
 					},
 					"202": {
-						"description": "Admitted receipts"
+						"$ref": "#/components/responses/PublishReceipts"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -110,7 +110,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Canonical message and delivery states"
+						"$ref": "#/components/responses/MessageStatus"
 					},
 					"404": {
 						"$ref": "#/components/responses/Problem"
@@ -121,6 +121,9 @@
 		"/topics/{topicName}/messages/{messageID}/cancel": {
 			"post": {
 				"operationId": "cancelMessage",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Cancel"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -131,7 +134,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Per-delivery cancellation results"
+						"$ref": "#/components/responses/DeliveryResults"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -164,7 +167,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Topic paused"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -179,7 +182,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Topic resumed"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -200,12 +203,15 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Subscriber status"
+						"$ref": "#/components/responses/SubscriberStatusPage"
 					}
 				}
 			},
 			"post": {
 				"operationId": "createSubscribers",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Subscribers"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -213,7 +219,7 @@
 				],
 				"responses": {
 					"201": {
-						"description": "Subscribers created"
+						"$ref": "#/components/responses/SubscriberRequests"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -252,7 +258,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Claimed deliveries"
+						"$ref": "#/components/responses/Deliveries"
 					}
 				}
 			}
@@ -260,6 +266,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/ack": {
 			"post": {
 				"operationId": "ackDelivery",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Receipt"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -273,7 +282,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Processed"
+						"$ref": "#/components/responses/Status"
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
@@ -287,6 +296,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/nack": {
 			"post": {
 				"operationId": "nackDelivery",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Nack"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -300,7 +312,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Retry scheduled or dead-lettered"
+						"$ref": "#/components/responses/Status"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -311,6 +323,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/lease": {
 			"post": {
 				"operationId": "extendLease",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Lease"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -324,7 +339,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Lease extended"
+						"$ref": "#/components/responses/Lease"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -335,6 +350,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/snooze": {
 			"post": {
 				"operationId": "snoozeDelivery",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Snooze"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -348,7 +366,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Delivery rescheduled without failure"
+						"$ref": "#/components/responses/Snooze"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -359,6 +377,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/{messageID}/cancel": {
 			"post": {
 				"operationId": "cancelDelivery",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Cancel"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -372,7 +393,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Delivery cancelled"
+						"$ref": "#/components/responses/Status"
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
@@ -405,7 +426,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Failure history"
+						"$ref": "#/components/responses/DeliveryErrorPage"
 					}
 				}
 			}
@@ -429,7 +450,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Pending and delivered messages"
+						"$ref": "#/components/responses/DeliveryPage"
 					}
 				}
 			}
@@ -437,6 +458,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/batch/ack": {
 			"post": {
 				"operationId": "batchAckDeliveries",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/BatchReceipt"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -447,7 +471,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Per-item ACK results"
+						"$ref": "#/components/responses/DeliveryResults"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -458,6 +482,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/messages/batch/nack": {
 			"post": {
 				"operationId": "batchNackDeliveries",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/BatchNack"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -468,7 +495,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Per-item NACK results"
+						"$ref": "#/components/responses/DeliveryResults"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -489,7 +516,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Subscriber paused"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -507,7 +534,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Subscriber resumed"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -531,7 +558,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Dead letters"
+						"$ref": "#/components/responses/DeliveryPage"
 					}
 				}
 			}
@@ -539,6 +566,9 @@
 		"/topics/{topicName}/subscribers/{subscriberName}/dlq/replay": {
 			"post": {
 				"operationId": "replayDeadLetters",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Replay"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -549,7 +579,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Per-item replay results"
+						"$ref": "#/components/responses/DeliveryResults"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -573,12 +603,15 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Schedules"
+						"$ref": "#/components/responses/SchedulePage"
 					}
 				}
 			},
 			"post": {
 				"operationId": "createSchedule",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/Schedule"
+				},
 				"parameters": [
 					{
 						"$ref": "#/components/parameters/TopicName"
@@ -586,7 +619,7 @@
 				],
 				"responses": {
 					"201": {
-						"description": "Schedule created"
+						"$ref": "#/components/responses/Schedule"
 					},
 					"413": {
 						"$ref": "#/components/responses/Problem"
@@ -607,15 +640,18 @@
 				"operationId": "getSchedule",
 				"responses": {
 					"200": {
-						"description": "Schedule"
+						"$ref": "#/components/responses/Schedule"
 					}
 				}
 			},
 			"put": {
 				"operationId": "updateSchedule",
+				"requestBody": {
+					"$ref": "#/components/requestBodies/ScheduleUpdate"
+				},
 				"responses": {
 					"200": {
-						"description": "Schedule updated"
+						"$ref": "#/components/responses/Schedule"
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
@@ -647,7 +683,7 @@
 				"operationId": "pauseSchedule",
 				"responses": {
 					"200": {
-						"description": "Schedule paused"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -665,7 +701,7 @@
 				"operationId": "resumeSchedule",
 				"responses": {
 					"200": {
-						"description": "Schedule resumed"
+						"$ref": "#/components/responses/Paused"
 					}
 				}
 			}
@@ -683,7 +719,7 @@
 				"operationId": "runScheduleNow",
 				"responses": {
 					"202": {
-						"description": "Schedule run admitted"
+						"$ref": "#/components/responses/ScheduleRun"
 					}
 				}
 			}
@@ -709,7 +745,7 @@
 				],
 				"responses": {
 					"200": {
-						"description": "Schedule run history"
+						"$ref": "#/components/responses/ScheduleRunPage"
 					}
 				}
 			}
@@ -771,7 +807,1152 @@
 				}
 			}
 		},
+		"requestBodies": {
+			"Topic": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/TopicRequest"
+						}
+					}
+				}
+			},
+			"Publish": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/PublishRequest"
+						}
+					}
+				}
+			},
+			"PublishBatch": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "array",
+							"minItems": 1,
+							"maxItems": 1000,
+							"items": {
+								"$ref": "#/components/schemas/PublishRequest"
+							}
+						}
+					}
+				}
+			},
+			"Cancel": {
+				"required": false,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/CancelRequest"
+						}
+					}
+				}
+			},
+			"Subscribers": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "array",
+							"minItems": 1,
+							"maxItems": 1000,
+							"items": {
+								"$ref": "#/components/schemas/SubscriberRequest"
+							}
+						}
+					}
+				}
+			},
+			"Receipt": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/ReceiptRequest"
+						}
+					}
+				}
+			},
+			"Nack": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/NackRequest"
+						}
+					}
+				}
+			},
+			"Lease": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/LeaseRequest"
+						}
+					}
+				}
+			},
+			"Snooze": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/SnoozeRequest"
+						}
+					}
+				}
+			},
+			"BatchReceipt": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "array",
+							"minItems": 1,
+							"maxItems": 1000,
+							"items": {
+								"$ref": "#/components/schemas/BatchReceiptRequest"
+							}
+						}
+					}
+				}
+			},
+			"BatchNack": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "array",
+							"minItems": 1,
+							"maxItems": 1000,
+							"items": {
+								"$ref": "#/components/schemas/BatchNackRequest"
+							}
+						}
+					}
+				}
+			},
+			"Replay": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/ReplayRequest"
+						}
+					}
+				}
+			},
+			"Schedule": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/ScheduleRequest"
+						}
+					}
+				}
+			},
+			"ScheduleUpdate": {
+				"required": true,
+				"content": {
+					"application/json": {
+						"schema": {
+							"$ref": "#/components/schemas/ScheduleUpdateRequest"
+						}
+					}
+				}
+			}
+		},
 		"schemas": {
+			"HeaderMap": {
+				"type": "object",
+				"additionalProperties": {
+					"type": "string"
+				}
+			},
+			"RetryPolicy": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"initial_delay": {
+						"type": "string",
+						"description": "Go duration"
+					},
+					"max_delay": {
+						"type": "string",
+						"description": "Go duration"
+					},
+					"multiplier": {
+						"type": "number",
+						"minimum": 0
+					},
+					"jitter": {
+						"type": "number",
+						"minimum": 0,
+						"maximum": 1
+					},
+					"disable_jitter": {
+						"type": "boolean"
+					}
+				}
+			},
+			"SubscriberOptionsRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"max_attempts": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"visibility_duration": {
+						"type": "string",
+						"description": "Go duration"
+					},
+					"dequeue_batch_size": {
+						"type": "integer",
+						"minimum": 0,
+						"maximum": 1000
+					},
+					"retry_policy": {
+						"$ref": "#/components/schemas/RetryPolicy"
+					}
+				}
+			},
+			"SubscriberRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"name"
+				],
+				"properties": {
+					"name": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 150
+					},
+					"option": {
+						"$ref": "#/components/schemas/SubscriberOptionsRequest"
+					}
+				}
+			},
+			"TopicRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"name",
+					"subscribers"
+				],
+				"properties": {
+					"name": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 150
+					},
+					"subscribers": {
+						"type": "array",
+						"minItems": 1,
+						"maxItems": 1000,
+						"items": {
+							"$ref": "#/components/schemas/SubscriberRequest"
+						}
+					}
+				}
+			},
+			"PublishRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"message": {
+						"type": "string",
+						"maxLength": 1048576
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string",
+						"maxLength": 255
+					},
+					"idempotency_key": {
+						"type": "string",
+						"maxLength": 128
+					},
+					"priority": {
+						"type": "integer",
+						"minimum": -1000,
+						"maximum": 1000
+					},
+					"delay": {
+						"type": "string",
+						"description": "Non-negative Go duration; mutually exclusive with schedule_at"
+					},
+					"schedule_at": {
+						"type": "string",
+						"format": "date-time",
+						"description": "Mutually exclusive with delay"
+					}
+				}
+			},
+			"CancelRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"reason": {
+						"type": "string"
+					}
+				}
+			},
+			"ReceiptRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"receipt_token"
+				],
+				"properties": {
+					"receipt_token": {
+						"type": "string",
+						"minLength": 1,
+						"format": "uuid"
+					}
+				}
+			},
+			"NackRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"receipt_token"
+				],
+				"properties": {
+					"receipt_token": {
+						"type": "string",
+						"minLength": 1,
+						"format": "uuid"
+					},
+					"retry_delay": {
+						"type": "string",
+						"description": "Non-negative Go duration"
+					},
+					"error": {
+						"type": "string"
+					}
+				}
+			},
+			"LeaseRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"receipt_token"
+				],
+				"properties": {
+					"receipt_token": {
+						"type": "string",
+						"minLength": 1,
+						"format": "uuid"
+					},
+					"extension": {
+						"type": "string",
+						"description": "Positive Go duration, at most 12h"
+					}
+				}
+			},
+			"SnoozeRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"receipt_token"
+				],
+				"properties": {
+					"receipt_token": {
+						"type": "string",
+						"minLength": 1,
+						"format": "uuid"
+					},
+					"delay": {
+						"type": "string",
+						"description": "Non-negative Go duration"
+					}
+				}
+			},
+			"BatchReceiptRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"message_id",
+					"receipt_token"
+				],
+				"properties": {
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"receipt_token": {
+						"type": "string",
+						"format": "uuid"
+					}
+				}
+			},
+			"BatchNackRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"message_id",
+					"receipt_token"
+				],
+				"properties": {
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"receipt_token": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"retry_delay": {
+						"type": "string",
+						"description": "Non-negative Go duration"
+					},
+					"error": {
+						"type": "string"
+					}
+				}
+			},
+			"ReplayRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"message_ids"
+				],
+				"properties": {
+					"message_ids": {
+						"type": "array",
+						"minItems": 1,
+						"maxItems": 1000,
+						"items": {
+							"type": "string",
+							"format": "uuid"
+						}
+					}
+				}
+			},
+			"ScheduleRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"name",
+					"cron"
+				],
+				"properties": {
+					"name": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 150
+					},
+					"cron": {
+						"type": "string",
+						"description": "Five-field cron expression"
+					},
+					"timezone": {
+						"type": "string",
+						"default": "UTC"
+					},
+					"message": {
+						"type": "string",
+						"maxLength": 1048576
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string",
+						"maxLength": 255
+					},
+					"priority": {
+						"type": "integer",
+						"minimum": -1000,
+						"maximum": 1000
+					},
+					"misfire_policy": {
+						"type": "string",
+						"enum": [
+							"fire_once"
+						],
+						"default": "fire_once"
+					},
+					"overlap_policy": {
+						"type": "string",
+						"enum": [
+							"skip"
+						],
+						"default": "skip"
+					}
+				}
+			},
+			"ScheduleUpdateRequest": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"version",
+					"name",
+					"cron"
+				],
+				"properties": {
+					"version": {
+						"type": "integer",
+						"minimum": 1
+					},
+					"name": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 150
+					},
+					"cron": {
+						"type": "string",
+						"description": "Five-field cron expression"
+					},
+					"timezone": {
+						"type": "string",
+						"default": "UTC"
+					},
+					"message": {
+						"type": "string",
+						"maxLength": 1048576
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string",
+						"maxLength": 255
+					},
+					"priority": {
+						"type": "integer",
+						"minimum": -1000,
+						"maximum": 1000
+					},
+					"misfire_policy": {
+						"type": "string",
+						"enum": [
+							"fire_once"
+						],
+						"default": "fire_once"
+					},
+					"overlap_policy": {
+						"type": "string",
+						"enum": [
+							"skip"
+						],
+						"default": "skip"
+					}
+				}
+			},
+			"Topic": {
+				"type": "object",
+				"required": [
+					"id",
+					"name",
+					"paused",
+					"created_at"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"name": {
+						"type": "string"
+					},
+					"paused": {
+						"type": "boolean"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"deleted_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"TopicPage": {
+				"type": "object",
+				"required": [
+					"topics"
+				],
+				"properties": {
+					"topics": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/Topic"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
+			"SubscriberStatus": {
+				"type": "object",
+				"required": [
+					"topic_id",
+					"name",
+					"unpublished_message",
+					"unacked_message"
+				],
+				"properties": {
+					"topic_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"name": {
+						"type": "string"
+					},
+					"unpublished_message": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"unacked_message": {
+						"type": "integer",
+						"minimum": 0
+					}
+				}
+			},
+			"SubscriberStatusPage": {
+				"type": "object",
+				"required": [
+					"subscribers"
+				],
+				"properties": {
+					"subscribers": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/SubscriberStatus"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
+			"PublishReceipt": {
+				"type": "object",
+				"required": [
+					"message_id",
+					"state",
+					"duplicate",
+					"scheduled_at"
+				],
+				"properties": {
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"state": {
+						"type": "string",
+						"enum": [
+							"admitted",
+							"persisted",
+							"staged"
+						]
+					},
+					"duplicate": {
+						"type": [
+							"boolean",
+							"null"
+						]
+					},
+					"scheduled_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"MessageDeliveryStatus": {
+				"type": "object",
+				"required": [
+					"subscriber_id",
+					"subscriber",
+					"status",
+					"delivery_count",
+					"failure_count",
+					"visible_at"
+				],
+				"properties": {
+					"subscriber_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"subscriber": {
+						"type": "string"
+					},
+					"status": {
+						"$ref": "#/components/schemas/DeliveryStatus"
+					},
+					"delivery_count": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"failure_count": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"visible_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"processed_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"cancelled_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"cancel_reason": {
+						"type": "string"
+					}
+				}
+			},
+			"MessageStatus": {
+				"type": "object",
+				"required": [
+					"id",
+					"topic_id",
+					"message",
+					"priority",
+					"scheduled_at",
+					"created_at",
+					"deliveries"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"topic_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"message": {
+						"type": "string"
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string"
+					},
+					"idempotency_key": {
+						"type": "string"
+					},
+					"priority": {
+						"type": "integer"
+					},
+					"scheduled_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"deliveries": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/MessageDeliveryStatus"
+						}
+					}
+				}
+			},
+			"DeliveryStatus": {
+				"type": "string",
+				"enum": [
+					"pending",
+					"delivered",
+					"processed",
+					"dead_letter",
+					"cancelled"
+				]
+			},
+			"Delivery": {
+				"type": "object",
+				"required": [
+					"id",
+					"message",
+					"visible_at",
+					"created_at"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"message": {
+						"type": "string"
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string"
+					},
+					"status": {
+						"$ref": "#/components/schemas/DeliveryStatus"
+					},
+					"delivery_count": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"failure_count": {
+						"type": "integer",
+						"minimum": 0
+					},
+					"priority": {
+						"type": "integer"
+					},
+					"receipt_token": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"lease_expires_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"visible_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"cancelled_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"cancel_reason": {
+						"type": "string"
+					}
+				}
+			},
+			"DeliveryResult": {
+				"type": "object",
+				"required": [
+					"message_id",
+					"status"
+				],
+				"properties": {
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"subscriber_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"status": {
+						"type": "string"
+					},
+					"error": {
+						"type": "string"
+					}
+				}
+			},
+			"DeliveryPage": {
+				"type": "object",
+				"required": [
+					"messages"
+				],
+				"properties": {
+					"messages": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/Delivery"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
+			"DeliveryError": {
+				"type": "object",
+				"required": [
+					"id",
+					"message_id",
+					"subscriber_id",
+					"failure_count",
+					"error",
+					"failed_at"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"subscriber_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"failure_count": {
+						"type": "integer",
+						"minimum": 1
+					},
+					"error": {
+						"type": "string"
+					},
+					"failed_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"DeliveryErrorPage": {
+				"type": "object",
+				"required": [
+					"errors"
+				],
+				"properties": {
+					"errors": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/DeliveryError"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
+			"StatusResult": {
+				"type": "object",
+				"required": [
+					"status"
+				],
+				"properties": {
+					"status": {
+						"type": "string"
+					}
+				}
+			},
+			"PausedResult": {
+				"type": "object",
+				"required": [
+					"paused"
+				],
+				"properties": {
+					"paused": {
+						"type": "boolean"
+					}
+				}
+			},
+			"LeaseResult": {
+				"type": "object",
+				"required": [
+					"lease_expires_at"
+				],
+				"properties": {
+					"lease_expires_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"SnoozeResult": {
+				"type": "object",
+				"required": [
+					"status",
+					"visible_at"
+				],
+				"properties": {
+					"status": {
+						"type": "string"
+					},
+					"visible_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"Schedule": {
+				"type": "object",
+				"required": [
+					"id",
+					"topic_id",
+					"name",
+					"cron",
+					"timezone",
+					"message",
+					"headers",
+					"priority",
+					"misfire_policy",
+					"overlap_policy",
+					"paused",
+					"version",
+					"next_run_at",
+					"created_at",
+					"updated_at"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"topic_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"name": {
+						"type": "string"
+					},
+					"cron": {
+						"type": "string"
+					},
+					"timezone": {
+						"type": "string"
+					},
+					"message": {
+						"type": "string"
+					},
+					"headers": {
+						"$ref": "#/components/schemas/HeaderMap"
+					},
+					"correlation_id": {
+						"type": "string"
+					},
+					"priority": {
+						"type": "integer"
+					},
+					"misfire_policy": {
+						"type": "string",
+						"enum": [
+							"fire_once"
+						]
+					},
+					"overlap_policy": {
+						"type": "string",
+						"enum": [
+							"skip"
+						]
+					},
+					"paused": {
+						"type": "boolean"
+					},
+					"version": {
+						"type": "integer",
+						"minimum": 1
+					},
+					"next_run_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"updated_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"SchedulePage": {
+				"type": "object",
+				"required": [
+					"schedules"
+				],
+				"properties": {
+					"schedules": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/Schedule"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
+			"ScheduleRun": {
+				"type": "object",
+				"required": [
+					"id",
+					"schedule_id",
+					"scheduled_for",
+					"started_at",
+					"status",
+					"created_at"
+				],
+				"properties": {
+					"id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"schedule_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"message_id": {
+						"type": "string",
+						"format": "uuid"
+					},
+					"scheduled_for": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"started_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"finished_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"status": {
+						"type": "string",
+						"enum": [
+							"running",
+							"completed",
+							"skipped",
+							"failed"
+						]
+					},
+					"error": {
+						"type": "string"
+					},
+					"created_at": {
+						"type": "string",
+						"format": "date-time"
+					}
+				}
+			},
+			"ScheduleRunPage": {
+				"type": "object",
+				"required": [
+					"runs"
+				],
+				"properties": {
+					"runs": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/ScheduleRun"
+						}
+					},
+					"next_cursor": {
+						"type": "string"
+					}
+				}
+			},
 			"Problem": {
 				"type": "object",
 				"required": [
@@ -805,6 +1986,387 @@
 			}
 		},
 		"responses": {
+			"TopicPage": {
+				"description": "Topics",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/TopicPage"
+								}
+							}
+						}
+					}
+				}
+			},
+			"Topic": {
+				"description": "Topic",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/Topic"
+								}
+							}
+						}
+					}
+				}
+			},
+			"PublishReceipt": {
+				"description": "Publish receipt",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/PublishReceipt"
+								}
+							}
+						}
+					}
+				}
+			},
+			"AdmittedPublishReceipt": {
+				"description": "Admitted publish receipt",
+				"headers": {
+					"Location": {
+						"description": "Canonical message status resource",
+						"schema": {
+							"type": "string",
+							"format": "uri-reference"
+						}
+					}
+				},
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/PublishReceipt"
+								}
+							}
+						}
+					}
+				}
+			},
+			"PublishReceipts": {
+				"description": "Publish receipts",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/PublishReceipt"
+									}
+								}
+							}
+						}
+					}
+				}
+			},
+			"MessageStatus": {
+				"description": "Canonical message and delivery states",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/MessageStatus"
+								}
+							}
+						}
+					}
+				}
+			},
+			"DeliveryResults": {
+				"description": "Per-delivery operation results",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/DeliveryResult"
+									}
+								}
+							}
+						}
+					}
+				}
+			},
+			"Paused": {
+				"description": "Pause state",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/PausedResult"
+								}
+							}
+						}
+					}
+				}
+			},
+			"SubscriberStatusPage": {
+				"description": "Subscriber statuses",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/SubscriberStatusPage"
+								}
+							}
+						}
+					}
+				}
+			},
+			"SubscriberRequests": {
+				"description": "Created subscriber definitions",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/SubscriberRequest"
+									}
+								}
+							}
+						}
+					}
+				}
+			},
+			"Deliveries": {
+				"description": "Claimed deliveries",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/Delivery"
+									}
+								}
+							}
+						}
+					}
+				}
+			},
+			"Status": {
+				"description": "Delivery status",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/StatusResult"
+								}
+							}
+						}
+					}
+				}
+			},
+			"Lease": {
+				"description": "Extended lease",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/LeaseResult"
+								}
+							}
+						}
+					}
+				}
+			},
+			"Snooze": {
+				"description": "Snoozed delivery",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/SnoozeResult"
+								}
+							}
+						}
+					}
+				}
+			},
+			"DeliveryErrorPage": {
+				"description": "Delivery failure history",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/DeliveryErrorPage"
+								}
+							}
+						}
+					}
+				}
+			},
+			"DeliveryPage": {
+				"description": "Delivery page",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/DeliveryPage"
+								}
+							}
+						}
+					}
+				}
+			},
+			"SchedulePage": {
+				"description": "Schedules",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/SchedulePage"
+								}
+							}
+						}
+					}
+				}
+			},
+			"Schedule": {
+				"description": "Schedule",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/Schedule"
+								}
+							}
+						}
+					}
+				}
+			},
+			"ScheduleRun": {
+				"description": "Schedule run",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/ScheduleRun"
+								}
+							}
+						}
+					}
+				}
+			},
+			"ScheduleRunPage": {
+				"description": "Schedule run history",
+				"content": {
+					"application/json": {
+						"schema": {
+							"type": "object",
+							"required": [
+								"data"
+							],
+							"properties": {
+								"data": {
+									"$ref": "#/components/schemas/ScheduleRunPage"
+								}
+							}
+						}
+					}
+				}
+			},
 			"Problem": {
 				"description": "RFC 9457 problem detail",
 				"content": {

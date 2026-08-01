@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -78,19 +79,21 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 }
 
 func write(w http.ResponseWriter, status int, data any) {
-	w.Header().Set("Content-Type", mediaTypeJSON)
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(envelope{Data: data})
+	payload, err := json.Marshal(envelope{Data: data})
+	if err != nil {
+		slog.Error("encode HTTP response", "error", err)
+		writeProblem(w, nil, http.StatusInternalServerError, problemCodeInternal, "internal server error")
+		return
+	}
+	writeJSON(w, status, mediaTypeJSON, payload)
 }
 
 func writeProblem(w http.ResponseWriter, request *http.Request, status int, code, message string) {
-	w.Header().Set("Content-Type", mediaTypeProblemJSON)
-	w.WriteHeader(status)
 	instance := ""
 	if request != nil {
 		instance = request.URL.Path
 	}
-	_ = json.NewEncoder(w).Encode(problem{
+	payload, err := json.Marshal(problem{
 		Type:     "https://blockqueue.dev/problems/" + code,
 		Title:    http.StatusText(status),
 		Status:   status,
@@ -98,6 +101,18 @@ func writeProblem(w http.ResponseWriter, request *http.Request, status int, code
 		Code:     code,
 		Instance: instance,
 	})
+	if err != nil {
+		slog.Error("encode HTTP problem response", "error", err)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, status, mediaTypeProblemJSON, payload)
+}
+
+func writeJSON(w http.ResponseWriter, status int, contentType string, payload []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(status)
+	_, _ = w.Write(append(payload, '\n'))
 }
 
 func queryLimit(r *http.Request, fallback int) int {

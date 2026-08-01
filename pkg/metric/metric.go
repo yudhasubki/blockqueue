@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	writerMetricSequence  atomic.Uint64
-	writerMetricMu        sync.Mutex
-	writerHealth          = make(map[uint64]bool)
-	writerLag             = make(map[uint64]float64)
-	runtimeMetricSequence atomic.Uint64
-	runtimeMetricMu       sync.Mutex
-	runtimeHealth         = make(map[uint64]runtimeHealthState)
+	collectorRegistrationMu sync.Mutex
+	writerMetricSequence    atomic.Uint64
+	writerMetricMu          sync.Mutex
+	writerHealth            = make(map[uint64]bool)
+	writerLag               = make(map[uint64]float64)
+	runtimeMetricSequence   atomic.Uint64
+	runtimeMetricMu         sync.Mutex
+	runtimeHealth           = make(map[uint64]runtimeHealthState)
 )
 
 type runtimeHealthState struct {
@@ -151,6 +152,8 @@ var (
 )
 
 func Register(registerer prometheus.Registerer) error {
+	collectorRegistrationMu.Lock()
+	defer collectorRegistrationMu.Unlock()
 	if registerer == nil {
 		registerer = prometheus.DefaultRegisterer
 	}
@@ -162,6 +165,12 @@ func Register(registerer prometheus.Registerer) error {
 		MaintenanceRows, MaintenancePasses, MaintenanceDuration, WorkerHandlerDuration,
 		WorkerActiveHandlers, WorkerHeartbeats,
 	}
+	registered := make([]prometheus.Collector, 0, len(collectors))
+	rollback := func() {
+		for index := len(registered) - 1; index >= 0; index-- {
+			registerer.Unregister(registered[index])
+		}
+	}
 	for _, collector := range collectors {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
@@ -169,10 +178,13 @@ func Register(registerer prometheus.Registerer) error {
 				if alreadyRegistered.ExistingCollector == collector {
 					continue
 				}
+				rollback()
 				return err
 			}
+			rollback()
 			return err
 		}
+		registered = append(registered, collector)
 	}
 	return nil
 }

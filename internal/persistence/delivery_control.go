@@ -3,13 +3,13 @@ package persistence
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/yudhasubki/blockqueue/internal/headercodec"
 	"github.com/yudhasubki/blockqueue/internal/textlimit"
 )
 
@@ -259,8 +259,8 @@ func (d *db) getMessageStatus(ctx context.Context, topicID uuid.UUID, messageID 
 		WHERE deliveries.message_id = ? ORDER BY subscribers.name, deliveries.subscriber_id`), messageID); err != nil {
 		return MessageStatus{}, err
 	}
-	headers := make(map[string]string)
-	if err := json.Unmarshal([]byte(row.Headers), &headers); err != nil {
+	headers, err := headercodec.Decode(row.Headers)
+	if err != nil {
 		return MessageStatus{}, fmt.Errorf("decode message headers: %w", err)
 	}
 	return MessageStatus{

@@ -79,7 +79,7 @@ func (h *HTTP) Run(ctx context.Context, args []string) error {
 		}
 		writerConfig.FlushInterval = duration
 	}
-	queue := blockqueue.New(driver, blockqueue.Options{
+	queue, err := blockqueue.NewChecked(driver, blockqueue.Options{
 		Writer:               writerConfig,
 		CheckpointInterval:   checkpointInterval,
 		RetentionPeriod:      processedRetention,
@@ -87,6 +87,10 @@ func (h *HTTP) Run(ctx context.Context, args []string) error {
 		ScheduleRunRetention: scheduleRunRetention,
 		DisableMetrics:       !cfg.Metric.Enable,
 	})
+	if err != nil {
+		_ = driver.Close()
+		return err
+	}
 
 	err = queue.Run(ctx)
 	if err != nil {

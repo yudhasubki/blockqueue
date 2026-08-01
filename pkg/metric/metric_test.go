@@ -2,6 +2,7 @@ package metric
 
 import (
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -24,11 +25,11 @@ func TestRegisterIsIdempotentAndSupportsCustomRegistries(t *testing.T) {
 
 func TestRegisterRejectsDifferentCollectorWithSameDescriptor(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	conflicting := prometheus.NewCounterVec(prometheus.CounterOpts{
+	conflicting := prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "blockqueue",
-		Name:      "persistence_total",
-		Help:      "Persistence outcomes.",
-	}, []string{"result"})
+		Name:      "pending_messages",
+		Help:      "Admitted messages waiting for commit.",
+	})
 	registry.MustRegister(conflicting)
 
 	err := Register(registry)
@@ -38,6 +39,30 @@ func TestRegisterRejectsDifferentCollectorWithSameDescriptor(t *testing.T) {
 	var alreadyRegistered prometheus.AlreadyRegisteredError
 	if !errors.As(err, &alreadyRegistered) {
 		t.Fatalf("Register error=%T %v, want AlreadyRegisteredError", err, err)
+	}
+	if err := registry.Register(PublishResults); err != nil {
+		t.Fatalf("Register left earlier collectors behind after collision: %v", err)
+	}
+}
+
+func TestRegisterConcurrentCallsRemainIdempotent(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	const callers = 16
+	errors := make(chan error, callers)
+	var wait sync.WaitGroup
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			errors <- Register(registry)
+		}()
+	}
+	wait.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("Register returned %v", err)
+		}
 	}
 }
 

@@ -1,20 +1,15 @@
 package blockqueue
 
 import (
-	"encoding/json"
 	"fmt"
+
+	"github.com/yudhasubki/blockqueue/internal/headercodec"
 )
 
 func decodePersistedHeaders(raw string) (map[string]string, error) {
-	headers := make(map[string]string)
-	if raw == "" {
-		return headers, nil
-	}
-	if err := json.Unmarshal([]byte(raw), &headers); err != nil {
+	headers, err := headercodec.Decode(raw)
+	if err != nil {
 		return nil, fmt.Errorf("decode persisted headers: %w", err)
-	}
-	if headers == nil {
-		headers = make(map[string]string)
 	}
 	return headers, nil
 }
