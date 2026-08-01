@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -80,22 +79,11 @@ func (q *Queue) Claim(ctx context.Context, topic Topic, subscriber string, limit
 	}
 	response := make(Deliveries, 0, len(rows))
 	for _, row := range rows {
-		headers := make(map[string]string)
-		_ = json.Unmarshal([]byte(row.Headers), &headers)
-		response = append(response, Delivery{
-			ID:             row.MessageID,
-			Message:        row.Message,
-			Headers:        headers,
-			CorrelationID:  row.CorrelationID.String,
-			Status:         row.Status,
-			DeliveryCount:  row.DeliveryCount,
-			FailureCount:   row.FailureCount,
-			Priority:       row.Priority,
-			ReceiptToken:   row.ReceiptToken.String,
-			LeaseExpiresAt: optionalTime(row.LeaseExpiresAt),
-			VisibleAt:      row.VisibleAt,
-			CreatedAt:      row.CreatedAt,
-		})
+		delivery, err := deliveryFromRow(row)
+		if err != nil {
+			return nil, err
+		}
+		response = append(response, delivery)
 	}
 	return response, nil
 }
@@ -559,22 +547,11 @@ func (q *Queue) ListDeliveries(ctx context.Context, topic Topic, subscriber stri
 	}
 	page := DeliveryPage{Messages: make(Deliveries, 0, len(rows)), NextCursor: next}
 	for _, row := range rows {
-		headers := make(map[string]string)
-		_ = json.Unmarshal([]byte(row.Headers), &headers)
-		page.Messages = append(page.Messages, Delivery{
-			ID:             row.MessageID,
-			Message:        row.Message,
-			Headers:        headers,
-			CorrelationID:  row.CorrelationID.String,
-			Status:         row.Status,
-			DeliveryCount:  row.DeliveryCount,
-			FailureCount:   row.FailureCount,
-			Priority:       row.Priority,
-			ReceiptToken:   row.ReceiptToken.String,
-			LeaseExpiresAt: optionalTime(row.LeaseExpiresAt),
-			VisibleAt:      row.VisibleAt,
-			CreatedAt:      row.CreatedAt,
-		})
+		delivery, err := deliveryFromRow(row)
+		if err != nil {
+			return DeliveryPage{}, err
+		}
+		page.Messages = append(page.Messages, delivery)
 	}
 	return page, nil
 }

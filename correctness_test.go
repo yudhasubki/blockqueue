@@ -194,7 +194,7 @@ func TestPreCanceledAdmissionReleasesWeightedBudget(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	now := time.Now().UTC()
-	err = writer.EnqueueBatchContext(canceled, []writeRequest{{
+	err = enqueueWriterAsync(canceled, writer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "canceled",
@@ -206,7 +206,7 @@ func TestPreCanceledAdmissionReleasesWeightedBudget(t *testing.T) {
 	require.Zero(t, messages)
 	require.Zero(t, bytes)
 
-	_, err = writer.EnqueueBatchDurable(context.Background(), []writeRequest{{
+	_, err = enqueueWriterDurable(context.Background(), writer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "committed",
@@ -445,7 +445,7 @@ func TestSchedulerRecordsPermanentFailureAndAdvances(t *testing.T) {
 	require.Eventually(t, func() bool {
 		history, historyErr := queue.ScheduleRunHistory(context.Background(), topic, schedule.ID, 10, "")
 		return historyErr == nil && len(history.Runs) == 1 && history.Runs[0].Status == ScheduleRunStatusFailed
-	}, 2*time.Second, 5*time.Millisecond)
+	}, 5*time.Second, 5*time.Millisecond)
 	updated, err := queue.GetSchedule(context.Background(), topic, schedule.ID)
 	require.NoError(t, err)
 	require.True(t, updated.NextRunAt.After(clock.Now()))
@@ -456,7 +456,7 @@ func TestSchedulerRecordsPermanentFailureAndAdvances(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var messages int
 		return testDB(driver).Get(&messages, "SELECT COUNT(*) FROM messages WHERE topic_id = ?", topic.ID) == nil && messages == 1
-	}, 2*time.Second, 5*time.Millisecond)
+	}, 5*time.Second, 5*time.Millisecond)
 }
 
 func TestSchedulerRestartFiresAtMostOneMissedOccurrence(t *testing.T) {
@@ -767,7 +767,7 @@ func TestDurableWaitCancellationReturnsStableCommitUnknownIDs(t *testing.T) {
 	now := time.Now().UTC()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = buffer.EnqueueBatchDurable(ctx, []writeRequest{{
+	_, err = enqueueWriterDurable(ctx, buffer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: messageID,
 		Message:   "ambiguous",

@@ -70,15 +70,9 @@ func (q *Queue) Run(ctx context.Context) error {
 		runtimes = append(runtimes, runtime)
 	}
 
-	writerOptions := q.options.Writer
-	if writerOptions.BatchSize == 0 && writerOptions.FlushInterval == 0 &&
-		writerOptions.MaxPendingMessages == 0 && writerOptions.MaxPendingBytes == 0 {
-		writerOptions = DefaultWriterOptions()
-	}
-	writerOptions.notify = q.notify
 	// Shutdown is coordinated explicitly so cancellation of the serving context
 	// cannot make the writer abandon an admitted batch.
-	q.writer = newWriter(context.Background(), q.db, writerOptions)
+	q.writer = newWriterWithHooks(context.Background(), q.db, q.options.Writer, writerHooks{notify: q.notify})
 	if !q.options.DisableMetrics {
 		q.runtimeMetricID = metric.RegisterRuntime()
 	}
@@ -229,8 +223,9 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	case <-ctx.Done():
 		workersErr = fmt.Errorf("shutdown workers: %w", ctx.Err())
 	}
+	var checkpointErr error
 	if flushErr == nil && workersErr == nil && q.db.supportsSQLiteMaintenance() {
-		q.checkpointSQLite(ctx, sqliteCheckpointTruncate)
+		checkpointErr = q.checkpointSQLite(ctx, sqliteCheckpointTruncate)
 	}
 
 	q.state.Store(uint32(LifecycleStopped))
@@ -242,7 +237,7 @@ func (q *Queue) shutdown(ctx context.Context, closeDB bool) error {
 	if closeDB {
 		closeErr = q.db.close()
 	}
-	return errors.Join(flushErr, transactionErr, workersErr, closeErr)
+	return errors.Join(flushErr, transactionErr, workersErr, checkpointErr, closeErr)
 }
 
 // Live reports whether the queue has not reached the stopped state.

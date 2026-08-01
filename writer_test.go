@@ -64,7 +64,7 @@ func TestWriter_BatchFlush(t *testing.T) {
 
 		// Enqueue exactly batch size messages
 		for i := 0; i < 5; i++ {
-			wb.Enqueue(topicID, uuid.NewString(), "test message", 0)
+			require.NoError(t, enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "test message", 0))
 		}
 
 		// Wait for flush
@@ -110,7 +110,7 @@ func TestWriter_TimeFlush(t *testing.T) {
 
 		// Enqueue less than batch size
 		for i := 0; i < 3; i++ {
-			wb.Enqueue(topicID, uuid.NewString(), "test message", 0)
+			require.NoError(t, enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "test message", 0))
 		}
 
 		// Wait for time-based flush
@@ -143,7 +143,7 @@ func TestWriterKeepsAsyncOnlyAdmissionInGroupCommitWindow(t *testing.T) {
 		FlushInterval: 200 * time.Millisecond,
 	})
 	defer buffer.Close()
-	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
+	require.NoError(t, enqueueWriterAsync(context.Background(), buffer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "async group commit",
@@ -216,7 +216,7 @@ func TestWriter_GracefulClose(t *testing.T) {
 
 		// Enqueue messages
 		for i := 0; i < 7; i++ {
-			wb.Enqueue(topicID, uuid.NewString(), "test message", 0)
+			require.NoError(t, enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "test message", 0))
 		}
 
 		// Small delay to ensure messages are in the channel
@@ -234,7 +234,7 @@ func TestWriter_GracefulClose(t *testing.T) {
 		err = testDB(sqliteDB).Get(&count, "SELECT COUNT(*) FROM messages WHERE topic_id = ?", topicID)
 		require.NoError(t, err)
 		require.Equal(t, 7, count, "all messages should be flushed on close")
-		err = wb.EnqueueContext(context.Background(), topicID, uuid.NewString(), "after close", 0)
+		err = enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "after close", 0)
 		require.ErrorIs(t, err, ErrWriterClosed)
 	})
 }
@@ -281,8 +281,8 @@ func TestWriter_MultiTopic(t *testing.T) {
 
 		// Enqueue to both topics
 		for i := 0; i < 3; i++ {
-			wb.Enqueue(topic1ID, uuid.NewString(), "topic1 message", 0)
-			wb.Enqueue(topic2ID, uuid.NewString(), "topic2 message", 0)
+			require.NoError(t, enqueueWriterMessage(context.Background(), wb, topic1ID, uuid.NewString(), "topic1 message", 0))
+			require.NoError(t, enqueueWriterMessage(context.Background(), wb, topic2ID, uuid.NewString(), "topic2 message", 0))
 		}
 
 		// Wait for flush
@@ -339,7 +339,10 @@ func TestWriter_Concurrent(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				for i := 0; i < msgCount/goroutines; i++ {
-					wb.Enqueue(topicID, uuid.NewString(), "concurrent message", 0)
+					if err := enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "concurrent message", 0); err != nil {
+						t.Errorf("enqueue concurrent message: %v", err)
+						return
+					}
 				}
 			}()
 		}
@@ -384,7 +387,7 @@ func TestWriter_ConcurrentClosePreservesAcceptedMessages(t *testing.T) {
 
 	var accepted atomic.Int64
 	for i := 0; i < 10; i++ {
-		err := wb.EnqueueContext(context.Background(), topicID, uuid.NewString(), "before-close", 0)
+		err := enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "before-close", 0)
 		require.NoError(t, err)
 		accepted.Add(1)
 	}
@@ -398,7 +401,7 @@ func TestWriter_ConcurrentClosePreservesAcceptedMessages(t *testing.T) {
 			defer publishers.Done()
 			<-start
 			for j := 0; j < 20; j++ {
-				err := wb.EnqueueContext(context.Background(), topicID, uuid.NewString(), "during-close", 0)
+				err := enqueueWriterMessage(context.Background(), wb, topicID, uuid.NewString(), "during-close", 0)
 				switch {
 				case err == nil:
 					accepted.Add(1)
@@ -439,15 +442,14 @@ func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
 		<-ctx.Done()
 		return persistWriteResult{}, ctx.Err()
 	}
-	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+	wb := newWriterWithHooks(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize:          2,
 		FlushInterval:      time.Hour,
 		RetryMin:           time.Millisecond,
 		RetryMax:           time.Millisecond,
 		MaxPendingMessages: 10,
 		MaxPendingBytes:    1 << 20,
-		persist:            persist,
-	})
+	}, writerHooks{persist: persist})
 	now := time.Now().UTC()
 	first, err := wb.admitOne(context.Background(), writeRequest{
 		MessageID: uuid.NewString(),
@@ -479,15 +481,14 @@ func TestWriterAbortCompletesRemainingIsolatedAdmissions(t *testing.T) {
 
 func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
 	storageFailure := errors.New("injected permanent storage corruption")
-	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+	wb := newWriterWithHooks(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize:          1,
 		FlushInterval:      time.Millisecond,
 		MaxPendingMessages: 10,
 		MaxPendingBytes:    1 << 20,
-		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
-			return persistWriteResult{}, storageFailure
-		},
-	})
+	}, writerHooks{persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
+		return persistWriteResult{}, storageFailure
+	}})
 	now := time.Now().UTC()
 	admission, err := wb.admitOne(context.Background(), writeRequest{
 		MessageID: uuid.NewString(),
@@ -510,15 +511,14 @@ func TestWriterStopsAdmissionAfterUnknownPermanentStorageFailure(t *testing.T) {
 }
 
 func TestDomainWriteFailureDoesNotPoisonWriterHealth(t *testing.T) {
-	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+	wb := newWriterWithHooks(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize:          1,
 		FlushInterval:      time.Millisecond,
 		MaxPendingMessages: 10,
 		MaxPendingBytes:    1 << 20,
-		persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
-			return persistWriteResult{}, ErrNoActiveSubscriber
-		},
-	})
+	}, writerHooks{persist: func(context.Context, []writeRequest) (persistWriteResult, error) {
+		return persistWriteResult{}, ErrNoActiveSubscriber
+	}})
 	now := time.Now().UTC()
 	admission, err := wb.admitOne(context.Background(), writeRequest{
 		MessageID: uuid.NewString(),
@@ -570,19 +570,18 @@ func TestTransientWriteErrorClassifiesRecoverableSQLiteCapacityFailures(t *testi
 func TestWriterShutdownUnblocksRegisteredSendersBeforeFinalDrain(t *testing.T) {
 	persistStarted := make(chan struct{})
 	var startedOnce sync.Once
-	wb := newWriter(context.Background(), &db{disableMetrics: true}, WriterOptions{
+	wb := newWriterWithHooks(context.Background(), &db{disableMetrics: true}, WriterOptions{
 		BatchSize:          1,
 		FlushInterval:      time.Hour,
 		MaxPendingMessages: 1,
 		MaxPendingBytes:    1 << 20,
 		RetryMin:           time.Millisecond,
 		RetryMax:           time.Millisecond,
-		persist: func(ctx context.Context, _ []writeRequest) (persistWriteResult, error) {
-			startedOnce.Do(func() { close(persistStarted) })
-			<-ctx.Done()
-			return persistWriteResult{}, ctx.Err()
-		},
-	})
+	}, writerHooks{persist: func(ctx context.Context, _ []writeRequest) (persistWriteResult, error) {
+		startedOnce.Do(func() { close(persistStarted) })
+		<-ctx.Done()
+		return persistWriteResult{}, ctx.Err()
+	}})
 	now := time.Now().UTC()
 	_, err := wb.admitOne(context.Background(), writeRequest{
 		MessageID: uuid.NewString(),

@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -18,6 +19,25 @@ func TestRegisterIsIdempotentAndSupportsCustomRegistries(t *testing.T) {
 	second := prometheus.NewRegistry()
 	if err := Register(second); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRegisterRejectsDifferentCollectorWithSameDescriptor(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	conflicting := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "blockqueue",
+		Name:      "persistence_total",
+		Help:      "Persistence outcomes.",
+	}, []string{"result"})
+	registry.MustRegister(conflicting)
+
+	err := Register(registry)
+	if err == nil {
+		t.Fatal("Register accepted a different collector with the same descriptor")
+	}
+	var alreadyRegistered prometheus.AlreadyRegisteredError
+	if !errors.As(err, &alreadyRegistered) {
+		t.Fatalf("Register error=%T %v, want AlreadyRegisteredError", err, err)
 	}
 }
 

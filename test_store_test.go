@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/require"
 	"github.com/yudhasubki/blockqueue/store"
@@ -12,6 +13,35 @@ import (
 
 func testDB(driver store.Driver) *sqlx.DB {
 	return sqlx.NewDb(driver.DB(), driver.DriverName())
+}
+
+func enqueueWriterMessage(
+	ctx context.Context,
+	writer *writer,
+	topicID uuid.UUID,
+	messageID, message string,
+	delay time.Duration,
+) error {
+	return enqueueWriterAsync(ctx, writer, []writeRequest{{
+		TopicID:   topicID,
+		MessageID: messageID,
+		Message:   message,
+		VisibleAt: time.Now().UTC().Add(delay),
+	}})
+}
+
+func enqueueWriterAsync(ctx context.Context, writer *writer, requests []writeRequest) error {
+	_, err := writer.admitBatch(ctx, requests, false)
+	return err
+}
+
+func enqueueWriterDurable(ctx context.Context, writer *writer, requests []writeRequest) ([]bool, error) {
+	admission, err := writer.admitBatch(ctx, requests, true)
+	if err != nil {
+		return nil, err
+	}
+	result, err := writer.waitAdmission(ctx, admission)
+	return result.Duplicates, err
 }
 
 // requireSQLiteWriteLock tolerates a maintenance transaction that was already

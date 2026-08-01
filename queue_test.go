@@ -175,7 +175,7 @@ func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 	})
 	t.Cleanup(func() { buffer.Close() })
 	now := time.Now().UTC()
-	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
+	require.NoError(t, enqueueWriterAsync(context.Background(), buffer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "invalid",
@@ -183,7 +183,7 @@ func TestPermanentAdmissionDoesNotPoisonValidNeighbour(t *testing.T) {
 		VisibleAt: now,
 		CreatedAt: now,
 	}}))
-	duplicates, err := buffer.EnqueueBatchDurable(context.Background(), []writeRequest{{
+	duplicates, err := enqueueWriterDurable(context.Background(), buffer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "valid",
@@ -430,7 +430,7 @@ func TestLifecycleAndWeightedBudget(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, Migrate(context.Background(), driver))
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{MaxPendingMessages: 1, MaxPendingBytes: 16, FlushInterval: time.Hour})
-	err = buffer.EnqueueBatchContext(context.Background(), []writeRequest{{Message: "this is larger than the cap"}})
+	err = enqueueWriterAsync(context.Background(), buffer, []writeRequest{{Message: "this is larger than the cap"}})
 	require.ErrorIs(t, err, ErrPendingBudgetExceeded)
 	buffer.Close()
 	require.NoError(t, driver.Close())
@@ -445,6 +445,24 @@ func TestEmbeddedMigrationRerun(t *testing.T) {
 	var applied int
 	require.NoError(t, testDB(driver).Get(&applied, "SELECT COUNT(*) FROM schema_migrations"))
 	require.Greater(t, applied, 0)
+}
+
+func TestRunPreservesPartialWriterOptions(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "partial-writer-options.db"), sqlite.Config{})
+	require.NoError(t, err)
+	queue := New(driver, Options{
+		DisableMetrics: true,
+		Writer: WriterOptions{
+			RetryMin: 7 * time.Millisecond,
+			RetryMax: 11 * time.Millisecond,
+		},
+	})
+	require.NoError(t, queue.Run(context.Background()))
+	t.Cleanup(queue.Close)
+
+	require.Equal(t, 7*time.Millisecond, queue.writer.retryMin)
+	require.Equal(t, 11*time.Millisecond, queue.writer.retryMax)
+	require.Equal(t, DefaultWriterOptions().BatchSize, queue.writer.batchSize)
 }
 
 func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {
@@ -467,7 +485,7 @@ func TestWriterAbortsFailedFlushAfterShutdownDeadline(t *testing.T) {
 
 	buffer := newWriter(context.Background(), newDb(driver), WriterOptions{BatchSize: 1, RetryMin: time.Millisecond, RetryMax: 5 * time.Millisecond})
 	now := time.Now().UTC()
-	require.NoError(t, buffer.EnqueueBatchContext(context.Background(), []writeRequest{{
+	require.NoError(t, enqueueWriterAsync(context.Background(), buffer, []writeRequest{{
 		TopicID:   topicID,
 		MessageID: newMessageID(),
 		Message:   "retained",

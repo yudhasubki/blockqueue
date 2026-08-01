@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,6 +67,23 @@ func TestRouterPublishClaimAckAndStrictJSON(t *testing.T) {
 	handler.ServeHTTP(unknownRecorder, unknown)
 	if unknownRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status=%d body=%s", unknownRecorder.Code, unknownRecorder.Body.String())
+	}
+
+	oversized := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/messages",
+		strings.NewReader(`{"message":"`+strings.Repeat("x", (16<<20)+1)+`"}`))
+	oversizedRecorder := httptest.NewRecorder()
+	handler.ServeHTTP(oversizedRecorder, oversized)
+	if oversizedRecorder.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body status=%d body=%s", oversizedRecorder.Code, oversizedRecorder.Body.String())
+	}
+	var oversizedProblem struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(oversizedRecorder.Body.Bytes(), &oversizedProblem); err != nil {
+		t.Fatalf("decode oversized problem: %v", err)
+	}
+	if oversizedProblem.Code != "payload_too_large" {
+		t.Fatalf("oversized body code=%q", oversizedProblem.Code)
 	}
 
 	publish := httptest.NewRequest(http.MethodPost, "/v1/topics/orders/messages?wait_for=commit", bytes.NewBufferString(`{"message":"http","idempotency_key":"http-1"}`))

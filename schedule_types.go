@@ -51,19 +51,25 @@ type SchedulePage struct {
 
 // PublicHeaders decodes the schedule's persisted JSON headers.
 func (schedule Schedule) PublicHeaders() map[string]string {
-	headers := make(map[string]string)
-	_ = json.Unmarshal([]byte(schedule.Headers), &headers)
+	headers, err := decodePersistedHeaders(schedule.Headers)
+	if err != nil {
+		return map[string]string{}
+	}
 	return headers
 }
 
 // MarshalJSON exposes decoded headers and optional correlation data.
 func (schedule Schedule) MarshalJSON() ([]byte, error) {
 	type alias Schedule
+	headers, err := decodePersistedHeaders(schedule.Headers)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(struct {
 		alias
 		Headers       map[string]string `json:"headers"`
 		CorrelationID string            `json:"correlation_id,omitempty"`
-	}{alias: alias(schedule), Headers: schedule.PublicHeaders(), CorrelationID: schedule.CorrelationID.String})
+	}{alias: alias(schedule), Headers: headers, CorrelationID: schedule.CorrelationID.String})
 }
 
 // ScheduleRun records one scheduled occurrence and its terminal outcome.

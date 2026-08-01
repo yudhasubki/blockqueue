@@ -2,7 +2,7 @@
 	"openapi": "3.1.0",
 	"info": {
 		"title": "BlockQueue HTTP API",
-		"version": "0.2.0",
+		"version": "0.3.0",
 		"description": "Durable fan-out queue API. Caller-owned database transactions are available only through the Go package."
 	},
 	"servers": [
@@ -36,6 +36,9 @@
 					},
 					"400": {
 						"$ref": "#/components/responses/Problem"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -66,6 +69,9 @@
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -84,6 +90,9 @@
 					},
 					"202": {
 						"description": "Admitted receipts"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -123,6 +132,9 @@
 				"responses": {
 					"200": {
 						"description": "Per-delivery cancellation results"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -202,6 +214,9 @@
 				"responses": {
 					"201": {
 						"description": "Subscribers created"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -262,6 +277,9 @@
 					},
 					"409": {
 						"$ref": "#/components/responses/Problem"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -283,6 +301,9 @@
 				"responses": {
 					"200": {
 						"description": "Retry scheduled or dead-lettered"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -304,6 +325,9 @@
 				"responses": {
 					"200": {
 						"description": "Lease extended"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -325,6 +349,9 @@
 				"responses": {
 					"200": {
 						"description": "Delivery rescheduled without failure"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -348,6 +375,9 @@
 						"description": "Delivery cancelled"
 					},
 					"409": {
+						"$ref": "#/components/responses/Problem"
+					},
+					"413": {
 						"$ref": "#/components/responses/Problem"
 					}
 				}
@@ -418,6 +448,9 @@
 				"responses": {
 					"200": {
 						"description": "Per-item ACK results"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -436,6 +469,9 @@
 				"responses": {
 					"200": {
 						"description": "Per-item NACK results"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -514,6 +550,9 @@
 				"responses": {
 					"200": {
 						"description": "Per-item replay results"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -548,6 +587,9 @@
 				"responses": {
 					"201": {
 						"description": "Schedule created"
+					},
+					"413": {
+						"$ref": "#/components/responses/Problem"
 					}
 				}
 			}
@@ -576,6 +618,9 @@
 						"description": "Schedule updated"
 					},
 					"409": {
+						"$ref": "#/components/responses/Problem"
+					},
+					"413": {
 						"$ref": "#/components/responses/Problem"
 					}
 				}

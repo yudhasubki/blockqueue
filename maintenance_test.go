@@ -53,6 +53,20 @@ func TestRunRejectsSQLiteCheckpointIntervalBelowMinimum(t *testing.T) {
 	require.Equal(t, LifecycleStopped, queue.State())
 }
 
+func TestShutdownReturnsFinalCheckpointFailure(t *testing.T) {
+	driver, err := sqlite.Open(filepath.Join(t.TempDir(), "checkpoint-failure.db"), sqlite.Config{})
+	require.NoError(t, err)
+	queue := New(driver, Options{DisableMetrics: true})
+	require.NoError(t, queue.Run(context.Background()))
+
+	require.NoError(t, driver.DB().Close())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = queue.Shutdown(ctx)
+	require.ErrorContains(t, err, "sqlite checkpoint")
+	require.Equal(t, LifecycleStopped, queue.State())
+}
+
 func TestMaintenanceRetryWaitsForBackoffOrCancellation(t *testing.T) {
 	clock := &testClock{now: time.Now().UTC()}
 	ctx, cancel := context.WithCancel(context.Background())

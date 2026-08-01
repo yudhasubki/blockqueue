@@ -3,6 +3,7 @@ package blockqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -41,7 +42,7 @@ func (q *Queue) startCheckpointer() {
 			if q.shouldDeferCheckpoint(elapsed) {
 				continue
 			}
-			q.checkpointSQLite(q.serverCtx, sqliteCheckpointPassive)
+			_ = q.checkpointSQLite(q.serverCtx, sqliteCheckpointPassive)
 			lastCheckpoint = time.Now()
 		}
 	}
@@ -93,7 +94,7 @@ func (q *Queue) observeMaintenancePass(operation string, started time.Time, rows
 	metric.MaintenanceDuration.WithLabelValues(operation).Observe(time.Since(started).Seconds())
 }
 
-func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode) {
+func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode) error {
 	started := time.Now()
 	result, err := q.db.checkpointSQLite(ctx, mode)
 	if !q.options.DisableMetrics {
@@ -104,7 +105,7 @@ func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode)
 			metric.CheckpointResults.WithLabelValues(metric.OutcomeFailed).Inc()
 		}
 		slog.Error("sqlite checkpoint failed", "error", err, "mode", mode)
-		return
+		return fmt.Errorf("sqlite checkpoint %s: %w", mode, err)
 	}
 	label := metric.OutcomeSuccess
 	if result.Busy != 0 {
@@ -115,6 +116,7 @@ func (q *Queue) checkpointSQLite(ctx context.Context, mode sqliteCheckpointMode)
 	}
 	slog.Debug("sqlite checkpoint", "mode", mode, "duration", time.Since(started),
 		"busy", result.Busy, "wal_frames", result.LogFrames, "checkpointed_frames", result.Checkpointed)
+	return nil
 }
 
 func (q *Queue) startPruner() {

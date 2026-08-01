@@ -21,6 +21,7 @@ const (
 const (
 	problemCodeInternal           = "internal_error"
 	problemCodeValidation         = "validation_error"
+	problemCodePayloadTooLarge    = "payload_too_large"
 	problemCodeTopicNotFound      = "topic_not_found"
 	problemCodeResourceNotFound   = "resource_not_found"
 	problemCodeConflict           = "conflict"

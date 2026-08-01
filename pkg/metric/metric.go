@@ -166,7 +166,10 @@ func Register(registerer prometheus.Registerer) error {
 		if err := registerer.Register(collector); err != nil {
 			var alreadyRegistered prometheus.AlreadyRegisteredError
 			if errors.As(err, &alreadyRegistered) {
-				continue
+				if alreadyRegistered.ExistingCollector == collector {
+					continue
+				}
+				return err
 			}
 			return err
 		}
